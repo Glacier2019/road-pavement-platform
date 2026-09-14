@@ -1,9 +1,12 @@
 """契约一致性测试：HTTP 路由契约（openapi）↔ 服务实现（FastAPI 路由表）必须一致。
 
-运行（无需建环境）：
+运行（无需建环境、无需容器）：
   cd /data/cy/shujuku/scaffold
+  # 方式一：与服务的真实依赖一致（推荐）
   uv run --with fastapi==0.115.6 --with httpx --with "psycopg[binary,pool]==3.2.3" \
       python tests/contract/test_api_routes.py
+  # 方式二：本机已有 fastapi + httpx 时直接跑（psycopg 缺失会自动用桩，见 _ensure_pg_driver）
+  python3 tests/contract/test_api_routes.py
 
 为什么需要这条测试（这是骨架期真实踩过的坑）：
 Starlette/FastAPI **按注册顺序取第一个完全匹配的路由**。若把参数化路由
@@ -37,6 +40,43 @@ from starlette.routing import Match
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_PATH = ROOT / "services" / "api" / "app.py"
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.1.yaml"
+
+
+def _ensure_pg_driver():
+    """本测试不触库，但 services/api/app.py 在 import 期就会 import psycopg。
+
+    未安装 psycopg 时用最小桩顶上，好让这条测试在任何环境（无网络、无容器）都能跑——
+    「随时可跑」正是它存在的意义。用桩时会显式打印告警，不静默。
+    """
+    try:
+        import psycopg  # noqa: F401
+        import psycopg_pool  # noqa: F401
+        return
+    except ImportError:
+        pass
+    import types
+    if "psycopg" not in sys.modules:
+        psycopg = types.ModuleType("psycopg")
+        rows = types.ModuleType("psycopg.rows")
+        rows.dict_row = type("dict_row", (), {})
+        psycopg.rows = rows
+        sys.modules["psycopg"], sys.modules["psycopg.rows"] = psycopg, rows
+    if "psycopg_pool" not in sys.modules:
+        pool = types.ModuleType("psycopg_pool")
+
+        class ConnectionPool:  # 连接池在 import 期只被构造、不建立连接
+            def __init__(self, *a, **k): pass
+            def open(self): pass
+            def close(self): pass
+            def connection(self, *a, **k):
+                raise RuntimeError("本测试不应触达数据库（q 已被替换为假实现）")
+
+        pool.ConnectionPool = ConnectionPool
+        sys.modules["psycopg_pool"] = pool
+    print("⚠ 未检测到 psycopg/psycopg_pool，已用桩替代（本测试不触库，不影响结论）\n")
+
+
+_ensure_pg_driver()
 
 # 模板 → 具体值（用于把契约路径变成可请求的 URL）
 CONCRETE = {
