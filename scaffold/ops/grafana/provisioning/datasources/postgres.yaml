@@ -1,0 +1,25 @@
+# ============================================================================
+# Grafana 数据源（自动装载，无需手工点界面）
+# 密码用环境变量插值：compose 里 grafana 服务需注入 PG_PASSWORD
+# ============================================================================
+apiVersion: 1
+
+datasources:
+  - name: rp-pg
+    uid: rp-pg
+    type: postgres
+    access: proxy
+    url: pg:5432
+    database: road_pavement
+    user: rp
+    isDefault: true
+    editable: true
+    secureJsonData:
+      password: ${PG_PASSWORD}
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+      maxOpenConns: 4
+      maxIdleConns: 2
+      connMaxLifetime: 14400

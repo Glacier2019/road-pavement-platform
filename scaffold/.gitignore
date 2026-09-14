@@ -1,0 +1,9 @@
+# 骨架栈：不入库的东西
+.env
+*.env.local
+__pycache__/
+*.pyc
+.uv/
+.venv/
+uv.lock
+pgdata/

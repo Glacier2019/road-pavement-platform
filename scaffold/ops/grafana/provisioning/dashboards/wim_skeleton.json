@@ -1,0 +1,87 @@
+{
+  "uid": "rp-wim-skeleton",
+  "title": "骨架栈 · WIM 轴载链路",
+  "tags": ["骨架", "LO 域", "WIM"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "editable": true,
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "每小时过车数",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "rp-pg" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', pass_time) AS \"time\", count(*) AS \"过车数\" FROM wim_axle_record WHERE $__timeFilter(pass_time) GROUP BY 1 ORDER BY 1",
+          "rawQuery": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "每小时 ESAL 当量轴次",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "rp-pg" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', pass_time) AS \"time\", sum(esal) AS \"ESAL\" FROM wim_axle_record WHERE $__timeFilter(pass_time) GROUP BY 1 ORDER BY 1",
+          "rawQuery": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "超载车次占比（近 24h）",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "datasource": { "type": "postgres", "uid": "rp-pg" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE overload_flag) / NULLIF(count(*), 0), 2) AS \"超载率%\" FROM wim_axle_record WHERE $__timeFilter(pass_time)",
+          "rawQuery": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 2 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "最近 20 条过车记录",
+      "gridPos": { "h": 10, "w": 18, "x": 6, "y": 8 },
+      "datasource": { "type": "postgres", "uid": "rp-pg" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT r.pass_time AS \"过车时刻\", m.stake_text AS \"断面\", r.lane_no AS \"车道\", r.axle_type_code AS \"轴型\", r.axle_num AS \"轴数\", round(r.gross_weight_kg / 1000.0, 1) AS \"总重(t)\", r.speed_kmh AS \"车速\", r.overload_flag AS \"超载\", r.esal AS \"ESAL\", r.quality_code AS \"质量码\" FROM wim_axle_record r LEFT JOIN monitor_cross_section m ON m.id = r.cross_section_id ORDER BY r.pass_time DESC LIMIT 20",
+          "rawQuery": true
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto" } }, "overrides": [] }
+    }
+  ]
+}

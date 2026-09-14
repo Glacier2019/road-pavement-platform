@@ -1,0 +1,137 @@
+# ============================================================================
+# M6 统一数据出口（骨架版）契约摘要 v0.1
+# ----------------------------------------------------------------------------
+# 真源：服务运行后自动生成的 /openapi.json。本文件是它的人工摘要，用于评审与对接，
+#       不参与运行时校验——避免"文档与实现两套真源"。
+# 接入纪律：任何模块读数据必须经本服务；禁止跨模块直连数据库（见 MODULE-ONBOARDING.md）。
+# ============================================================================
+openapi: 3.1.0
+info:
+  title: M6 统一数据出口（骨架版）
+  version: 0.1.0
+  description: 对象查询 / 指标查询 / 动作提交三类接口。
+servers:
+  - url: http://localhost:8001        # 骨架栈映射端口（容器内 8000）
+
+paths:
+  /healthz:
+    get:
+      summary: 健康检查
+      responses:
+        "200":
+          description: 依赖状态
+
+  /v1/objects/{object_type}:
+    get:
+      summary: 按对象类型查档案对象
+      parameters:
+        - name: object_type
+          in: path
+          required: true
+          schema:
+            type: string
+          description: >-
+            白名单：road_line / road_section / structure_layer /
+            monitor_cross_section / sensor_install / sensor_channel
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        "200":
+          description: 返回 object_type、count 与 items 数组
+        "404":
+          description: 未登记的对象类型
+
+  /v1/objects/wim_axle:
+    get:
+      summary: WIM 过车记录（按时间 / 桩号 / 超载筛选）
+      parameters:
+        - name: from_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: stake
+          in: query
+          schema:
+            type: string
+          example: K4640+000
+        - name: overload_only
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 200
+      responses:
+        "200":
+          description: 返回 object_type、count 与 items 数组
+
+  /v1/objects/wim_axle/{record_id}:
+    get:
+      summary: 单条过车记录 + 轴明细（对象→链接展开，为本体"对象-链接"图预留形态）
+      parameters:
+        - name: record_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: 记录字段 + axles 明细数组
+        "404":
+          description: 记录不存在
+
+  /v1/metrics/wim_hourly:
+    get:
+      summary: 小时级过车量 / 超载数 / ESAL / 均速
+      parameters:
+        - name: day
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: stake
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 返回 passages、overloaded、overload_ratio、esal_sum 与 buckets 数组
+
+  /v1/actions/{action_name}:
+    post:
+      summary: 受治理动作提交（骨架期返回 501，P3 落地）
+      description: >-
+        计划动作（报告 10.4 ③）：create_maintenance_ticket / dispatch_alert /
+        confirm_event / mark_data_quality_issue / request_design_change。
+        每个动作必须实现：参数校验 → 权限校验 → 副作用（通知 / 工单）→ 写回源系统 → 审计留痕，
+        且默认在人工确认后才执行。
+      parameters:
+        - name: action_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "501":
+          description: 尚未实现（骨架期约定）
+
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string

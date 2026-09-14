@@ -1,0 +1,99 @@
+# ============================================================================
+# M2 接入契约 · MQTT 主题与载荷规范 v0.1
+# ----------------------------------------------------------------------------
+# 地位：与「DDL 表结构」「M6 OpenAPI」并列的三份平台契约之一。
+#       所有采集/接入模块只按本文件约定的主题与载荷上送；接入服务不识别任何
+#       厂家私有格式——私有格式一律在边缘侧（采集器/网关）适配成契约格式。
+# 变更：frozen=false 期间可直接改；P1 结束（2027-01）冻结为 true，此后须走
+#       「契约变更工单」（见 MODULE-ONBOARDING.md §4）。
+# 责任人：B（LO/RE 域，主笔）｜ A（设备侧、心跳与设备自管）｜ 导师评审冻结
+# ============================================================================
+version: v0.1
+frozen: false
+updated: "2026-09-14"
+
+broker:
+  product: EMQX 5.8
+  port: 1883                       # 容器内；宿主机映射见 .env MQTT_PORT
+  qos_default: 1
+  retain: false
+  clean_session: false             # 断线续传依赖持久会话
+  auth:                            # P1 落地：客户端认证 + 主题 ACL
+    mode: username_password        # 凭证存 PG 配置表，支持轮换/吊销
+    acl: "device 只能 publish 自己的 g228/{domain}/{自己的 site_id}/#"
+
+# ------------------------------------------------------------------ 主题结构
+# g228/{domain}/{site_id}/{kind}
+topic_pattern: "g228/{domain}/{site_id}/{kind}"
+levels:
+  domain:
+    desc: 数据域短码（对齐七域本体）
+    values:
+      lo: 交通荷载（WIM 轴载、交通量）
+      re: 结构响应（应变/振动/土压/挠度）
+      we: 环境气象（温湿度/风速/雨量）
+      su: 路面表面（IRI/病害/三维）
+      te: 试验检测（室内试验）
+  site_id:
+    desc: 采集点/断面短码，须与 monitor_cross_section 登记一致
+    pattern: "^[a-z0-9_]{2,16}$"
+    examples: [wim01, cs4635_710, cs4640_200, ws01]
+  kind:
+    desc: 消息类别
+    values: [axle, heartbeat, strain, accel, weather, frame, status]
+
+# ------------------------------------------------------------------ 消息信封
+# 所有载荷统一信封；payload 内部结构见各 schema
+envelope:
+  device_code:     {type: string, desc: "设备唯一标识 = sensor_install.serial_no（出厂编号）"}
+  ts:              {type: string, desc: "采集时刻 ISO8601 带时区，如 2026-09-14T13:45:02.123+08:00"}
+  seq:             {type: integer, desc: "设备侧单调递增序号，断点续传与去重依据"}
+  schema_version:  {type: string, desc: "载荷版本，如 wim_axle.v1"}
+  payload:         {type: object, desc: "见对应 schema 文件"}
+
+# ------------------------------------------------------------------ 主题登记表
+topics:
+  - topic: "g228/lo/{site_id}/axle"
+    rate: "秒级（每车 1 条，触发式）"
+    qos: 1
+    schema: contracts/messages/wim_axle.v1.schema.json
+    sink: "wim_axle_record + wim_axle_detail（PG 按月分区）"
+    owner: B
+    status: "P1 实现（骨架栈已跑通）"
+
+  - topic: "g228/lo/{site_id}/heartbeat"
+    rate: "30s 周期"
+    qos: 0
+    schema: contracts/messages/heartbeat.v1.schema.json      # P1 补
+    sink: "device_status（P1 新增运行状态表，心跳超时=离线）"
+    owner: A
+    status: "P1 实现"
+
+  - topic: "g228/re/{site_id}/strain"
+    rate: "连续高频 1k–128kHz（按 channel.storage_policy 稀释）"
+    qos: 1
+    schema: "待定（P2）"
+    sink: "IoTDB：root.road.g228.{stake}.{install_id}.{quantity}"
+    owner: B
+    status: "P2 实现（骨架栈不覆盖，避免提前引入时序库）"
+
+  - topic: "g228/we/{site_id}/weather"
+    rate: "分钟级"
+    qos: 0
+    schema: "待定（P2）"
+    sink: "IoTDB + traffic_daily_stat 聚合"
+    owner: A
+    status: "P2 实现"
+
+# ------------------------------------------------------------------ 落库路由
+# 接入服务（M2）只做三件事：信封校验 → 领域路由 → 写入目标 sink，失败进待检区
+routing:
+  - match: "g228/lo/+/axle"
+    handler: "wim_axle"
+    on_invalid: "data_quality_log(issue_code=contract_violation, action_code=mark)"
+    on_db_error: "data_quality_log(issue_code=insert_failed) + 原始报文落 MinIO 待检区"
+
+dedup:
+  key: "device_code + seq"
+  window: "24h"
+  note: "序内 seq 重复 → 忽略并计数（断线重传场景）"

@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/messages/wim_axle.v1.schema.json",
+  "title": "WIM 过车事件（g228/lo/{site_id}/axle）v1",
+  "description": "一条报文 = 一辆车的过车事件 + 其各轴重量明细。落库目标：wim_axle_record(+wim_axle_detail)。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["device_code", "ts", "seq", "schema_version", "payload"],
+  "properties": {
+    "device_code": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 64,
+      "description": "= sensor_install.serial_no，如 WIM01"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "采集时刻，ISO8601 带时区"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "设备侧单调递增序号"
+    },
+    "schema_version": {
+      "const": "wim_axle.v1"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lane_no",
+        "direction",
+        "axle_type_code",
+        "axle_num",
+        "speed_kmh",
+        "gross_weight_kg",
+        "axles"
+      ],
+      "properties": {
+        "lane_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "description": "车道序号（1=最外侧）"
+        },
+        "direction": {
+          "enum": ["up", "down"]
+        },
+        "axle_type_code": {
+          "enum": ["A2", "T3", "T4", "T5", "T6"],
+          "description": "轴型字典 dict_axle_type"
+        },
+        "axle_num": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 9
+        },
+        "speed_kmh": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 200,
+          "description": "车速 km/h（合同要求误差 ≤ ±1）"
+        },
+        "gross_weight_kg": {
+          "type": "number",
+          "minimum": 0,
+          "description": "总重 kg"
+        },
+        "overload_flag": {
+          "type": "boolean",
+          "description": "是否超载（可由边缘侧算，也可入库后由 M4 重算）"
+        },
+        "plate_no": {
+          "type": ["string", "null"],
+          "maxLength": 16
+        },
+        "axles": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "description": "各轴明细，长度须等于 axle_num",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["axle_seq", "weight_kg"],
+            "properties": {
+              "axle_seq": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "weight_kg": {
+                "type": "number",
+                "minimum": 0
+              },
+              "group_seq": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "group_weight_kg": {
+                "type": "number",
+                "minimum": 0
+              },
+              "dist_mm": {
+                "type": "number",
+                "minimum": 0,
+                "description": "与前轴轴距 mm（合同要求误差 ≤ ±100）"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "device_code": "WIM01",
+      "ts": "2026-09-14T13:45:02.123+08:00",
+      "seq": 10241,
+      "schema_version": "wim_axle.v1",
+      "payload": {
+        "lane_no": 2,
+        "direction": "down",
+        "axle_type_code": "T5",
+        "axle_num": 5,
+        "speed_kmh": 62.4,
+        "gross_weight_kg": 41500.0,
+        "overload_flag": false,
+        "plate_no": "闽A12345",
+        "axles": [
+          {"axle_seq": 1, "weight_kg": 6200.0, "dist_mm": 0},
+          {"axle_seq": 2, "weight_kg": 9800.0, "dist_mm": 3600},
+          {"axle_seq": 3, "weight_kg": 8500.0, "group_seq": 2, "dist_mm": 1350},
+          {"axle_seq": 4, "weight_kg": 8300.0, "group_seq": 2, "dist_mm": 1350},
+          {"axle_seq": 5, "weight_kg": 8700.0, "dist_mm": 6200}
+        ]
+      }
+    }
+  ]
+}

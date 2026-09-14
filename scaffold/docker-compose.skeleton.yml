@@ -1,0 +1,162 @@
+# ============================================================================
+# 路面性能数智化平台 · 骨架栈（Walking Skeleton）
+# ----------------------------------------------------------------------------
+# 目标：让「一条 WIM 过车报文」穿过 6 个容器跑通全链——这是所有模块的接入基线，
+#       之后每个模块都是往这条链上"长"，而不是各自为战最后集成不上。
+#
+#   模拟器 → EMQX(MQTT) → ingest(M2) → PostgreSQL 分区表 → api(M6) → Grafana
+#
+# 端口刻意避让本机已占用端口（5432 / 8000 / 3000 / 8080 已被其它服务占用）；
+# 若你的机器空闲，直接改 .env 即可。
+#
+# 用法：
+#   cd scaffold
+#   cp .env.example .env && vi .env          # 只需填两个密码
+#   docker compose -f docker-compose.skeleton.yml --env-file .env up -d --build
+#   docker compose -f docker-compose.skeleton.yml ps
+#   → 详见 README.md「第一步怎么走」
+# ============================================================================
+name: rp-skeleton
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # ---------------------------------------------------------------- 关系库（M1）
+  pg:
+    image: postgis/postgis:16-3.4
+    container_name: rp-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-rp}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?请在 .env 里设置 PG_PASSWORD}
+      POSTGRES_DB: ${PG_DB:-road_pavement}
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    ports:
+      - "${PG_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 首次初始化按文件名顺序执行（已存在的数据卷不会重复执行）：
+      #   10 → 设计冻结的 DDL v0.1（直接引用 output/ 下的唯一真源，不复制）
+      #   20 → 按月分区脚本（wim_axle_record）
+      #   90 → 骨架种子数据（路线/路段/断面/设备/通道/字典）
+      - ../output/路面性能数据库-DDL-v0.1.sql:/docker-entrypoint-initdb.d/10_ddl_v0.1.sql:ro
+      - ./sql/20_partitions.sql:/docker-entrypoint-initdb.d/20_partitions.sql:ro
+      - ./sql/90_seed_skeleton.sql:/docker-entrypoint-initdb.d/90_seed_skeleton.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-rp} -d ${PG_DB:-road_pavement}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: *default-logging
+
+  # ------------------------------------------------------------ 接入 Broker（M2）
+  mqtt:
+    image: emqx/emqx:5.8
+    container_name: rp-mqtt
+    restart: unless-stopped
+    environment:
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_USER:-admin}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_PASSWORD:-public}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MQTT_PORT:-18883}:1883"             # MQTT 接入
+      - "${MQTT_DASHBOARD_PORT:-18083}:18083"  # EMQX 控制台（admin/public）
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    logging: *default-logging
+
+  # ------------------------------------------------------------ 对象存储（M1）
+  minio:
+    image: minio/minio:latest
+    container_name: rp-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-rpadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?请在 .env 里设置 MINIO_PASSWORD}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MINIO_API_PORT:-9002}:9000"
+      - "${MINIO_CONSOLE_PORT:-9003}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+
+  # -------------------------------------------------------------- 监控（M1/M9）
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: rp-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      PG_PASSWORD: ${PG_PASSWORD}          # 供 provisioning 数据源插值
+      TZ: Asia/Shanghai
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      # 数据源/面板以代码方式提供（provisioning），不靠手工点选
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      pg:
+        condition: service_healthy
+    logging: *default-logging
+
+  # ------------------------------------------------------- 接入服务（M2，竖切 3）
+  ingest:
+    build: ./services/ingest
+    container_name: rp-ingest
+    restart: unless-stopped
+    environment:
+      PG_DSN: postgresql://${PG_USER:-rp}:${PG_PASSWORD}@pg:5432/${PG_DB:-road_pavement}
+      MQTT_HOST: mqtt
+      MQTT_PORT: 1883
+      MQTT_TOPIC: ${INGEST_TOPIC:-g228/+/+/axle}
+      BATCH_NO_PREFIX: skeleton
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${INGEST_PORT:-8010}:8000"   # /healthz /metrics /docs
+    depends_on:
+      pg:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    logging: *default-logging
+
+  # --------------------------------------------------------- API 服务（M6，竖切 5）
+  api:
+    build: ./services/api
+    container_name: rp-api
+    restart: unless-stopped
+    environment:
+      PG_DSN: postgresql://${PG_USER:-rp}:${PG_PASSWORD}@pg:5432/${PG_DB:-road_pavement}
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${API_PORT:-8001}:8000"      # /openapi.json 即平台服务契约
+    depends_on:
+      pg:
+        condition: service_healthy
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  miniodata:
+  grafanadata:
