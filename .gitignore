@@ -1,0 +1,23 @@
+# ============ 虚拟环境与缓存 ============
+.docxvenv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.uvcache/
+.pytest_cache/
+
+# ============ 临时产物 ============
+.tmp/
+.tmpstubs/
+.render/
+*.tmp
+
+# ============ 大体积来源资料与中间产物 ============
+# cailiao/ 是标准与设计文件的原始 PDF/DOCX（约 128 MB），属"输入"而非"产出"，
+# 且可用原始来源重新获取；bands/ 是制图流水线的中间裁剪图（约 17 MB，可由
+# cailiao/ + crop_bands.py 再生）。
+# 若要做全量镜像（连原始资料一起纳管），执行：
+#     git add -f cailiao bands && git commit -m "纳入原始资料"
+cailiao/
+bands/
