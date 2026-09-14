@@ -13,6 +13,14 @@ __pycache__/
 .render/
 *.tmp
 
+# ============ 图件流水线的本地依赖与 QA 中间件 ============
+# .pylibs/ 是 PyMuPDF 的本地安装目录（约 26 MB，供技能自带的 PDF 审计脚本使用），
+# .mplcache/ 是 matplotlib 字体缓存，.qarenders/ 是视觉 QA 用的印刷尺寸栅格与
+# 抽查裁切块——三者都可由 gen_arch_figures.py / qa_render.py 再生，不入库。
+.pylibs/
+.mplcache/
+.qarenders/
+
 # ============ 大体积来源资料与中间产物 ============
 # cailiao/ 是标准与设计文件的原始 PDF/DOCX（约 128 MB），属"输入"而非"产出"，
 # 且可用原始来源重新获取；bands/ 是制图流水线的中间裁剪图（约 17 MB，可由
