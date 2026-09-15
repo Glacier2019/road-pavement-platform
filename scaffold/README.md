@@ -64,20 +64,20 @@ scaffold/
 ├─ sql/
 │   ├─ 20_partitions.sql           # 分区维护函数 + 建到 2027-12 + 兜底分区
 │   └─ 90_seed_skeleton.sql        # 种子：路线/路段/结构层/断面/设备/通道/字典
-├─ packages/rpdao/                 # ★ M3 对象域数据访问层（平台唯一接触存储处）
-│   ├─ catalog.py                  #   7 域 ↔ 物理表目录（含自检）
-│   ├─ repo.py                     #   各域仓储（LO 域有专属语义化查询）
-│   ├─ pool.py                     #   连接池与执行原语（唯一 import psycopg 处）
-│   └─ README.md                   #   契约③ 真源
-├─ services/
-│   ├─ ingest/                     # M2 接入服务（models.py = 契约的代码侧实现）
-│   ├─ api/                        # M6 统一数据出口（含动作层占位 501；只经 M3 取数）
-│   ├─ governance/                 # M4 数据治理·真数据门（骨架，待 A 组实现）★P1 关键路径
-│   ├─ fusion/                     # M5 融合辨析引擎（骨架，待 C 组实现）
-│   ├─ semantic/                   # M7 语义中枢（骨架，责任人待指派）
-│   ├─ apps/                       # M8 应用层（骨架，待 D 组实现；报告列为 4 条容器化条目）
-│   ├─ console/                    # M9 平台管理台·集成面（骨架）
-│   └─ agent/                      # M10 Agent 执行引擎（骨架，二期）
+├─ modules/                       # ★ 每模块一目录：学生只在各自目录扩展，最后整合
+│   ├─ M2-ingest/                 # M2 接入服务（app.py/models.py/violations.py；契约①代码侧）
+│   ├─ M3-rpdao/rpdao/            # M3 对象域数据访问层（平台唯一接触存储处，契约③）
+│   │   ├─ catalog.py             #   7 域 ↔ 物理表目录（含自检）
+│   │   ├─ repo.py                #   各域仓储（LO 域有专属语义化查询）
+│   │   ├─ pool.py                #   连接池与执行原语（唯一 import psycopg 处）
+│   │   └─ write.py               #   写权守卫（表级写权 + write_txn）
+│   ├─ M4-governance/              # M4 数据治理·真数据门（骨架，待 A 组实现）★P1 关键路径
+│   ├─ M5-fusion/                  # M5 融合辨析引擎（骨架，待 C 组实现；⛔ 门禁：等 M4）
+│   ├─ M6-api/                     # M6 统一数据出口（含动作层占位 501；只经 M3 取数）
+│   ├─ M7-semantic/                # M7 语义中枢（骨架，责任人待指派）
+│   ├─ M8-apps/                    # M8 应用层（骨架，待 D 组实现）
+│   ├─ M9-console/                 # M9 平台管理台·集成面（骨架）
+│   └─ M10-agent/                  # M10 Agent 执行引擎（骨架，二期）
 ├─ simulator/wim_simulator.py      # 造数器（可注入"故意违约报文"）
 ├─ ops/grafana/provisioning/       # 数据源与面板以代码提供，不靠手工点选
 └─ tests/contract/                 # 契约一致性测试（Schema ↔ Pydantic 裁决必须一致）
@@ -92,7 +92,7 @@ scaffold/
 
 1. **报文格式**：`contracts/topics.yaml` + `messages/*.schema.json`　← 契约①（承诺方 M2）
 2. **表结构**：`DDL-v0.1.sql` + `数据字典`（设计冻结，改它要走工单）　← 契约②（承诺方 M1）
-3. **数据出口**：`packages/rpdao/README.md` + `catalog.py`　← 契约③（承诺方 M3）
+3. **数据出口**：`modules/M3-rpdao/rpdao/README.md` + `catalog.py`　← 契约③（承诺方 M3）
 4. **服务接口**：各服务的 `/openapi.json`（`contracts/openapi/*.yaml` 是人工摘要，仅供评审）　← 契约④（承诺方 M6）
 
 以上是**模块间**的契约。各模块还各自**产出一份对外契约**（M4 的规则/晋升、M5 的诊断三元组、
@@ -208,7 +208,7 @@ M7 本体/语义 ───────────┴─────────
 
 ## 8. 本骨架**不做**什么（边界）
 
-- **数据出口已收口到 M3**：`services/api`（M6）不再 import psycopg、不再持有连接池，
+- **数据出口已收口到 M3**：`modules/M6-api`（M6）不再 import psycopg、不再持有连接池，
   由 `tests/contract/test_dao_contract.py` 用 AST 断言钉死；**但 M2 的写入路径仍直连库**
   （它是"接入/落库"这个动作本身），写入收口是后续议题；
 - 不做治理：质量门、真值标记（truth_flag 晋升）留给 M4；

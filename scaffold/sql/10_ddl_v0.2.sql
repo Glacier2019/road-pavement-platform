@@ -522,7 +522,7 @@ COMMENT ON TABLE data_import_batch IS '数据接入批次（MQTT 上传溯源；
 -- G5. 数据质量规则库（M4 真数据门：规则定义 + 标定状态）  —— v0.2 新增
 --
 -- 为什么需要这张表：M4 的核心动作是「用真实数据标定阈值」，而在 v0.1 里规则只存在于
--- 配置文件 services/governance/config/quality_rules.yaml —— 库里没有一条记录，于是
+-- 配置文件 modules/M4-governance/config/quality_rules.yaml —— 库里没有一条记录，于是
 -- 「这条规则标定过没有、谁标的、依据是什么」无法审计，calibrated 只是个 YAML 布尔值。
 --
 -- ★ 关键约束 ck_qr_code_layer：规则码的前缀必须等于 layer 字段。

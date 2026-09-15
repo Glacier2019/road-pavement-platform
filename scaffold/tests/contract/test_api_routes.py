@@ -38,20 +38,20 @@ from fastapi.testclient import TestClient
 from starlette.routing import Match
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-APP_PATH = ROOT / "services" / "api" / "app.py"
+APP_PATH = ROOT / "modules" / "M6-api" / "app.py"
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.1.yaml"
 
 # M3（rpdao）是 api 的依赖。本测试直接从源码路径加载 app.py，故需手动把
-# packages/ 放进 sys.path —— **必须在 import rpdao 之前**（容器里由
-# PYTHONPATH=/app 负责，见 services/api/Dockerfile）。
-if str(ROOT / "packages") not in sys.path:
-    sys.path.insert(0, str(ROOT / "packages"))
+# modules/M3-rpdao/ 放进 sys.path —— **必须在 import rpdao 之前**（容器里由
+# PYTHONPATH=/app 负责，见 modules/M6-api/Dockerfile）。
+if str(ROOT / "modules" / "M3-rpdao") not in sys.path:
+    sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
 
 from rpdao import NotFound  # noqa: E402  （须在上面 sys.path 就位之后）
 
 
 def _ensure_pg_driver():
-    """本测试不触库，但 services/api/app.py 在 import 期就会 import psycopg。
+    """本测试不触库，但 modules/M6-api/app.py 在 import 期就会 import psycopg。
 
     未安装 psycopg 时用最小桩顶上，好让这条测试在任何环境（无网络、无容器）都能跑——
     「随时可跑」正是它存在的意义。用桩时会显式打印告警，不静默。

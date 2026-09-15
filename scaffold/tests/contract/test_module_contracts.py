@@ -181,8 +181,8 @@ def main() -> int:
     print("二、真实配置文件必须符合契约（配置与契约脱钩是这类项目最常见的腐烂方式）")
     print("=" * 100)
     pairs = [
-        ("M9 登记", "services/console/config/modules.yaml", R_SCH),
-        ("M4 规则", "services/governance/config/quality_rules.yaml",
+        ("M9 登记", "modules/M9-console/config/modules.yaml", R_SCH),
+        ("M4 规则", "modules/M4-governance/config/quality_rules.yaml",
          load_schema("governance/quality_rule.v0.1.schema.json")),
     ]
     for label, rel, sch in pairs:
@@ -198,7 +198,7 @@ def main() -> int:
             fails.append(f"配置不符合契约/{rel}")
 
     # 重点：登记表里的 owner=待指派 必须是真的可见问题，不能悄悄溜过去
-    reg = yaml.safe_load((ROOT / "services/console/config/modules.yaml").read_text(encoding="utf-8"))
+    reg = yaml.safe_load((ROOT / "modules/M9-console/config/modules.yaml").read_text(encoding="utf-8"))
     unassigned = [m["module"] for m in reg["modules"] if m["owner"] == "待指派"]
     print(f"\n  登记表中未指派责任人的模块：{unassigned or '无'}")
     if unassigned:

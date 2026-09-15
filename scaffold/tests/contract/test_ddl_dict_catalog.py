@@ -14,7 +14,7 @@
     ⚠ 这两份 2026-09-15 从 ``output/`` 搬来 ``scaffold/sql/``：它们**不是交付物
       而是契约**——compose 要挂载 DDL 建库、本测试要读它比对，必须随代码走。
       其余 ``output/``（报告、图件）与 ``docpipe/`` 已移出代码仓库。
-    3. ``scaffold/packages/rpdao/catalog.py``        ← 代码用的真源
+    3. ``scaffold/modules/M3-rpdao/catalog.py``        ← 代码用的真源
 
 三处各自都是"真源"，于是**天生有互相打脸的风险**：改了 DDL 忘了改字典、
 加了表没登记进 catalog、或者图上还写着旧表数。历史上本项目的图件就出现过
@@ -33,8 +33,8 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-if str(ROOT / "packages") not in sys.path:
-    sys.path.insert(0, str(ROOT / "packages"))
+if str(ROOT / "modules" / "M3-rpdao") not in sys.path:
+    sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
 
 DDL_PATH = ROOT / "sql" / "10_ddl_v0.2.sql"
 DICT_PATH = ROOT / "sql" / "数据字典-v0.2.md"
@@ -125,7 +125,7 @@ def _load_catalog():
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "_rpdao_catalog", ROOT / "packages" / "rpdao" / "catalog.py")
+        "_rpdao_catalog", ROOT / "modules" / "M3-rpdao" / "rpdao" / "catalog.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

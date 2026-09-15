@@ -1,0 +1,141 @@
+# M4 数据治理 · 真数据门 —— 质量规则配置
+#
+# ⚠️ 本文件是**规则的定义**，里面的阈值 (threshold/thresholds) 全部未经真实数据标定。
+#    每条规则的 `calibrated: false` 就是这个意思。A 组拿到真实数据后：
+#      1. 用真实数据跑一遍，统计每条规则的触发率
+#      2. 触发率 0% 的规则 → 要么阈值错了、要么数据没覆盖，必须查清是哪种
+#      3. 标定完成后把对应规则改成 `calibrated: true`，并在 remark 里写明依据
+#    标定前的规则**不得用于生产判定**（app.py 会在规则为空时返回 503 而不是"通过"）。
+#
+# 为什么规则**定义**仍放配置：规则的条目少、变更是整体性的，配置外置更合适，
+# 也符合"五件套第 3 件：配置外置"。
+#
+# ⚠ 2026-09-15 口径更新（契约变更工单 #1 已实施，DDL → v0.2／物理 32 表）：
+#   `quality_rule` 表**已经建好了**（DDL v0.2 G5）。现在的分工是：
+#       YAML ＝ 规则的**种子/定义**（人读、可评审、进版本控制）
+#       表   ＝ 规则**标定状态的权威来源**（可审计"谁在何时依什么标的"）
+#   即 **YAML 是种子，表是权威**。标定完成后要把结果写进表
+#   （calibrated / calibrated_at / calibrated_by / evidence 四字段）。
+#   库约束 ck_qr_calibrated 会拒绝"标定态为真却没有标定时间"的记录——
+#   这是在强制"标定过"必须能追到人和时间，而不是一个布尔值。
+#
+# 口径来源：MODULE-ONBOARDING.md §4「M4 质量治理（缺失/越界/离群三件套）」；
+#          架构与模块说明 §2.3「缺 GE 套件与 Airflow DAG」（GE = Great Expectations）。
+
+version: "0.1-skeleton"
+updated: "2026-09-15"
+# 整体标定状态：骨架期为 false。app.py 据此决定校验接口返回 503 还是结果。
+calibrated: false
+
+# 规则分组＝GE 的三类 suite + 跨字段一致性（跨字段那部分 M2 的 Pydantic 已实现，
+# M4 要做的是**在批次层面复核**，因为单条报文合法不代表整批合理）
+rules:
+  # ---------------------------------------------------------------- 缺失
+  - code: missing.required_ratio
+    suite: 缺失
+    target: "wim_axle_record"
+    field: "device_code,ts,lane_no,axle_type_code"
+    rule: "非空率 ≥ 阈值"
+    threshold: 0.98
+    calibrated: false
+    remark: "阈值待定：真实设备的断流/重启会漏字段，需先看真实非空率分布"
+
+  - code: missing.plate_no_ratio
+    suite: 缺失
+    target: "wim_axle_record"
+    field: "plate_no"
+    rule: "非空率 ≥ 阈值（车牌可空，阈值应显著低于必填字段）"
+    threshold: 0.30
+    calibrated: false
+    remark: "阈值待定：车牌识别率与相机/光照强相关，必须用真实数据定"
+
+  # ---------------------------------------------------------------- 越界
+  - code: range.speed_kmh
+    suite: 越界
+    target: "wim_axle_record"
+    field: "speed_kmh"
+    rule: "0 ≤ 值 ≤ 阈值"
+    threshold: 200.0
+    calibrated: false
+    remark: "沿用契约①的 Schema 上限 200，属**契约值**而非标定值；真实上限按路段限速定"
+
+  - code: range.gross_weight_kg
+    suite: 越界
+    target: "wim_axle_record"
+    field: "gross_weight_kg"
+    rule: "0 < 值 ≤ 按轴型的限值（GROSS_LIMIT_KG）"
+    threshold: null
+    calibrated: false
+    remark: "限值按轴型取自 ingest/models.py 的 GROSS_LIMIT_KG，需与治超标准核对"
+
+  - code: range.axle_weight_kg
+    suite: 越界
+    target: "wim_axle_detail"
+    field: "weight_kg"
+    rule: "0 < 值 ≤ 阈值"
+    threshold: 25000.0
+    calibrated: false
+    remark: "阈值待定：单轴限值按轴型不同，骨架期用的是粗值"
+
+  # ---------------------------------------------------------------- 离群
+  - code: outlier.gross_weight_3sigma
+    suite: 离群
+    target: "wim_axle_record"
+    field: "gross_weight_kg"
+    rule: "按 (device_code, axle_type_code) 分组，|值-组内均值| ≤ k×标准差"
+    threshold: 3.0
+    calibrated: false
+    remark: "阈值待定：真实轴载分布是混和的（空载/满载双峰），3σ 假设正态可能不成立"
+
+  - code: outlier.dist_mm_negative
+    suite: 离群
+    target: "wim_axle_detail"
+    field: "dist_mm"
+    rule: "值 ≥ 0 且 ≤ 阈值"
+    threshold: 20000.0
+    calibrated: false
+    remark: "阈值待定：轴距上限按车型，骨架期用粗值"
+
+  # ---------------------------------------------------------------- 跨字段
+  - code: cross.axle_num_vs_axles
+    suite: 跨字段
+    target: "payload"
+    field: "axle_num / axles"
+    rule: "len(axles) == axle_num"
+    threshold: null
+    calibrated: true
+    remark: >-
+      **已实现**：见 modules/M2-ingest/models.py 的 _cross_check。
+      注意造数器的 axle_num 分支是自我抵消的（把 axle_num 加一后又补了一个轴明细，
+      两者重新相等），所以这条规则在 E2E 统计里从未被触发过——不代表规则无效。
+      契约测试 tests/contract/test_wim_contract.py 第 85 行覆盖了它。
+
+  - code: cross.gross_vs_axle_sum
+    suite: 跨字段
+    target: "payload"
+    field: "gross_weight_kg / axles[].weight_kg"
+    rule: "|总重 - 各轴重之和| / 之和 ≤ 阈值"
+    threshold: 0.02
+    calibrated: true
+    remark: "**已实现**：见 modules/M2-ingest/models.py 的 _cross_check（阈值 2%）。"
+
+  # ---------------------------------------------------------------- 批次层
+  - code: batch.mileage_continuity
+    suite: 批次层
+    target: "data_import_batch"
+    field: "—"
+    rule: "相邻批次的时间区间无空洞、无重叠"
+    threshold: null
+    calibrated: false
+    remark: "待实现：需要真实批次的到达节奏才能定'空洞'的判定口径"
+
+  - code: batch.coverage_ratio
+    suite: 批次层
+    target: "data_import_batch"
+    field: "raw_rows / valid_rows"
+    rule: "有效行占比 ≥ 阈值"
+    threshold: 0.95
+    calibrated: false
+    remark: >-
+      阈值待定：骨架期实测 194/220 = 88.2%（合成数据），真实值待测。
+      注意这是**合成**数据的比例，不能当作真实覆盖率基线。

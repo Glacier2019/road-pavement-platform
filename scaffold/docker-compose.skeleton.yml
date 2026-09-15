@@ -152,11 +152,11 @@ services:
 
   # ------------------------------------------------------- 接入服务（M2，竖切 3）
   ingest:
-    # 契约③写入收口后，M2 依赖 M3（packages/rpdao），故构建上下文抬到 scaffold 根，
-    # 否则 Dockerfile 里 COPY packages/rpdao 会越出上下文而失败（与 api 同理）。
+    # 契约③写入收口后，M2 依赖 M3（modules/M3-rpdao），故构建上下文抬到 scaffold 根，
+    # 否则 Dockerfile 里 COPY modules/M3-rpdao 会越出上下文而失败（与 api 同理）。
     build:
       context: .
-      dockerfile: services/ingest/Dockerfile
+      dockerfile: modules/M2-ingest/Dockerfile
     container_name: rp-ingest
     restart: unless-stopped
     environment:
@@ -188,11 +188,11 @@ services:
 
   # --------------------------------------------------------- API 服务（M6，竖切 5）
   api:
-    # M3（packages/rpdao）是 api 的依赖，故构建上下文必须抬到 scaffold 根，
-    # 否则 Dockerfile 里 COPY packages/rpdao 会越出上下文而失败。
+    # M3（modules/M3-rpdao）是 api 的依赖，故构建上下文必须抬到 scaffold 根，
+    # 否则 Dockerfile 里 COPY modules/M3-rpdao 会越出上下文而失败。
     build:
       context: .
-      dockerfile: services/api/Dockerfile
+      dockerfile: modules/M6-api/Dockerfile
     container_name: rp-api
     restart: unless-stopped
     environment:
@@ -225,7 +225,7 @@ services:
   # ==========================================================================
 
   governance:                       # M4 数据治理 · 真数据门  ← P1 关键路径
-    build: ./services/governance
+    build: ./modules/M4-governance
     container_name: rp-governance
     profiles: ["m4"]
     restart: unless-stopped
@@ -249,7 +249,7 @@ services:
     logging: *default-logging
 
   fusion:                           # M5 融合辨析引擎  ← 门禁：等 M4
-    build: ./services/fusion
+    build: ./modules/M5-fusion
     container_name: rp-fusion
     profiles: ["m5"]
     restart: unless-stopped
@@ -272,7 +272,7 @@ services:
     logging: *default-logging
 
   semantic:                         # M7 语义中枢  ← 责任人待指派
-    build: ./services/semantic
+    build: ./modules/M7-semantic
     container_name: rp-semantic
     profiles: ["m7"]
     restart: unless-stopped
@@ -295,7 +295,7 @@ services:
     logging: *default-logging
 
   apps:                             # M8 应用层（4 条容器化条目先合一）
-    build: ./services/apps
+    build: ./modules/M8-apps
     container_name: rp-apps
     profiles: ["m8"]
     restart: unless-stopped
@@ -318,7 +318,7 @@ services:
     logging: *default-logging
 
   console:                          # M9 平台管理台（集成面）
-    build: ./services/console
+    build: ./modules/M9-console
     container_name: rp-console
     profiles: ["m9"]
     restart: unless-stopped
@@ -339,7 +339,7 @@ services:
     logging: *default-logging
 
   agent:                            # M10 Agent 执行引擎（二期，本阶段不排期）
-    build: ./services/agent
+    build: ./modules/M10-agent
     container_name: rp-agent
     profiles: ["m10"]
     restart: unless-stopped

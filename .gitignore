@@ -50,3 +50,10 @@ grafanadata/
 # 因为 compose 要挂载它建库、契约测试要读它比对，它们不是"成果"而是"契约"。
 output/
 docpipe/
+
+# work/ 只提交各目录的 README（说明"这个目录干嘛的"），
+# 里面学生的实验脚本/造数记录/草稿全部忽略，避免合并冲突。
+scaffold/work/*
+!scaffold/work/README.md
+!scaffold/work/*/
+!scaffold/work/*/README.md

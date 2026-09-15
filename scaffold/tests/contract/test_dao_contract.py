@@ -11,7 +11,7 @@
   2) 目录 ↔ DDL 双向对齐：DDL 里每张表都在目录中登记，反之亦然；
   3) 越域/越界取数被拒：GE 域仓储不能查 LO 域的表，没登记的表一律拒绝，
      非法标识符不得拼进 SQL（防注入）；
-  4) M6 不直连存储：services/api/app.py 里不得出现 psycopg / ConnectionPool；
+  4) M6 不直连存储：modules/M6-api/app.py 里不得出现 psycopg / ConnectionPool；
   5) SQL 参数类型回归：可选筛选项必须显式 cast。
 
 第 5 条是**骨架期真实踩坑的回归保护**：`WHERE (%(x)s IS NULL OR ...)` 在参数传 NULL 时
@@ -27,8 +27,8 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-if str(ROOT / "packages") not in sys.path:
-    sys.path.insert(0, str(ROOT / "packages"))
+if str(ROOT / "modules" / "M3-rpdao") not in sys.path:
+    sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
 
 try:
     import psycopg  # noqa: F401
@@ -57,7 +57,7 @@ from rpdao.pool import quote_ident  # noqa: E402
 from rpdao import repo as repo_mod  # noqa: E402
 
 DDL_PATH = ROOT.parent / "output" / "路面性能数据库-DDL-v0.2.sql"
-API_APP = ROOT / "services" / "api" / "app.py"
+API_APP = ROOT / "modules" / "M6-api" / "app.py"
 
 
 def ddl_tables() -> list[str]:

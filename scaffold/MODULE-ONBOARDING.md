@@ -23,7 +23,7 @@
 |---|---|---|---|---|---|
 | ① | **报文格式** | `contracts/topics.yaml`<br>`contracts/messages/*.schema.json` | 主题命名、信封字段、载荷 schema | B（LO/RE 域） | 工单 + 版本号递增（v1→v2） |
 | ② | **表结构** | `scaffold/sql/10_ddl_v0.2.sql` | **32 表**（7 域逻辑视图 25 表）、字段、约束、分区 | A（数据底座） | 工单 + 评审，禁止就地改 |
-| ③ | **数据出口（DAO）** | `scaffold/packages/rpdao/`<br>`catalog.py`、`repo.py`、`README.md` | 7 域仓储接口、越域拦截、连接与执行原语 | A（数据底座） | 工单 + 兼容性声明；**平台内唯一接触存储处** |
+| ③ | **数据出口（DAO）** | `scaffold/modules/M3-rpdao/`<br>`catalog.py`、`repo.py`、`README.md` | 7 域仓储接口、越域拦截、连接与执行原语 | A（数据底座） | 工单 + 兼容性声明；**平台内唯一接触存储处** |
 | ④ | **服务接口** | 各服务的 `/openapi.json`<br>（`contracts/openapi/*.yaml` 为人工摘要） | 对象查询 / 指标 / 动作 | D（出口服务） | 工单 + 兼容性声明 |
 
 > **契约③ 是 M3 落地后补入的**。早期文档只列三份（无 DAO），但 DAO 现在是
@@ -41,8 +41,8 @@
 
 | # | 交付物 | 判据 | 骨架栈的样例 |
 |---|---|---|---|
-| 1 | 容器定义 | 有 Dockerfile，且在 compose 里有服务段（含 `healthcheck`） | `services/ingest/Dockerfile` |
-| 2 | 健康与指标 | `GET /healthz` 逐项报依赖状态；`GET /metrics` 出 Prometheus 文本 | `services/ingest/app.py` `/healthz`、`/metrics` |
+| 1 | 容器定义 | 有 Dockerfile，且在 compose 里有服务段（含 `healthcheck`） | `modules/M2-ingest/Dockerfile` |
+| 2 | 健康与指标 | `GET /healthz` 逐项报依赖状态；`GET /metrics` 出 Prometheus 文本 | `modules/M2-ingest/app.py` `/healthz`、`/metrics` |
 | 3 | 配置外置 | 连接串/密钥/端口**全部**来自环境变量或 `config/*.yaml`，代码里零硬编码 | `.env.example` + compose `environment:` |
 | 4 | 契约文件 | 本模块消费/产出的 schema、openapi 提交到 `contracts/`，并在本模块 README 登记 | `contracts/messages/wim_axle.v1.schema.json` |
 | 5 | 契约测试 | `tests/contract/test_<模块>.py` 可离线跑通，覆盖"应通过/应拒绝"两侧 | `tests/contract/test_wim_contract.py` |

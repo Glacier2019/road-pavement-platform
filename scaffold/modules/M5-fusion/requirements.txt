@@ -1,0 +1,6 @@
+# M5 融合辨析引擎 —— 运行依赖
+# 版本与 modules/M2-ingest 保持一致：版本不同会让"契约测试通过"这句话失去意义。
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+psycopg[binary,pool]==3.2.3
+PyYAML==6.0.2

@@ -24,12 +24,12 @@
 
 | 模块 | 服务目录 | profile | 宿主端口 | 主责 | 阶段 | 特殊约束 |
 |---|---|---|---|---|---|---|
-| **M4** 真数据门 | `services/governance/` | `m4` | 8020 | A 组 | P1 ★关键路径 | 阈值必须真实数据标定 |
-| **M5** 融合辨析 | `services/fusion/` | `m5` | 8021 | C 组 | P2 | 门禁：等 M4 |
-| **M7** 语义中枢 | `services/semantic/` | `m7` | 8022 | **待指派** | P4 | 映射须人工确认 |
-| **M8** 应用层 | `services/apps/` | `m8` | 8023 | D 组 | P3 | 动作须人工确认 |
-| **M9** 管理台 | `services/console/` | `m9` | 8024 | D 组 | P3·P4 | 天然排最后 |
-| **M10** Agent | `services/agent/` | `m10` | 8025 | D 组 | 二期 | 仅冻结接口形状 |
+| **M4** 真数据门 | `modules/M4-governance/` | `m4` | 8020 | A 组 | P1 ★关键路径 | 阈值必须真实数据标定 |
+| **M5** 融合辨析 | `modules/M5-fusion/` | `m5` | 8021 | C 组 | P2 | 门禁：等 M4 |
+| **M7** 语义中枢 | `modules/M7-semantic/` | `m7` | 8022 | **待指派** | P4 | 映射须人工确认 |
+| **M8** 应用层 | `modules/M8-apps/` | `m8` | 8023 | D 组 | P3 | 动作须人工确认 |
+| **M9** 管理台 | `modules/M9-console/` | `m9` | 8024 | D 组 | P3·P4 | 天然排最后 |
+| **M10** Agent | `modules/M10-agent/` | `m10` | 8025 | D 组 | 二期 | 仅冻结接口形状 |
 
 ---
 
@@ -87,7 +87,7 @@ docker exec rp-governance python3 -c \
 |---|---|---|---|
 | ① | 报文格式 | `contracts/topics.yaml`、`contracts/messages/*.schema.json` | B 组 |
 | ② | 表结构 | `scaffold/sql/10_ddl_v0.2.sql` | A 组 |
-| ③ | DAO 接口 | `scaffold/packages/rpdao/` | A 组 |
+| ③ | DAO 接口 | `scaffold/modules/M3-rpdao/` | A 组 |
 | ④ | 服务接口 | `contracts/openapi/*.yaml` | D 组 |
 
 本次新增的模块产出契约（同样是契约，同样走工单）：
@@ -108,13 +108,13 @@ docker exec rp-governance python3 -c \
 
 ## 五、要新建一个模块怎么办
 
-照抄任一骨架（建议抄 `services/governance/`，它最完整），六件事：
+照抄任一骨架（建议抄 `modules/M4-governance/`，它最完整），六件事：
 
 1. `services/<name>/` 下建 `app.py`、`Dockerfile`、`requirements.txt`、`config/`、`README.md`
 2. compose 里加服务段，**带自己的 profile**
 3. 契约提交到 `contracts/<模块>/`
 4. `tests/contract/` 里加测试，并在 `run_contract_tests.sh` 的 `TESTS` 数组登记
-5. `services/console/config/modules.yaml` 里加一条登记（M9 就能看到它）
+5. `modules/M9-console/config/modules.yaml` 里加一条登记（M9 就能看到它）
 6. 跑 `./run_contract_tests.sh` 全绿再提交
 
 ---
@@ -144,7 +144,7 @@ if kind == "axle_num":             # 想造「轴数与明细长度不符」
    `_assert_injected()`，确认「想注入的违约确实注入了，且**只**注入这一种」。
 2. `tests/contract/test_simulator_contract.py`：断言从「被拒」下沉到**「拒因正确」**，
    逐类核对 300 条样本的拒因分布。
-3. `services/ingest/violations.py`（新增）：接入服务原先把所有违约记成同一个
+3. `modules/M2-ingest/violations.py`（新增）：接入服务原先把所有违约记成同一个
    `issue_code='contract_violation'`，3 类违约在日志里无法区分。改为精确分类，
    码与 M4 的规则集共用命名空间；契约测试 `test_violation_codes.py` 盯着跨层命名一致。
    实测端到端 1:1 吻合：发 5 超速/6 总重/4 轴数 → 库里精确落成
@@ -207,7 +207,7 @@ with dao.write_txn(writer="M2") as tx:
 dao.execute_write("data_import_batch", UPSERT_BATCH, {...}, writer="M2")
 ```
 
-写权对照表在 `packages/rpdao/catalog.py` 的 `TABLE_OWNER`（21 张可写 / 11 张只读）。
+写权对照表在 `modules/M3-rpdao/catalog.py` 的 `TABLE_OWNER`（21 张可写 / 11 张只读）。
 **不在表里的表一律拒写**——这是刻意的：默认允许会让每张新表都自动多一个无人看守的写入口。
 
 ### 8.3 三条纪律

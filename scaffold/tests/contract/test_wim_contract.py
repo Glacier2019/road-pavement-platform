@@ -25,7 +25,7 @@ from pydantic import ValidationError
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMA_PATH = ROOT / "contracts" / "messages" / "wim_axle.v1.schema.json"
-MODELS_PATH = ROOT / "services" / "ingest" / "models.py"
+MODELS_PATH = ROOT / "modules" / "M2-ingest" / "models.py"
 
 
 def load_models():

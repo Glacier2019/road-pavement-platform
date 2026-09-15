@@ -31,7 +31,7 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RULE_SCHEMA_PATH = ROOT / "contracts" / "governance" / "quality_rule.v0.1.schema.json"
 PROMO_SCHEMA_PATH = ROOT / "contracts" / "governance" / "promotion.v0.1.schema.json"
-RULES_YAML_PATH = ROOT / "services" / "governance" / "config" / "quality_rules.yaml"
+RULES_YAML_PATH = ROOT / "modules" / "M4-governance" / "config" / "quality_rules.yaml"
 
 RULE_SCHEMA = json.loads(RULE_SCHEMA_PATH.read_text(encoding="utf-8"))
 PROMO_SCHEMA = json.loads(PROMO_SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -183,7 +183,7 @@ def main() -> int:
     else:
         raw = yaml.safe_load(RULES_YAML_PATH.read_text(encoding="utf-8"))
         ok = accepts(raw, RULE_SCHEMA)
-        print(f"{'services/governance/config/quality_rules.yaml':<56}{'True':<8}{str(ok):<8}"
+        print(f"{'modules/M4-governance/config/quality_rules.yaml':<56}{'True':<8}{str(ok):<8}"
               f"{'✓' if ok else '✗ 与契约不符'}")
         if not ok:
             fails.append("配置不符合契约")

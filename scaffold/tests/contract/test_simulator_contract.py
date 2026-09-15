@@ -31,7 +31,7 @@ def load(path: pathlib.Path, name: str):
 
 
 SCHEMA = json.loads((ROOT / "contracts/messages/wim_axle.v1.schema.json").read_text(encoding="utf-8"))
-MODELS = load(ROOT / "services/ingest/models.py", "ingest_models")
+MODELS = load(ROOT / "modules/M2-ingest/models.py", "ingest_models")
 SIM = load(ROOT / "simulator/wim_simulator.py", "wim_simulator")
 
 

@@ -25,7 +25,7 @@ import yaml
 from pydantic import ValidationError
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "services/ingest"))
+sys.path.insert(0, str(ROOT / "modules/M2-ingest"))
 
 
 def load(path: pathlib.Path, name: str):
@@ -36,8 +36,8 @@ def load(path: pathlib.Path, name: str):
     return mod
 
 
-MODELS = load(ROOT / "services/ingest/models.py", "ingest_models")
-VIOL = load(ROOT / "services/ingest/violations.py", "ingest_violations")
+MODELS = load(ROOT / "modules/M2-ingest/models.py", "ingest_models")
+VIOL = load(ROOT / "modules/M2-ingest/violations.py", "ingest_violations")
 SIM = load(ROOT / "simulator/wim_simulator.py", "wim_simulator")
 
 BASE = {
@@ -146,7 +146,7 @@ def main() -> int:
     print("三、跨层命名一致：M2（接入时点）与 M4（批次时点）的同名规则必须字面相同")
     print("=" * 92)
     rules = yaml.safe_load(
-        (ROOT / "services/governance/config/quality_rules.yaml").read_text(encoding="utf-8"))
+        (ROOT / "modules/M4-governance/config/quality_rules.yaml").read_text(encoding="utf-8"))
     m4_codes = {r["code"] for r in rules["rules"]}
     # M2 能产出的全部码
     m2_codes = {c for _, _, c in SHAPE_CASES} | codes

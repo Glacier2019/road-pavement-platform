@@ -27,8 +27,8 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-if str(ROOT / "packages") not in sys.path:
-    sys.path.insert(0, str(ROOT / "packages"))
+if str(ROOT / "modules" / "M3-rpdao") not in sys.path:
+    sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
 
 # rpdao.pool 需要 psycopg；本测试不触库，缺依赖时装最小桩。
 try:
@@ -252,7 +252,7 @@ def main() -> int:
 
     # ---------------------------------------------------------------- 9) M2 不得绕过契约③
     print("\n=== 9) M2（ingest）不得绕过契约③ —— 静态断言 ===")
-    src = ROOT / "services" / "ingest" / "app.py"
+    src = ROOT / "modules" / "M2-ingest" / "app.py"
     if src.exists():
         code = src.read_text(encoding="utf-8")
         bad = {
