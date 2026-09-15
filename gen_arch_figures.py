@@ -520,6 +520,20 @@ XBANDS = [
 ]
 
 
+# 代码落地状态（口径：按 2026-09-15 实跑证据，不按"目录里有没有文件"）
+#   done    = 有实现代码，且端到端实跑验证过
+#   partial = 部分落地（括号里写清哪部分没落地）
+# 改这里即可重出图 D 上的绿框标注，不需要动布局代码。
+IMPL_MODULES = {
+    "接入层":            ("done",    "ingest 实跑验证"),
+    "双库存储层":        ("partial", "M1 实跑验证／M3 DAO 未抽出"),
+    "服务层 · 指标语义": ("partial", "查询路由实跑验证／动作层 501 占位"),
+}
+IMPL_SLICE = ("感知源", "接入层", "双库存储层", "治理层 · 真数据门",
+              "服务层 · 指标语义")
+IMPL_SLICE_COL = "LO"          # 端到端跑通的那一列
+
+
 def tint(hexcolor, a):
     """把颜色按比例 a 混入白色 —— 作单元格浅底，保住文字对比度。"""
     r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
@@ -543,13 +557,13 @@ def wrap(s, width, size=S_SMALL):
 
 def build_fig4():
     """总体架构 × 模块接口 × 7 域数据流动（一页总图）。"""
-    fig, ax, w, h = new_canvas(5.75)
+    fig, ax, w, h = new_canvas(6.05)
     fig_title(ax, w, h,
               "图 D ｜ 总体架构 · 模块接口 · 7 大对象域数据流动",
               "纵轴＝流水线阶段与模块落位（▲＝层间接口契约）；横轴＝7 大对象域泳道。"
               "两侧色系分离：行色＝模块「作用」，列色＝对象域")
 
-    sw = 62.0                                   # 左栏：作用色条＋模块 chip＋作用名
+    sw = 66.0                                   # 左栏：作用色条＋模块 chip＋作用名
     x_grid = 3.0 + sw                     # 左栏文字最右到 ~62，须留间隙
     x_loop = w - 32.0                           # 右侧闭环通道（两条虚线，分开排）
     gw = x_loop - x_grid - 3.0
@@ -572,7 +586,7 @@ def build_fig4():
             ha="center", va="top")
     y -= hh + 2.0
 
-    band = {}                                   # 记录供闭环箭头定位
+    band, chipbox = {}, {}                      # 供闭环箭头与绿框定位
     for name, mod, rk, strip, cells in GROWS:
         col = ROLE[rk][1] if rk else NEUTRAL["bg2"]
         if strip:
@@ -586,9 +600,10 @@ def build_fig4():
             ax.add_patch(Rectangle((3.0, y - ROWH), 2.2, ROWH, facecolor=col,
                                    edgecolor="none", zorder=3))
             box(ax, 8.0, y - 9.4, 28.0, 8.6, col, None, r=1.0)
+            chipbox[name] = (8.0, y, 28.0, 8.6)
             txt(ax, 22.0, y - 2.9, mod, S_SMALL, "white", weight="bold",
                 ha="center", va="top")
-            txt(ax, 38.4, y - 7.6, ROLE[rk][0], S_SMALL, col, va="top")
+            txt(ax, 40.4, y - 7.6, ROLE[rk][0], S_SMALL, col, va="top")
             txt(ax, 8.0, y - 15.6, name, S_BODY, NEUTRAL["ink"], weight="bold",
                 va="top")
         else:
@@ -604,6 +619,28 @@ def build_fig4():
         y -= ROWH
 
     grid_bot = y
+
+    # ---------- 已完成代码标注：绿框（口径＝有实现且实跑验证过；见 IMPL_MODULES）
+    # 逐行画（不跨行画长竖框）：行间是契约条，长竖边必定穿过条内文字。
+    _xi = [c for c, _ in DOMS].index(IMPL_SLICE_COL)
+    _x = x_grid + _xi * cw
+    for _nm in IMPL_SLICE:
+        if _nm not in band:
+            continue
+        _t, _b = band[_nm]
+        ax.add_patch(Rectangle((_x - 1.6, _b - 1.6), cw + 1.6, (_t - _b) + 3.2,
+                               facecolor="none", edgecolor=ACCENT["done"],
+                               lw=1.7, zorder=9, joinstyle="round"))
+    for _nm, (_st, _) in IMPL_MODULES.items():
+        if _nm not in chipbox:
+            continue
+        _cx, _cy, _cw2, _ch2 = chipbox[_nm]
+        ax.add_patch(FancyBboxPatch(
+            (_cx - 2.2, _cy - _ch2 - 2.2), _cw2 + 4.4, _ch2 + 4.4,
+            boxstyle="round,pad=0,rounding_size=2.8", facecolor="none",
+            edgecolor=ACCENT["done"], lw=1.7,
+            linestyle="-" if _st == "done" else (0, (2.2, 1.4)), zorder=9))
+
     # 域内向下流箭头（每域每行界一枚，域色）—— 复现纵向布局算 y
     yb = h - 26.0 - 18.0 - 2.0
     for name, mod, rk, strip, cells in GROWS:
@@ -679,7 +716,17 @@ def build_fig4():
               wrap("红虚线＝反馈闭环：M8 应用（诊断/养护/模型输出）→ 回写底座 DE 域 → 支撑孪生标注与模型再训练；"
                    "绿虚线＝工单闭环：未知指标/补采需求（M7）→ 感知源补采。", w - 6.0),
               w - 6.0, S_SMALL, color=ACCENT["ink2"])
-    ys = yc - 14.5
+    ye = yc - 14.5
+    fit_lines(ax, 3.0, ye,
+              wrap("绿框＝已有实现代码且有实跑证据（口径见 output/架构图-图件契约与QA记录.md 第九节）："
+                   "实框＝LO 域端到端竖切已跑通（造数→MQTT→契约校验→分区表→指标→Grafana）＋"
+                   "M1 存储基础设施（30 表＋分区＋种子）；"
+                   "虚框＝部分落地（双库存储层 M3 DAO 未抽出、服务层动作层为 501 占位）。"
+                   "6 服务已全部起栈且 healthy（minio 必须钉 RELEASE tag，latest 已失效）；"
+                   "M4/M5/M7/M8/M9/M10 尚无实现代码。",
+                   w - 6.0),
+              w - 6.0, S_SMALL, color="#1B6B33")
+    ys = ye - 20.5
     fit_lines(ax, 3.0, ys,
               wrap("骨架栈落地切片（6 服务 · 一条竖切跑通全链，覆盖 M1／M2／M6＋运维）："
                    "pg＝postgis:16-3.4 业务主库（M1）｜ mqtt＝emqx:5.8 接入 Broker（M2）｜ "

@@ -125,6 +125,11 @@ Grafana：<http://localhost:3001>（admin/admin），面板「骨架栈 · WIM �
 
 ## 5. 骨架周验收标准（DoD）
 
+> **2026-09-15 实跑结论：7 条全部达成。** 逐条证据、跑出的 3 个缺陷与修法见
+> `output/骨架栈实跑验收报告-20260915.md`。其中第 1 条是在修掉
+> 「`minio/minio:latest` 已失效导致 `up -d` 整体失败」与「ingest/api/grafana 无 healthcheck」
+> 两个缺陷之后才达成的 —— **原来按字面无论怎么跑都不可能满足**。
+
 一条竖切"跑通"的判据是下面 **7 条全绿**，缺一条不算：
 
 1. `docker compose up -d` 一次起全栈，`ps` 全为 healthy；

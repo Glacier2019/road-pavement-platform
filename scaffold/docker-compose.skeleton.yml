@@ -76,7 +76,14 @@ services:
 
   # ------------------------------------------------------------ 对象存储（M1）
   minio:
-    image: minio/minio:latest
+    # 必须钉住 RELEASE tag，不能写 latest：minio/minio:latest 已不可拉取
+    # （2026-09 实测 6 次全部超时；同机 alpine/其它镜像均可拉，minio 的 RELEASE tag
+    #  也可拉 —— 即 latest 这个浮动 tag 已失效），而 compose 只要有一个镜像拉不到，
+    # `docker compose up -d` 就会整体失败。RELEASE tag 同时满足可复现要求。
+    # ⚠ 上游已于 2025-10 归档社区版、停发 Docker Hub 免费镜像，且较新版本存在
+    #   CVE-2025-62506；正式环境请改为自建镜像或换 SeaweedFS/RustFS 等仍在维护的
+    #   S3 兼容实现（本骨架栈的 LO 竖切不依赖对象存储，可先不启该服务）。
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: rp-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -116,6 +123,12 @@ services:
     depends_on:
       pg:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     logging: *default-logging
 
   # ------------------------------------------------------- 接入服务（M2，竖切 3）
@@ -138,6 +151,16 @@ services:
         condition: service_healthy
       mqtt:
         condition: service_healthy
+    # ingest/api/grafana 原先都没有 healthcheck：DoD 第 1 条要求 `ps` 全为 healthy，
+    # 而没定义 healthcheck 的服务只会显示 Up，永远到不了 healthy —— 该条按字面无法达成。
+    # 已按各容器内实测可用的工具补齐（均为实跑验证过才写进来的）。
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     logging: *default-logging
 
   # --------------------------------------------------------- API 服务（M6，竖切 5）
@@ -154,6 +177,13 @@ services:
     depends_on:
       pg:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     logging: *default-logging
 
 volumes:

@@ -37,12 +37,14 @@ SELECT r.id, r.pass_time, r.lane_no, r.direction, r.axle_type_code, r.axle_num,
        r.plate_no, r.quality_code, m.stake_text
 FROM wim_axle_record r
 LEFT JOIN monitor_cross_section m ON m.id = r.cross_section_id
-WHERE (%(from_ts)s IS NULL OR r.pass_time >= %(from_ts)s)
-  AND (%(to_ts)s   IS NULL OR r.pass_time <  %(to_ts)s)
-  AND (%(stake)s   IS NULL OR m.stake_text = %(stake)s)
-  AND (%(overload_only)s = false OR r.overload_flag = true)
+-- 可选筛选项必须显式 cast：参数传 NULL 时 PG 无法从 "($1 IS NULL OR ...)" 推断类型，
+-- 会抛 AmbiguousParameter（实跑复现过）。改这里务必保留 ::类型。
+WHERE (%(from_ts)s::timestamptz IS NULL OR r.pass_time >= %(from_ts)s::timestamptz)
+  AND (%(to_ts)s::timestamptz   IS NULL OR r.pass_time <  %(to_ts)s::timestamptz)
+  AND (%(stake)s::text          IS NULL OR m.stake_text = %(stake)s::text)
+  AND (%(overload_only)s::boolean = false OR r.overload_flag = true)
 ORDER BY r.pass_time DESC
-LIMIT %(limit)s
+LIMIT %(limit)s::int
 """
 
 WIM_ONE_SQL = """
@@ -64,9 +66,9 @@ SELECT date_trunc('hour', pass_time)                            AS bucket,
        round(avg(speed_kmh)::numeric, 1)                          AS avg_speed_kmh,
        round(max(gross_weight_kg)::numeric, 0)                    AS max_gross_kg
 FROM wim_axle_record
-WHERE pass_time >= %(from_ts)s AND pass_time < %(to_ts)s
-  AND (%(stake)s IS NULL OR cross_section_id IN (
-        SELECT id FROM monitor_cross_section WHERE stake_text = %(stake)s))
+WHERE pass_time >= %(from_ts)s::timestamptz AND pass_time < %(to_ts)s::timestamptz
+  AND (%(stake)s::text IS NULL OR cross_section_id IN (
+        SELECT id FROM monitor_cross_section WHERE stake_text = %(stake)s::text))
 GROUP BY 1 ORDER BY 1
 """
 
