@@ -8,8 +8,10 @@
 
 设计纪律（不得自行发挥）
 ------------------------
-1. DDL 已冻结（30 表）。**质量规则走配置外置**（`config/quality_rules.yaml`），
-   不新建表——要新建表必须走契约变更工单。
+1. **质量规则的"定义"走配置外置**（`config/quality_rules.yaml`）。
+   2026-09-15 起 DDL 为 **v0.2（物理 32 表）**，其中 G5 `quality_rule` 表已建好，
+   它承担**标定状态的权威记录**（YAML 是种子、表是权威）。
+   要再新建表仍必须走契约变更工单。
 2. 本模块的核心动作是**真值晋升**：`data_import_batch.truth_flag` 由 `false` 变 `true`。
    骨架栈至今 `truth_flag` 全为 `false`，即这个动作从未发生过——这正是本模块存在的理由。
 3. 阈值（偏差 2%、覆盖率、里程连续性…）**必须由真实数据标定**，
@@ -55,7 +57,7 @@ RULES_PATH = Path(os.getenv("QUALITY_RULES_PATH", "config/quality_rules.yaml"))
 MODULE_CONTRACTS = {
     "consumes": [
         "contracts/governance/quality_rule.v0.1.schema.json",
-        "表 data_import_batch / data_quality_log（契约② DDL v0.1）",
+        "表 data_import_batch / data_quality_log（契约② DDL v0.2）",
     ],
     "produces": [
         "contracts/governance/promotion.v0.1.schema.json",

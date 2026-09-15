@@ -49,7 +49,7 @@ MODULE_CONTRACTS = {
     ],
     "produces": [
         "contracts/fusion/diagnosis.v0.1.schema.json",
-        "表 diagnosis_result（契约② DDL v0.1）",
+        "表 diagnosis_result（契约② DDL v0.2）",
     ],
 }
 
