@@ -81,6 +81,53 @@ def main() -> int:
     if rejected != 50:
         fails.append("违约报文未被拒收")
 
+    # 2b) ★ 被拒**且拒因正确**——只断言"被拒"是不够的
+    #
+    # 为什么必须加这一段：造数器曾有一个隐蔽 bug——axle_num 分支把 axle_num 加一后
+    # 又 append 了一个 5000kg 的轴，两个改动互相抵消，于是
+    #   ① axle_num 这条校验分支从未真正触发过；
+    #   ② 那个多余的轴不在总重里，报文被「总重偏差」规则拦下。
+    # 结果是「50/50 被拒」照样通过，覆盖的却是别的分支——**以错的理由被拒**，
+    # 测试全绿而质量门实际只覆盖了两条分支。库里的实据：26 条违约里有 9 条
+    # 被记为总重偏差的其实是轴数不符（差值恰为 5000.0 即指纹）。
+    # 所以：断言必须落到"拒因"上，不能停在"被拒"。
+    rng = random.Random(2026)
+    reason_dist: dict[str, dict[str, int]] = {}
+    for i in range(300):
+        ev = SIM.build_event("WIM01", i, rng, invalid=True)
+        p = ev["payload"]
+        if p["axle_num"] != len(p["axles"]):
+            kind = "axle_num"
+        elif p["speed_kmh"] > 200:
+            kind = "overspeed"
+        else:
+            kind = "gross_mismatch"
+        try:
+            MODELS.WimEvent.model_validate(ev)
+            reason = "**未被拒**"
+        except ValidationError as e:
+            m = e.errors()[0]["msg"]
+            reason = ("总重偏差" if "总重" in m
+                      else "超速越界" if "less than or equal to 200" in m
+                      else "轴数不符" if ("轴" in m or "axle" in m.lower())
+                      else m[:40])
+        reason_dist.setdefault(kind, {})
+        reason_dist[kind][reason] = reason_dist[kind].get(reason, 0) + 1
+
+    EXPECT = {"axle_num": "轴数不符", "gross_mismatch": "总重偏差", "overspeed": "超速越界"}
+    print("\n违约 → 拒因对应（300 条）：")
+    for kind, want in EXPECT.items():
+        d = reason_dist.get(kind, {})
+        dist = "，".join(f"{k}×{v}" for k, v in d.items()) or "（未产生）"
+        good = list(d) == [want]
+        print(f"  {kind:<16}{dist:<32}{'✓' if good else '✗ 应为「' + want + '」'}")
+        if not d:
+            fails.append(f"{kind} 违约从未产生")
+        elif not good:
+            fails.append(f"{kind} 被以错误理由拒收：{list(d)}")
+    if len(reason_dist) != 3:
+        fails.append(f"只产生了 {len(reason_dist)}/3 类违约，质量门覆盖不全")
+
     # 3) 造数器输出可序列化（能真发出去）
     ev = SIM.build_event("WIM01", 1, random.Random(7))
     payload = json.dumps(ev, ensure_ascii=False)

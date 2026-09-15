@@ -34,6 +34,29 @@ AXLE_MEAN_KG = {
 SCHEMA_VERSION = "wim_axle.v1"
 
 
+def _assert_injected(payload: dict, kind: str, n_axles: int) -> None:
+    """确认注入的违约真的成立——且**只**成立这一种。
+
+    "只成立这一种"是关键：如果同时踩中另一条规则，报文照样被拒，
+    测试照样通过，但覆盖的是别的分支。这类"以错的理由被拒"比漏网更难发现。
+    """
+    if kind == "axle_num":
+        assert payload["axle_num"] != len(payload["axles"]), \
+            "axle_num 分支未生效：轴数与明细长度仍然相等"
+        total = sum(a["weight_kg"] for a in payload["axles"])
+        dev = abs(payload["gross_weight_kg"] - total) / total
+        assert dev <= 0.02, \
+            f"axle_num 分支污染了总重校验（偏差 {dev:.1%} > 2%），会被以错误理由拒收"
+    elif kind == "gross_mismatch":
+        total = sum(a["weight_kg"] for a in payload["axles"])
+        dev = abs(payload["gross_weight_kg"] - total) / total
+        assert dev > 0.02, "gross_mismatch 分支未生效：偏差仍在 2% 以内"
+        assert payload["axle_num"] == len(payload["axles"]), \
+            "gross_mismatch 分支同时踩中了轴数规则"
+    else:  # overspeed
+        assert payload["speed_kmh"] > 200, "overspeed 分支未生效"
+
+
 def build_event(device_code: str, seq: int, rng: random.Random,
                 invalid: bool = False) -> dict:
     axle_type = rng.choices(["A2", "T3", "T4", "T5", "T6"], weights=[35, 15, 10, 25, 15])[0]
@@ -58,13 +81,25 @@ def build_event(device_code: str, seq: int, rng: random.Random,
 
     if invalid:                        # 注入违约（随机一种，覆盖质量门的三条分支）
         kind = rng.choice(["axle_num", "gross_mismatch", "overspeed"])
-        if kind == "axle_num":         # 轴数与 axles 长度不符
+        if kind == "axle_num":
+            # 轴数与 axles 长度不符：**只改 axle_num，绝不动 axles、也不动总重**。
+            #
+            # 这里踩过一个很隐蔽的坑：原先写成
+            #     payload["axle_num"] = n + 1
+            #     payload["axles"].append({... 5_000.0 ...})   # ← 多出来的轴
+            # 两个改动互相抵消，axle_num 与 len(axles) 重新相等，**本分支从未真正触发过**；
+            # 更糟的是那条多余的 5000kg 轴不在总重里，于是报文被「总重偏差」规则拦下——
+            # 事件被拒了，但拒因是错的。库里的证据：26 条违约里，9 条被记为总重偏差的
+            # 其实是轴数不符（差值恰为 5000.0 即指纹），排障的人会去调总重校验，方向全错。
             payload["axle_num"] = n + 1
-            payload["axles"].append({"axle_seq": n + 1, "weight_kg": 5_000.0, "dist_mm": 3_600.0})
         elif kind == "gross_mismatch":  # 总重与轴重之和偏差 15%（>2% 阈值）
             payload["gross_weight_kg"] = round(gross * 1.15, 1)
         else:                           # 超速越界（>200 km/h，JSON Schema 也能拒）
             payload["speed_kmh"] = 215.0
+
+        # 自检：确认"想注入的违约"确实注入了。宁可造数器当场报错，
+        # 也不要让一类违约静默消失——那会让质量门看起来覆盖了三条分支，实际只有两条。
+        _assert_injected(payload, kind, n)
 
     return {
         "device_code": device_code,

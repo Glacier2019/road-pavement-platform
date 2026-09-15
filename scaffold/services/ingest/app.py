@@ -27,6 +27,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import ValidationError
 
 from models import SCHEMA_VERSION, WimEvent
+import violations
 
 LOG = logging.getLogger("ingest")
 logging.basicConfig(
@@ -236,10 +237,14 @@ def on_message(client, userdata, msg):  # noqa: ANN001
         with STATE.lock:
             STATE.rejected += 1
             STATE.last_error = f"契约违约: {exc.errors()[0].get('msg')}"
-        LOG.warning("契约违约（device=%s）：%s", raw.get("device_code"), exc.errors()[:1])
+        # 分类出**精确的规则码**（原先一律写 contract_violation，导致 3 类违约
+        # 在日志里无法区分——实测 26 条里 9 条是被误记的轴数不符）
+        code, _ = violations.classify(exc)
+        LOG.warning("契约违约[%s]（device=%s）：%s", code, raw.get("device_code"),
+                    exc.errors()[:1])
         try:
-            write_reject(dev, datetime.now(timezone.utc), "contract_violation",
-                         str(exc.errors()[:2]))
+            write_reject(dev, datetime.now(timezone.utc), code,
+                         violations.describe(exc))
         except Exception as e2:  # noqa: BLE001
             LOG.error("写质量日志失败：%s", e2)
         return
