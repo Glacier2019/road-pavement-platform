@@ -42,10 +42,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       # 首次初始化按文件名顺序执行（已存在的数据卷不会重复执行）：
-      #   10 → 设计冻结的 DDL v0.1（直接引用 output/ 下的唯一真源，不复制）
+      #   10 → 契约② 真源 DDL（就在 ./sql/ 下：与代码同仓，不复制、不会漂移）
       #   20 → 按月分区脚本（wim_axle_record）
       #   90 → 骨架种子数据（路线/路段/断面/设备/通道/字典）
-      - ../output/路面性能数据库-DDL-v0.1.sql:/docker-entrypoint-initdb.d/10_ddl_v0.1.sql:ro
+      - ./sql/10_ddl_v0.2.sql:/docker-entrypoint-initdb.d/10_ddl_v0.2.sql:ro
       - ./sql/20_partitions.sql:/docker-entrypoint-initdb.d/20_partitions.sql:ro
       - ./sql/90_seed_skeleton.sql:/docker-entrypoint-initdb.d/90_seed_skeleton.sql:ro
     healthcheck:

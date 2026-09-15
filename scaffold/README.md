@@ -60,7 +60,7 @@ scaffold/
 │   ├─ openapi/m6-gateway.v0.1.yaml       # 契约四：服务接口（真源为 /openapi.json）
 │   ├─ governance/ fusion/ semantic/ apps/ console/ agent/
 │   │                              #   M4/M5/M7/M8/M9/M10 的**产出契约**（草案，待各组定稿）
-│   └─ （契约二：表结构 = output/路面性能数据库-DDL-v0.2.sql，挂载给 PG 初始化）
+│   └─ （契约二：表结构 = scaffold/sql/10_ddl_v0.2.sql，挂载给 PG 初始化）
 ├─ sql/
 │   ├─ 20_partitions.sql           # 分区维护函数 + 建到 2027-12 + 兜底分区
 │   └─ 90_seed_skeleton.sql        # 种子：路线/路段/结构层/断面/设备/通道/字典
@@ -151,7 +151,7 @@ Grafana：<http://localhost:3001>（admin/admin），面板「骨架栈 · WIM �
 ## 5. 骨架周验收标准（DoD）
 
 > **2026-09-15 实跑结论：7 条全部达成。** 逐条证据、跑出的 3 个缺陷与修法见
-> `output/骨架栈实跑验收报告-20260915.md`。其中第 1 条是在修掉
+> 验收报告（`骨架栈实跑验收报告-20260915.md`，属交付物，随 `output/` 移出仓库）。其中第 1 条是在修掉
 > 「`minio/minio:latest` 已失效导致 `up -d` 整体失败」与「ingest/api/grafana 无 healthcheck」
 > 两个缺陷之后才达成的 —— **原来按字面无论怎么跑都不可能满足**。
 

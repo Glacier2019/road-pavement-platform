@@ -57,7 +57,8 @@ except ImportError:
 
 from rpdao.catalog import ALL_TABLES, TABLE_OWNER          # noqa: E402
 
-DDL_PATH = ROOT.parent / "output" / "路面性能数据库-DDL-v0.2.sql"
+# 契约② 真源：2026-09-15 由 output/ 搬入 scaffold/sql/（随代码走，因为本测试要读它）
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.2.sql"
 
 
 def ddl_unique_keys(table: str) -> list[frozenset[str]]:

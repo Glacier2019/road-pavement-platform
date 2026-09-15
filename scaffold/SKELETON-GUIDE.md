@@ -86,7 +86,7 @@ docker exec rp-governance python3 -c \
 | # | 契约 | 真源 | 维护人 |
 |---|---|---|---|
 | ① | 报文格式 | `contracts/topics.yaml`、`contracts/messages/*.schema.json` | B 组 |
-| ② | 表结构 | `output/路面性能数据库-DDL-v0.2.sql` | A 组 |
+| ② | 表结构 | `scaffold/sql/10_ddl_v0.2.sql` | A 组 |
 | ③ | DAO 接口 | `scaffold/packages/rpdao/` | A 组 |
 | ④ | 服务接口 | `contracts/openapi/*.yaml` | D 组 |
 
