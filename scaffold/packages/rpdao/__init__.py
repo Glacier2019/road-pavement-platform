@@ -28,7 +28,7 @@ from .errors import (
 from .pool import Dao
 from .repo import DomainRepository, LoRepository
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Dao",
@@ -37,6 +37,8 @@ __all__ = [
     "DOMAINS",
     "CROSS_TABLES",
     "ALL_TABLES",
+    "EXPECTED_PHYSICAL_TABLES",
+    "TABLE_OWNER",
     "Domain",
     "domain_of",
     "selfcheck",
@@ -46,5 +48,19 @@ __all__ = [
     "UnknownTable",
     "NotFound",
     "ContractViolation",
+    "WriteGuardError",
     "__version__",
 ]
+
+
+def __getattr__(name: str):
+    """延迟导出 WriteDao。
+
+    刻意**不**在模块顶部 import：``write.py`` 依赖 ``pool.py``（进而依赖 psycopg），
+    而契约测试里有些用例只需 catalog/repo 的纯逻辑。延迟导入让只读用法
+    不必背上写侧的依赖，同时 ``from rpdao import WriteDao`` 仍然可用。
+    """
+    if name == "WriteDao":
+        from .write import WriteDao
+        return WriteDao
+    raise AttributeError(name)

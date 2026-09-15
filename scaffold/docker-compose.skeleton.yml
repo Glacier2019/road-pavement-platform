@@ -152,7 +152,11 @@ services:
 
   # ------------------------------------------------------- 接入服务（M2，竖切 3）
   ingest:
-    build: ./services/ingest
+    # 契约③写入收口后，M2 依赖 M3（packages/rpdao），故构建上下文抬到 scaffold 根，
+    # 否则 Dockerfile 里 COPY packages/rpdao 会越出上下文而失败（与 api 同理）。
+    build:
+      context: .
+      dockerfile: services/ingest/Dockerfile
     container_name: rp-ingest
     restart: unless-stopped
     environment:

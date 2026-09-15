@@ -47,7 +47,7 @@ uv run --with fastapi==0.115.6 --with httpx --with "psycopg[binary,pool]==3.2.3"
 
 报告、图件（PDF/SVG/PNG/TIFF）、以及**表结构 DDL 真源**。
 
-> ⚠ **`output/路面性能数据库-DDL-v0.1.sql` 是契约②的唯一真源**，
+> ⚠ **`output/路面性能数据库-DDL-v0.2.sql` 是契约②的唯一真源**，
 > `scaffold/docker-compose.skeleton.yml` 直接挂载它给 PostgreSQL 初始化。
 > **动这个文件前先想清楚**：它一变，数据库实际结构就变；改它要走工单 + 评审。
 > 也正因如此，本目录**保持在仓库根**，不要搬进 `docpipe/`（否则挂载路径要跟着改）。

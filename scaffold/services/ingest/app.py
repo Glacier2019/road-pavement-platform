@@ -23,8 +23,8 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 from paho.mqtt import client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
-from psycopg_pool import ConnectionPool
 from pydantic import ValidationError
+from rpdao.write import WriteDao
 
 from models import SCHEMA_VERSION, WimEvent
 import violations
@@ -42,8 +42,13 @@ MQTT_TOPIC = os.getenv("MQTT_TOPIC", "g228/+/+/axle")
 BATCH_PREFIX = os.getenv("BATCH_NO_PREFIX", "skeleton")
 PROCESSOR = os.getenv("PROCESSOR", "m2-ingest-skeleton")
 
-pool = ConnectionPool(PG_DSN, min_size=1, max_size=4, open=False, timeout=15,
-                      kwargs={"application_name": "rp-ingest"})
+# 契约③：接入侧的**写**也走 DAO（原先这里自带连接池 + 4 条裸 SQL，绕过了契约）。
+# 用 WriteDao 而非 Dao：本模块是七域业务数据的唯一写入方（M2），
+# 写权守卫会逐表核对 catalog.TABLE_OWNER，越权/写只读表都会直接报错。
+dao = WriteDao(PG_DSN, app_name="rp-ingest", min_size=1, max_size=4, timeout=15)
+
+# 写权身份：本服务只以 M2 身份写库，且只能写 TABLE_OWNER 里属于 M2 的表。
+WRITER = "M2"
 
 # ----------------------------------------------------------------- 运行状态
 class State:
@@ -84,6 +89,13 @@ DEVICE_MAP: dict[str, dict[str, Any]] = {}
 DEVICE_MAP_LOCK = threading.Lock()
 
 # ----------------------------------------------------------------- SQL
+# 绝大多数写已改为走契约③（dao.insert / write_txn），此处仅保留两条**必须**手写的：
+#
+#   1) MAP_SQL —— 只读的联表查询（设备注册表 → 通道），交给 dao.query。
+#   2) UPSERT_BATCH —— 批次计数是 **列 = 列 + 增量** 语义（多轮刷新的增量和），
+#      通用 upsert 的 "SET col = EXCLUDED.col" 是**替换**，会把这轮的增量
+#      覆盖掉上一轮的累计值。故走 dao.execute_write(受同一个写权守卫保护)，
+#      而不是硬塞进通用接口——**为了套用新接口而改变语义，是收口时最容易犯的错**。
 MAP_SQL = """
 SELECT si.serial_no, si.cross_section_id, sc.id AS channel_id,
        sc.quantity_code, sc.channel_no
@@ -92,52 +104,34 @@ JOIN sensor_channel sc ON sc.install_id = si.id
 WHERE si.status = 'active'
 """
 
-INSERT_RECORD = """
-INSERT INTO wim_axle_record
-  (cross_section_id, pass_time, lane_no, direction, axle_type_code, axle_num,
-   speed_kmh, gross_weight_kg, overload_flag, overload_rate, esal,
-   plate_no, data_source, quality_code)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OK')
-RETURNING id
-"""
-
-INSERT_DETAIL = """
-INSERT INTO wim_axle_detail
-  (record_id, pass_time, axle_seq, group_seq, axle_weight_kg, group_weight_kg, axle_dist_mm)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
-"""
-
 UPSERT_BATCH = """
 INSERT INTO data_import_batch
   (batch_no, source_type, source_desc, channel_count, raw_count, valid_count,
    truth_flag, import_start, import_end, quality_code, handler, remark)
-VALUES (%s, 'mqtt', %s, %s, %s, %s, false, %s, now(), 'OK', %s, %s)
+VALUES (%(batch_no)s, 'mqtt', %(source_desc)s, %(channel_count)s, %(raw_count)s,
+        %(valid_count)s, false, %(import_start)s, now(), 'OK', %(handler)s, %(remark)s)
 ON CONFLICT (batch_no) DO UPDATE
 SET raw_count   = data_import_batch.raw_count + EXCLUDED.raw_count,
     valid_count = data_import_batch.valid_count + EXCLUDED.valid_count,
     import_end  = now()
 """
 
-INSERT_DQL = """
-INSERT INTO data_quality_log
-  (channel_id, period_start, period_end, raw_count, valid_count,
-   issue_code, issue_desc, action_code, process_time, processor)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now(), %s)
-"""
-
 
 def load_device_map() -> None:
     """从 PG 读设备注册表（serial_no → 断面/通道）。P1 改为变更通知刷新。"""
     try:
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(MAP_SQL)
-            rows = cur.fetchall()
+        rows = dao.query(MAP_SQL)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("设备映射加载失败（稍后重试）：%s", exc)
         return
 
     mapping: dict[str, dict[str, Any]] = {}
-    for serial_no, cross_section_id, channel_id, quantity_code, channel_no in rows:
+    for _r in rows:
+        serial_no = _r["serial_no"]
+        cross_section_id = _r["cross_section_id"]
+        channel_id = _r["channel_id"]
+        quantity_code = _r["quantity_code"]
+        channel_no = _r["channel_no"]
         cur_best = mapping.get(serial_no)
         is_axle = quantity_code in ("axle_load", "axle")
         if cur_best is None or (is_axle and not cur_best["is_axle"]) or (
@@ -172,30 +166,46 @@ def write_reject(dev: dict[str, Any] | None, event_ts: datetime, issue: str, des
     if dev is None:
         LOG.error("拒收但设备未注册，无法写质量日志：%s", desc)
         return
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(INSERT_DQL, (
-            dev["channel_id"], event_ts, event_ts, 1, 0,
-            issue, desc[:500], "mark", PROCESSOR,
-        ))
+    dao.insert("data_quality_log", [{
+        "channel_id": dev["channel_id"],
+        "period_start": event_ts, "period_end": event_ts,
+        "raw_count": 1, "valid_count": 0,
+        "issue_code": issue, "issue_desc": desc[:500],
+        "action_code": "mark", "processor": PROCESSOR,
+    }], writer=WRITER)
 
 
 def insert_event(ev: WimEvent, dev: dict[str, Any]) -> None:
+    """主记录 ＋ 轴组明细，**同一事务**。
+
+    ★ 收口时最容易丢的就是这里的原子性：若改成两次 dao.insert(...)，
+      两次会各取一条池连接，进程在中间挂掉就会留下一条**没有轴组明细的过车记录**
+      —— 而下游看它是完全合法的数据，不会报错。故必须用 write_txn。
+    """
     pass_time = ev.ts
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(INSERT_RECORD, (
-                dev["cross_section_id"], pass_time, ev.payload.lane_no, ev.payload.direction,
-                ev.payload.axle_type_code, ev.payload.axle_num, ev.payload.speed_kmh,
-                ev.payload.gross_weight_kg, ev.is_overload(), ev.overload_rate(),
-                ev.esal(), ev.payload.plate_no, f"mqtt:{ev.device_code}",
-            ))
-            record_id = cur.fetchone()[0]
-            cur.executemany(INSERT_DETAIL, [
-                (record_id, pass_time, a.axle_seq, a.group_seq, a.weight_kg,
-                 a.group_weight_kg, a.dist_mm)
-                for a in ev.payload.axles
-            ])
-        conn.commit()
+    with dao.write_txn(writer=WRITER) as tx:
+        record_id = tx.insert_returning("wim_axle_record", {
+            "cross_section_id": dev["cross_section_id"],
+            "pass_time": pass_time,
+            "lane_no": ev.payload.lane_no,
+            "direction": ev.payload.direction,
+            "axle_type_code": ev.payload.axle_type_code,
+            "axle_num": ev.payload.axle_num,
+            "speed_kmh": ev.payload.speed_kmh,
+            "gross_weight_kg": ev.payload.gross_weight_kg,
+            "overload_flag": ev.is_overload(),
+            "overload_rate": ev.overload_rate(),
+            "esal": ev.esal(),
+            "plate_no": ev.payload.plate_no,
+            "data_source": f"mqtt:{ev.device_code}",
+            "quality_code": "OK",
+        })
+        tx.insert("wim_axle_detail", [{
+            "record_id": record_id, "pass_time": pass_time,
+            "axle_seq": a.axle_seq, "group_seq": a.group_seq,
+            "axle_weight_kg": a.weight_kg, "group_weight_kg": a.group_weight_kg,
+            "axle_dist_mm": a.dist_mm,
+        } for a in ev.payload.axles], on_conflict=("record_id", "axle_seq"))
 
 
 # ----------------------------------------------------------------- MQTT
@@ -311,13 +321,15 @@ def batch_flusher(interval: float = 10.0) -> None:
             STATE.pending_raw = STATE.pending_valid = 0
         if raw or valid:
             try:
-                with pool.connection() as conn, conn.cursor() as cur:
-                    cur.execute(UPSERT_BATCH, (
-                        STATE.batch_no, f"MQTT {MQTT_TOPIC}", len(DEVICE_MAP),
-                        raw, valid, datetime.now(timezone.utc).astimezone(), PROCESSOR,
-                        "骨架栈：批次计数（truth_flag 由 M4 质量门晋升）",
-                    ))
-                    conn.commit()
+                dao.execute_write("data_import_batch", UPSERT_BATCH, {
+                    "batch_no": STATE.batch_no,
+                    "source_desc": f"MQTT {MQTT_TOPIC}",
+                    "channel_count": len(DEVICE_MAP),
+                    "raw_count": raw, "valid_count": valid,
+                    "import_start": datetime.now(timezone.utc).astimezone(),
+                    "handler": PROCESSOR,
+                    "remark": "骨架栈：批次计数（truth_flag 由 M4 质量门晋升）",
+                }, writer=WRITER)
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("批次刷新失败：%s", exc)
                 with STATE.lock:                      # 失败则退回计数，下轮重试
@@ -328,14 +340,14 @@ def batch_flusher(interval: float = 10.0) -> None:
 # ----------------------------------------------------------------- FastAPI
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    pool.open()
+    dao.open()
     load_device_map()
     threading.Thread(target=batch_flusher, daemon=True).start()
     start_mqtt()
     LOG.info("M2 接入服务已启动：topic=%s schema=%s", MQTT_TOPIC, SCHEMA_VERSION)
     yield
     stop_mqtt()
-    pool.close()
+    dao.close()
 
 
 app = FastAPI(
@@ -351,8 +363,8 @@ app = FastAPI(
 def healthz() -> dict[str, Any]:
     pg_ok, pg_msg = False, ""
     try:
-        with pool.connection(timeout=3) as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1")
+        if not dao.ping():
+            raise RuntimeError("PG ping 失败")
             cur.fetchone()
         pg_ok = True
     except Exception as exc:  # noqa: BLE001

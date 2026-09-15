@@ -56,7 +56,7 @@ from rpdao import (  # noqa: E402
 from rpdao.pool import quote_ident  # noqa: E402
 from rpdao import repo as repo_mod  # noqa: E402
 
-DDL_PATH = ROOT.parent / "output" / "路面性能数据库-DDL-v0.1.sql"
+DDL_PATH = ROOT.parent / "output" / "路面性能数据库-DDL-v0.2.sql"
 API_APP = ROOT / "services" / "api" / "app.py"
 
 

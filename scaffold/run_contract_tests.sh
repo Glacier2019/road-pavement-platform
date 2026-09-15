@@ -35,6 +35,8 @@ TESTS=(
   "m2-违约分类|违约分类码 + M2/M4 跨层命名一致性|M2|PY|tests/contract/test_violation_codes.py"
   "m4-治理|质量规则契约 + 真值晋升契约 + 配置↔契约一致性|M4|PY|tests/contract/test_governance_contract.py"
   "m5-m10|M5–M10 模块产出契约（诊断/映射/养护/登记/工单）|M5–M10|PY|tests/contract/test_module_contracts.py"
+  "m3-写权|契约③写入侧：表级写权守卫（应通过/应拒绝两侧）+ M2 不绕契约|M2/M3|PY|tests/contract/test_write_guard.py"
+  "m1-表数|契约②：DDL ↔ 数据字典 ↔ catalog 三处表数一致|M1/M3|PY|tests/contract/test_ddl_dict_catalog.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

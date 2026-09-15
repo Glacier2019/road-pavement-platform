@@ -28,3 +28,13 @@ class NotFound(DaoError):
 
 class ContractViolation(DaoError):
     """访问方式违反 DAO 契约（例如绕开白名单拼表名、对只读连接发起写操作）。"""
+
+
+class WriteGuardError(DaoError):
+    """写入被写权守卫拒绝。
+
+    三种情形（见 ``write.assert_writer``）：表无写权登记（只读表）、
+    写入方与该表的唯一写权不符（越权）、批量写入为空。
+    **这是刻意抛异常而非告警放行**——告警放行等于没管，
+    而"以错误的理由通过"比不通过更糟（本项目已有的教训）。
+    """

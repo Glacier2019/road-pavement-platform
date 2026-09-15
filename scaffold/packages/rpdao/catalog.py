@@ -3,7 +3,7 @@
 ============================ 口径与依据 ============================
 1) **7 域的口径**来自报告第五章（原文）：GE 5 表 / SU 4 表 / RE 2 表 / LO 5 表 /
    WE 1 表 / TE 3 表 / DE 5 表，共 **25 表**核心逻辑视图。
-2) **物理表名**逐个取自 output/路面性能数据库-DDL-v0.1.sql 的 A–G 分组，
+2) **物理表名**逐个取自 output/路面性能数据库-DDL-v0.2.sql 的 A–G 分组，
    已在本机 PostgreSQL 实测确认为 30 张基表。
 3) 两边**不是一一对应**，差异是真实存在的，故本文件分成两个字段，
    绝不把"逻辑视图里有"当成"物理表已建"：
@@ -76,11 +76,34 @@ DOMAINS: dict[str, Domain] = {
 }
 
 # 跨域支撑表：不属于任何单一对象域，但被所有域共用。
-#   字典 5 张（DDL 的 B 组）＋ 治理/闭环 4 张（DDL 的 G 组）
+#   字典 5 张（DDL 的 B 组）＋ 治理/闭环 4 张（DDL 的 G1–G4）
+#   ＋ v0.2 新增 2 张：M4 的质量规则库（G5）、M7 的语义映射集（H1）
 CROSS_TABLES: tuple[str, ...] = (
     "dict_sensor_type", "dict_quantity", "dict_disease_type", "dict_axle_type", "dict_stat_metric",
     "data_quality_log", "calibration_log", "feedback_record", "data_import_batch",
+    "quality_rule", "mapping_set",
 )
+
+# DDL v0.2 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
+# 由 tests/contract/test_ddl_dict_catalog.py 强制核对——不允许各自漂移。
+# 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）。
+EXPECTED_PHYSICAL_TABLES = 32
+
+# 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
+# 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
+TABLE_OWNER: dict[str, str] = {
+    "wim_axle_record": "M2", "wim_axle_detail": "M2", "traffic_daily_stat": "M2",
+    "data_import_batch": "M2", "data_quality_log": "M2",
+    "quality_rule": "M4", "calibration_log": "M4",
+    "mapping_set": "M7",
+    "diagnosis_result": "M5", "model_output": "M5",
+    "maintenance_advice": "M8", "alarm_rule": "M8", "alarm_record": "M8",
+    "feedback_record": "M9",
+    "disease_record": "M2", "inspect_task": "M2", "media_file": "M2", "scan3d_model": "M2",
+    "test_project": "M2", "test_sample": "M2", "test_result": "M2",
+    # M2 的职责是「数据接入与**设备自管**」，故测点/通道元数据也归它写
+    "sensor_install": "M2", "sensor_channel": "M2",
+}
 
 # 全部物理表的白名单（域内 ＋ 跨域）。任何查询都必须命中这张表，否则拒绝。
 ALL_TABLES: tuple[str, ...] = tuple(
@@ -112,5 +135,6 @@ def selfcheck() -> dict[str, object]:
         "physical_total": domain_tables + len(CROSS_TABLES),
         "logical_entries_without_table": logical_only,
         "duplicates": sorted(set(dups)),
-        "ok": not dups and (domain_tables + len(CROSS_TABLES)) == 30,
+        "expected_physical_tables": EXPECTED_PHYSICAL_TABLES,
+        "ok": not dups and (domain_tables + len(CROSS_TABLES)) == EXPECTED_PHYSICAL_TABLES,
     }
