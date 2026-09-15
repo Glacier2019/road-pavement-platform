@@ -105,13 +105,32 @@ services:
 
   # -------------------------------------------------------------- 监控（M1/M9）
   grafana:
-    image: grafana/grafana:11.3.0
+    # 版本选择有依据，不要随手改回 11.x：
+    #   界面中文化取决于 Grafana 自带 zh-Hans 语言包的覆盖面，实测两版差距极大——
+    #     11.3.0  →  96 个命名空间 / 1,676 条中文
+    #     13.2.1  → 215 个命名空间 / 10,935 条中文（6.5 倍）
+    #   11.3 下首页与主界面大半仍是英文，13.2.1 下已是「首页/仪表板/警报/连接/管理/
+    #   刷新/分享…」这样的完整中文。代价：镜像 485 MB → 1.39 GB。
+    #   实测升级后 provisioning（数据源 + 面板）与查询全部照常，无需改配置。
+    image: grafana/grafana:13.2.1
     container_name: rp-grafana
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      # ⚠ 这一项**只在 Grafana 首次初始化建库时生效**。本服务用了持久卷
+      #   （grafanadata），若卷是更早留下的、或日后改了这里的口令，都不会覆盖库里
+      #   已有的口令 —— 现象是「env 明明是 admin，却怎么都登不进去」。
+      #   处置（不必删卷、不影响已配好的数据源与面板）：
+      #       docker exec rp-grafana grafana cli admin reset-admin-password <新口令>
+      #       docker compose ... restart grafana      # ← 必须重启！运行中的进程会缓存旧口令哈希
+      #   ⚠ 排查时不要用 curl 反复重试，会触发 Grafana 的连续失败锁定（5 分钟滑窗），
+      #     重置成功后仍被旧锁定挡住，极易误判成「重置没生效」。
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      # 界面中文化：Grafana 自带 zh-Hans 语言包，设这一项即可，不需要装任何插件。
+      # （面板标题本来就是中文，这里管的是 Grafana 自身的菜单/按钮/设置页等 UI 文案。）
+      GF_USERS_DEFAULT_LANGUAGE: zh-Hans
+      GF_DATE_FORMATS_DEFAULT_TIMEZONE: Asia/Shanghai
       PG_PASSWORD: ${PG_PASSWORD}          # 供 provisioning 数据源插值
       TZ: Asia/Shanghai
     ports:
@@ -165,7 +184,11 @@ services:
 
   # --------------------------------------------------------- API 服务（M6，竖切 5）
   api:
-    build: ./services/api
+    # M3（packages/rpdao）是 api 的依赖，故构建上下文必须抬到 scaffold 根，
+    # 否则 Dockerfile 里 COPY packages/rpdao 会越出上下文而失败。
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
     container_name: rp-api
     restart: unless-stopped
     environment:

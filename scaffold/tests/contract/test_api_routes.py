@@ -23,7 +23,7 @@ Starlette/FastAPI **按注册顺序取第一个完全匹配的路由**。若把�
 所以本测试做三件事：
   1) 路由自洽：每条路由用它自己的具体 URL 去匹配，第一个命中的必须是它自己；
   2) 契约对齐：openapi 里声明的路径集合 ↔ 实现里的路径集合，双向相等；
-  3) 真实请求：用 TestClient 打一遍状态码（数据访问层被替换为假实现，不需要数据库）。
+  3) 真实请求：用 TestClient 打一遍状态码（M3 数据访问层被替换为假实现，不需要数据库）。
 
 「不需要数据库」是刻意的：路由表在 import 时就固定了，与本测试要验证的东西无关。
 """
@@ -40,6 +40,14 @@ from starlette.routing import Match
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_PATH = ROOT / "services" / "api" / "app.py"
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.1.yaml"
+
+# M3（rpdao）是 api 的依赖。本测试直接从源码路径加载 app.py，故需手动把
+# packages/ 放进 sys.path —— **必须在 import rpdao 之前**（容器里由
+# PYTHONPATH=/app 负责，见 services/api/Dockerfile）。
+if str(ROOT / "packages") not in sys.path:
+    sys.path.insert(0, str(ROOT / "packages"))
+
+from rpdao import NotFound  # noqa: E402  （须在上面 sys.path 就位之后）
 
 
 def _ensure_pg_driver():
@@ -132,23 +140,45 @@ def contract_paths() -> set[str]:
     return paths
 
 
-def fake_q(sql: str, params: dict, one: bool = False):
-    """替换数据访问层：路由测试关心的是"谁被命中"，不是"查出了什么"。"""
-    if "wim_axle_detail" in sql:
-        return [{"axle_seq": 1, "group_seq": None, "axle_weight_kg": 6400.0,
-                 "group_weight_kg": None, "axle_dist_mm": 0.0}]
-    if "wim_axle_record" in sql:
-        row = {"id": 1, "pass_time": "2026-09-14T13:45:02+08:00", "lane_no": 2,
-               "axle_type_code": "T5", "axle_num": 5, "speed_kmh": 68.4,
-               "gross_weight_kg": 51200.0, "overload_flag": False, "esal": 14.73,
-               "plate_no": None, "quality_code": "OK", "stake_text": "K4640+000"}
-        if one:
-            # 只有 id=1 这条记录存在，用来验证"记录不存在 → 404"分支
-            return row if params.get("rid") in (None, 1) else None
-        return [row]
-    if one:
-        return {"id": 1}
-    return [{"id": 1}]
+class _FakeLo:
+    """LO 域仓储的假实现。路由测试只关心"谁被命中"，不关心查出什么。"""
+
+    ROW = {"id": 1, "pass_time": "2026-09-14T13:45:02+08:00", "lane_no": 2,
+           "axle_type_code": "T5", "axle_num": 5, "speed_kmh": 68.4,
+           "gross_weight_kg": 51200.0, "overload_flag": False, "esal": 14.73,
+           "plate_no": None, "quality_code": "OK", "stake_text": "K4640+000"}
+
+    def passages(self, **kw):
+        return [self.ROW]
+
+    def passage(self, record_id):
+        # 只有 id=1 存在，用来验证"记录不存在 → 404"分支
+        if record_id != 1:
+            raise NotFound(f"过车记录不存在：{record_id}")
+        return {**self.ROW, "axles": [{"axle_seq": 1, "axle_weight_kg": 6400.0}]}
+
+    def daily_summary(self, day, stake=None):
+        return {"date": day.isoformat(), "stake": stake, "passages": 1,
+                "overloaded": 0, "overload_ratio": 0.0, "esal_sum": 14.73, "buckets": []}
+
+
+class _FakeDomain:
+    def __init__(self, code): self.code = code
+
+    def list_objects(self, table, limit=100):
+        return [{"id": 1, "table": table}]
+
+
+class _FakeDao:
+    """替换 M3 门面。真实 Dao 的接口面就是这些——这正是 M3 契约的可替代性证明。"""
+
+    def __init__(self): self.lo = _FakeLo()
+
+    def domain(self, code): return _FakeDomain(code)
+    def ping(self): return True
+    def pool_stats(self): return {"pool_size": 0, "pool_available": 0}
+    def open(self): return self
+    def close(self): pass
 
 
 def main() -> int:
@@ -186,7 +216,7 @@ def main() -> int:
 
     # ---------------------------------------------------------- 3) 真实请求
     print("\n=== 3) 真实请求（TestClient，数据层为假实现）===")
-    APP.q = fake_q                     # 端点函数在调用时从模块全局取 q
+    APP.dao = _FakeDao()               # 端点函数在调用时从模块全局取 dao
     client = TestClient(APP.app)
     cases = [
         ("GET",    "/healthz",                          200),

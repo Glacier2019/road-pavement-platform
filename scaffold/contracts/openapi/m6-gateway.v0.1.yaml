@@ -21,6 +21,17 @@ paths:
         "200":
           description: 依赖状态
 
+  /v1/catalog:
+    get:
+      summary: 对象域目录（M3 契约③ 在线视图）
+      description: >-
+        返回 7 大对象域（GE/SU/RE/LO/WE/TE/DE）及其已建物理表、仅逻辑视图存在的实体、
+        落库位置，以及可用的对象类型白名单。前端与课题组据它发现有哪些对象可取，
+        不必对照文档硬编码。真源为 M3 的 rpdao.catalog。
+      responses:
+        "200":
+          description: domains / cross_tables / object_types
+
   /v1/objects/{object_type}:
     get:
       summary: 按对象类型查档案对象
@@ -31,8 +42,8 @@ paths:
           schema:
             type: string
           description: >-
-            白名单：road_line / road_section / structure_layer /
-            monitor_cross_section / sensor_install / sensor_channel
+            白名单＝7 大对象域已建的物理表（共 21 张，完整清单见 GET /v1/catalog
+            的 object_types）。跨域支撑表（字典 5 张 + 治理/闭环 4 张）刻意不经此暴露。
         - name: limit
           in: query
           schema:
@@ -41,7 +52,7 @@ paths:
             maximum: 1000
       responses:
         "200":
-          description: 返回 object_type、count 与 items 数组
+          description: 返回 object_type、domain、count 与 items 数组
         "404":
           description: 未登记的对象类型
 

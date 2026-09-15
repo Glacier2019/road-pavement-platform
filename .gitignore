@@ -5,6 +5,11 @@ __pycache__/
 *.py[cod]
 *.pyo
 .uvcache/
+.uvpython/
+
+# ============ 本机 Docker 配置目录（DOCKER_CONFIG 指向此处）============
+# 内含 buildx 构建状态与本机 docker 客户端配置，属机器本地状态，不入库。
+.dockerhome/
 .pytest_cache/
 
 # ============ 临时产物 ============

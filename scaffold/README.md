@@ -60,19 +60,25 @@ scaffold/
 ├─ sql/
 │   ├─ 20_partitions.sql           # 分区维护函数 + 建到 2027-12 + 兜底分区
 │   └─ 90_seed_skeleton.sql        # 种子：路线/路段/结构层/断面/设备/通道/字典
+├─ packages/rpdao/                 # ★ M3 对象域数据访问层（平台唯一接触存储处）
+│   ├─ catalog.py                  #   7 域 ↔ 物理表目录（含自检）
+│   ├─ repo.py                     #   各域仓储（LO 域有专属语义化查询）
+│   ├─ pool.py                     #   连接池与执行原语（唯一 import psycopg 处）
+│   └─ README.md                   #   契约③ 真源
 ├─ services/
 │   ├─ ingest/                     # M2 接入服务（models.py = 契约的代码侧实现）
-│   └─ api/                        # M6 统一数据出口（含动作层占位 501）
+│   └─ api/                        # M6 统一数据出口（含动作层占位 501；只经 M3 取数）
 ├─ simulator/wim_simulator.py      # 造数器（可注入"故意违约报文"）
 ├─ ops/grafana/provisioning/       # 数据源与面板以代码提供，不靠手工点选
 └─ tests/contract/                 # 契约一致性测试（Schema ↔ Pydantic 裁决必须一致）
 ```
 
-**三份契约 = 三个真源**，各自唯一：
+**四份契约 = 四个真源**，各自唯一（与报告里的 ①②③④ 对应）：
 
-1. **表结构**：`DDL-v0.1.sql`（设计冻结，改它要走工单）
-2. **报文格式**：`contracts/topics.yaml` + `messages/*.schema.json`
-3. **服务接口**：各服务的 `/openapi.json`（`contracts/openapi/*.yaml` 是人工摘要，仅供评审）
+1. **报文格式**：`contracts/topics.yaml` + `messages/*.schema.json`　← 契约①（承诺方 M2）
+2. **表结构**：`DDL-v0.1.sql` + `数据字典`（设计冻结，改它要走工单）　← 契约②（承诺方 M1）
+3. **数据出口**：`packages/rpdao/README.md` + `catalog.py`　← 契约③（承诺方 M3）
+4. **服务接口**：各服务的 `/openapi.json`（`contracts/openapi/*.yaml` 是人工摘要，仅供评审）　← 契约④（承诺方 M6）
 
 ---
 
@@ -167,10 +173,13 @@ Grafana：<http://localhost:3001>（admin/admin），面板「骨架栈 · WIM �
 
 ```
 M1 基础设施  ──┐
-M2 接入服务  ──┤   ← 本骨架已含（LO 域竖切）
+M2 接入服务  ──┤   ← 已含：M1 / M2 / M3 / M6（LO 域竖切跑通）
 M3 数据访问  ──┼──▶ M4 质量治理 ──▶ M5 融合 ──▶ M8 决策 ──▶ M9 应用
-M6 统一出口  ──┘        ↑
-M7 本体/语义 ───────────┘（对象类型清单、链接定义、函数契约）
+M6 统一出口  ──┘        ↑              ↑
+M7 本体/语义 ───────────┴──────────────┘（对象类型清单、链接定义、函数契约）
+
+已完成（2026-09-15）：M1 存储/编排 · M2 接入 · M3 对象域数据出口 · M6 查询出口
+下一个应做：M3 写入路径收口 → M4 质量治理门（M4/M5 都依赖 M3 这个统一接入面）
 ```
 
 接入顺序的原则：**下游不启动，直到上游的两个契约测试绿**。
@@ -180,6 +189,9 @@ M7 本体/语义 ───────────┘（对象类型清单、链
 
 ## 8. 本骨架**不做**什么（边界）
 
+- **数据出口已收口到 M3**：`services/api`（M6）不再 import psycopg、不再持有连接池，
+  由 `tests/contract/test_dao_contract.py` 用 AST 断言钉死；**但 M2 的写入路径仍直连库**
+  （它是"接入/落库"这个动作本身），写入收口是后续议题；
 - 不做治理：质量门、真值标记（truth_flag 晋升）留给 M4；
 - 不做本体：对象-链接图、SHACL 校验留给 M7（本骨架的 API 已为其预留形态）；
 - 不做动作闭环：`/v1/actions/*` 一律 501，P3 才落地；
