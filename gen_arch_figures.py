@@ -242,7 +242,7 @@ def build_fig1():
     # 接口契约（画在层间空隙）
     contracts = [
         "▲ 契约① MQTT topic 规范＋报文 JSON Schema（contracts/messages/）",
-        "▲ 契约② DDL v0.1／数据字典（25 表，存库口径唯一真源）",
+        "▲ 契约② DDL v0.1／数据字典（物理 30 表；7 域逻辑视图 25 表）",
         "▲ 契约③ DAO 契约（7 域 repository 接口，M3 对外承诺，待定稿）",
         "▲ 契约④ M6 OpenAPI（contracts/openapi/m6-gateway.v0.1.yaml）",
         "▲ 应用只经 M6 取数（不直连存储）",
@@ -277,7 +277,7 @@ def build_fig1():
         "① MQTT topic 规范＋报文 JSON Schema",
         "    真源 contracts/messages/wim_axle.v1.schema.json",
         "    承诺方 M2；造数器与设备共同遵循",
-        "② DDL v0.1＋数据字典（25 表）",
+        "② DDL v0.1＋数据字典（物理 30 表）",
         "    真源 output/路面性能数据库-DDL-v0.1.sql",
         "    承诺方 M1；存库口径唯一真源",
         "③ DAO 契约（7 域 repository）",
@@ -285,8 +285,8 @@ def build_fig1():
         "④ M6 OpenAPI（全平台服务契约）",
         "    真源 contracts/openapi/m6-gateway.v0.1.yaml",
         "    承诺方 M6；应用层唯一入口",
-        "· 契约测试三项：DDL ／ 报文 Schema ／ OpenAPI",
-        "    脚本 scaffold/tests/contract/（零依赖可运行）",
+        "· 契约测试三项：报文 Schema ／ 造数器 ／ OpenAPI",
+        "    脚本 scaffold/tests/contract/；★ DDL 契约无测试",
     ]
     fit_lines(ax, w - cw + 2, top - 10.6, clines, cw - 5, S_SMALL, S_SMALL * 1.30)
     cbox_top = top - 9.4                                   # 表头之下
@@ -423,13 +423,13 @@ def build_fig3():
     mods = [("M1", "平台基础设施与编排", "A", "P1", "已落地", "done"),
             ("M2", "数据接入与设备自管", "B", "P1", "已落地", "done"),
             ("M3", "对象域数据访问层（DAO 契约）", "A", "P1", "规划中", "plan"),
-            ("M4", "数据治理 · 真数据门", "A", "P1·P2", "部分落地", "part"),
+            ("M4", "数据治理 · 真数据门", "A", "P1", "部分落地", "part"),
             ("M5", "融合辨析引擎", "C", "P2", "规划中", "plan"),
             ("M6", "API 服务与指标语义层", "D", "P2", "已落地", "done"),
             ("M7", "语义中枢 · 接入 Copilot", "待指派", "P4", "规划中", "plan"),
             ("M8", "应用层（FEM/承载力/决策/孪生）", "D", "P3", "规划中", "plan"),
             ("M9", "平台管理台（集成面）", "D", "P3·P4", "规划中", "plan"),
-            ("M10", "Agent 执行引擎集成（二期）", "—", "P5", "规划中", "plan")]
+            ("M10", "Agent 执行引擎集成（二期）", "—", "P4", "规划中", "plan")]
     for i, (m, nm, own, ph, stt, kind) in enumerate(mods):
         yy = y - 23.0 - i * 9.6
         txt(ax, 6, yy, m, S_BODY, NEUTRAL["ink"], weight="bold", va="top")
@@ -439,10 +439,13 @@ def build_fig3():
         txt(ax, 266, yy, ph, S_SMALL, NEUTRAL["mid"], va="top")
         vmark(ax, 313, yy - 1.7, kind, 1.7)
         txt(ax, 317, yy, stt, S_SMALL, ACCENT[kind], va="top")
-    warn_mark(ax, 7.8, y - b2h + 13.0, 2.0)
-    txt(ax, 11.6, y - b2h + 10.0,
-        "M7 在本计划第三章的任务分工表中未落到人头（M10 属二期）；建议 P1 结束前由导师指定——"
-        "M7 依赖 M2/M3/M4，位置上靠近治理线。学生 A=数据底座 ｜ B=感知接入 ｜ C=融合诊断 ｜ D=应用决策。",
+    warn_mark(ax, 7.8, y - b2h + 18.0, 2.0)
+    txt(ax, 11.6, y - b2h + 15.0,
+        "M7 在本计划第三章任务分工表中未落到人头；M9 的阶段报告 §6.2 未单列（本图按 §7 推断为 P3–P4）；"
+        "M10 归 P4 而非 P5。建议 P1 结束前由导师指定 M7／M9 责任学生。",
+        S_SMALL, "#8A3A1E", va="top")
+    txt(ax, 11.6, y - b2h + 8.5,
+        "主责字母：A＝数据底座 ｜ B＝感知接入 ｜ C＝融合诊断 ｜ D＝应用决策。M7 依赖 M2/M3/M4，位置靠近治理线。",
         S_SMALL, "#8A3A1E", va="top")
     y -= b2h + 5
 
@@ -452,7 +455,7 @@ def build_fig3():
     txt(ax, 6, y - 3, "接口契约四件套（模块间只认契约，不认实现）", S_H, NEUTRAL["ink"],
         weight="bold", va="top")
     ct = [("① MQTT topic 规范＋报文 JSON Schema", "contracts/messages/wim_axle.v1.schema.json", "M2 承诺"),
-          ("② DDL v0.1＋数据字典（25 表）", "output/路面性能数据库-DDL-v0.1.sql", "M1 承诺"),
+          ("② DDL v0.1＋数据字典（物理 30 表）", "output/路面性能数据库-DDL-v0.1.sql", "M1 承诺"),
           ("③ DAO 契约（7 域 repository）", "M3 对外接口（待定稿）", "M3 承诺"),
           ("④ M6 OpenAPI（服务契约）", "contracts/openapi/m6-gateway.v0.1.yaml", "M6 承诺")]
     for i, (nm, path, who) in enumerate(ct):
