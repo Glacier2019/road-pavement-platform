@@ -40,6 +40,11 @@ pathlib.Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
 
 import warnings
 
+# 导出件纳入 git 管理，必须字节可复现：matplotlib 的 PDF 后端默认写入
+# /CreationDate 当前时间。SOURCE_DATE_EPOCH 是可复现构建的标准机制，
+# 必须在导入 matplotlib 之前设好——内建在这里，避免依赖调用者的环境。
+os.environ.setdefault("SOURCE_DATE_EPOCH", "1700000000")   # 2023-11-14T22:13:20Z
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -55,6 +60,9 @@ plt.rcParams.update({
     "font.sans-serif": ["WenQuanYi Zen Hei", "Noto Sans CJK JP", "DejaVu Sans"],
     "axes.unicode_minus": False,
     "svg.fonttype": "none",      # 文本保持可编辑
+    # 导出件纳入 git 管理，必须字节可复现：matplotlib 默认会给 SVG 的 clip-path
+    # 生成随机 id、并写入 dc:date 时间戳，导致每次重跑都产生一堆假 diff。
+    "svg.hashsalt": "arch-figs-v1",   # 固定 clip-path 等元素 id
     "pdf.fonttype": 42,          # TrueType 嵌入，文本可选中
     "font.size": 5.2,            # 正文基准；所有显式字号均 ≥5pt 下限
     "axes.labelsize": 5.2,
@@ -496,8 +504,10 @@ def export(fig, stem):
     base = OUT / stem
     with warnings.catch_warnings(record=True) as wlist:
         warnings.simplefilter("always")
-        fig.savefig(str(base) + ".pdf")
-        fig.savefig(str(base) + ".svg")
+        # metadata 去掉时间戳（PDF 的 CreationDate / SVG 的 dc:date）
+        meta = {"Date": None, "Creator": "gen_arch_figures.py"}
+        fig.savefig(str(base) + ".pdf", metadata=meta)
+        fig.savefig(str(base) + ".svg", metadata=meta)
         fig.savefig(str(base) + ".png", dpi=600)
         fig.savefig(str(base) + ".tiff", dpi=600,
                     pil_kwargs={"compression": "tiff_lzw"})
