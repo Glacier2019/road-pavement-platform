@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/console/module_registry.v0.1.schema.json",
+  "title": "模块登记表 v0.1（M9 消费 · 草案）",
+  "description": "M9 集成面的输入：各模块自报家门（我是谁、谁负责、什么阶段、已落地到什么程度、healthz 在哪）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "modules"
+  ],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "module",
+          "name",
+          "owner",
+          "phase",
+          "status",
+          "healthz"
+        ],
+        "properties": {
+          "module": {
+            "type": "string",
+            "pattern": "^M([1-9]|10)$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 2
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "主责；未指派时写「待指派」（不得留空，空白会掩盖问题）"
+          },
+          "phase": {
+            "enum": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "P5",
+              "P3·P4"
+            ]
+          },
+          "status": {
+            "enum": [
+              "已交付",
+              "部分交付",
+              "骨架",
+              "规划中",
+              "待指派"
+            ],
+            "description": "与架构图 D/E 的状态口径一致"
+          },
+          "healthz": {
+            "type": "string",
+            "minLength": 1,
+            "description": "健康检查地址；尚无服务时写空串会被拒——请写 TODO 并登记为规划中"
+          },
+          "probe_kind": {
+            "enum": [
+              "http",
+              "tcp"
+            ],
+            "default": "http",
+            "description": "探测方式。基础设施类模块（M1 的 PG/MinIO）没有 HTTP /healthz，用 tcp。"
+          }
+        }
+      }
+    },
+    "updated": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "登记表更新时间（与 governance 的 quality_rule 契约保持一致）"
+    }
+  }
+}

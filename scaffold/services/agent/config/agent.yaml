@@ -1,0 +1,14 @@
+# M10 Agent 执行引擎（二期）—— 配置
+
+version: "0.1-skeleton"
+phase: "二期（P4/P5），本阶段不排期"
+
+# 硬线（不可通过配置改动）
+boundaries:
+  direct_db_access: false        # 恒 false：对外只经 M6
+  write_channel: "M2"            # 恒 M2：写入只经接入服务，禁止旁路 INSERT
+  requires_human_confirm: true   # 恒 true：动作必须人工确认
+
+orchestration:
+  model: null                    # 二期待定
+  max_steps: null

@@ -21,7 +21,7 @@
 | 每个人都拿到同一条基线 | 之后谁写模块，都照着这条链的接口接，不需要读别人的代码 |
 | 失败模式提前暴露 | 设备未注册、分区不存在、QoS 丢包、时区错位——骨架期撞一次，比结题前撞一次便宜 |
 
-> 结论口径：**P1 的第一周不产出业务成果，产出"全链可跑 + 三份契约冻结"**。
+> 结论口径：**P1 的第一周不产出业务成果，产出"全链可跑 + 四份契约冻结"**。
 
 ---
 
@@ -46,16 +46,20 @@ simulator ──MQTT──▶ EMQX ──▶ ingest(M2) ──▶ PostgreSQL 分
 
 ---
 
-## 3. 目录与"三份契约"
+## 3. 目录与"四份契约"
 
 ```
 scaffold/
+├─ SKELETON-GUIDE.md               # ★ 各模块开发总纲：开工前先读这篇
+├─ run_contract_tests.sh           # ★ 一键跑全部契约测试（离线，--list 看清单）
 ├─ docker-compose.skeleton.yml     # 一套编排起全栈（端口避让本机已占用端口）
 ├─ .env.example                    # 复制为 .env；密码不入库、不进交付物
-├─ contracts/                      # ★ 模块接入的唯一依据（三份契约）
+├─ contracts/                      # ★ 模块接入的唯一依据（四份契约 + 模块产出契约）
 │   ├─ topics.yaml                 #   契约一：MQTT 主题 + 载荷信封规范
 │   ├─ messages/wim_axle.v1.schema.json   # 契约一细则：报文 JSON Schema
-│   ├─ openapi/m6-gateway.v0.1.yaml       # 契约三：服务接口（真源为 /openapi.json）
+│   ├─ openapi/m6-gateway.v0.1.yaml       # 契约四：服务接口（真源为 /openapi.json）
+│   ├─ governance/ fusion/ semantic/ apps/ console/ agent/
+│   │                              #   M4/M5/M7/M8/M9/M10 的**产出契约**（草案，待各组定稿）
 │   └─ （契约二：表结构 = output/路面性能数据库-DDL-v0.1.sql，挂载给 PG 初始化）
 ├─ sql/
 │   ├─ 20_partitions.sql           # 分区维护函数 + 建到 2027-12 + 兜底分区
@@ -67,11 +71,22 @@ scaffold/
 │   └─ README.md                   #   契约③ 真源
 ├─ services/
 │   ├─ ingest/                     # M2 接入服务（models.py = 契约的代码侧实现）
-│   └─ api/                        # M6 统一数据出口（含动作层占位 501；只经 M3 取数）
+│   ├─ api/                        # M6 统一数据出口（含动作层占位 501；只经 M3 取数）
+│   ├─ governance/                 # M4 数据治理·真数据门（骨架，待 A 组实现）★P1 关键路径
+│   ├─ fusion/                     # M5 融合辨析引擎（骨架，待 C 组实现）
+│   ├─ semantic/                   # M7 语义中枢（骨架，责任人待指派）
+│   ├─ apps/                       # M8 应用层（骨架，待 D 组实现；报告列为 4 条容器化条目）
+│   ├─ console/                    # M9 平台管理台·集成面（骨架）
+│   └─ agent/                      # M10 Agent 执行引擎（骨架，二期）
 ├─ simulator/wim_simulator.py      # 造数器（可注入"故意违约报文"）
 ├─ ops/grafana/provisioning/       # 数据源与面板以代码提供，不靠手工点选
 └─ tests/contract/                 # 契约一致性测试（Schema ↔ Pydantic 裁决必须一致）
 ```
+
+> **M4–M10 的状态**：机械层（容器／健康／指标／配置外置／契约／契约测试）已就位，
+> **业务逻辑全部留空**，接口返回 501 并标注 owner。各组只写业务逻辑，不搭环境、不定接口。
+> 6 个模块各带独立 compose profile，只启自己那个，互不干扰。
+> 详见 `SKELETON-GUIDE.md`。
 
 **四份契约 = 四个真源**，各自唯一（与报告里的 ①②③④ 对应）：
 
@@ -79,6 +94,10 @@ scaffold/
 2. **表结构**：`DDL-v0.1.sql` + `数据字典`（设计冻结，改它要走工单）　← 契约②（承诺方 M1）
 3. **数据出口**：`packages/rpdao/README.md` + `catalog.py`　← 契约③（承诺方 M3）
 4. **服务接口**：各服务的 `/openapi.json`（`contracts/openapi/*.yaml` 是人工摘要，仅供评审）　← 契约④（承诺方 M6）
+
+以上是**模块间**的契约。各模块还各自**产出一份对外契约**（M4 的规则/晋升、M5 的诊断三元组、
+M7 的映射集、M8 的养护建议、M9 的模块登记、M10 的动作工单），同样是契约，
+同样走工单变更，同样有契约测试覆盖。
 
 ---
 

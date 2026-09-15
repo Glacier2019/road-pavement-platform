@@ -1,0 +1,82 @@
+# M9 平台管理台 —— 模块登记表
+#
+# 各模块在此自报家门。M9 的 /v1/modules/status 会**实测**每条的 healthz，
+# 把登记的实现状态与实测结果并排显示——登记与实测不符时一眼可见。
+#
+# 口径与架构图 D/E 一致：status ∈ 已交付 / 部分交付 / 骨架 / 规划中 / 待指派
+# 新接入一个模块 = 在此加一条，不改代码。
+
+version: "0.1-skeleton"
+updated: "2026-09-15"
+
+modules:
+  # ---------------------------------------------------------- P1 已落地
+  - module: M1
+    name: 平台基础设施与编排
+    owner: A组
+    phase: P1
+    status: 已交付
+    # M1 是基础设施（PG/MinIO/编排），没有 HTTP /healthz。
+    # 用 HTTP 去测数据库会得到"连接被对端关闭"的误导性错误——那是协议不匹配，不是不健康。
+    probe_kind: tcp
+    healthz: "tcp://pg:5432"
+  - module: M2
+    name: 数据接入与设备自管
+    owner: B组
+    phase: P1
+    status: 已交付
+    healthz: "http://ingest:8000/healthz"
+  - module: M3
+    name: 对象域数据访问层（DAO 契约）
+    owner: A组
+    phase: P1
+    status: 已交付
+    # M3 本体是 Python 库（无独立服务），它的健康经 M6 出口体现；
+    # 这里指向 M6 的 healthz 并注明，避免让人误以为 M3 是独立容器。
+    healthz: "http://api:8000/healthz"
+  - module: M6
+    name: API 服务与指标语义层
+    owner: D组
+    phase: P2
+    status: 已交付
+    healthz: "http://api:8000/healthz"
+
+  # ---------------------------------------------------------- 骨架已建，业务待实现
+  - module: M4
+    name: 数据治理 · 真数据门
+    owner: A组
+    phase: P1
+    status: 骨架
+    healthz: "http://governance:8000/healthz"
+  - module: M5
+    name: 融合辨析引擎
+    owner: C组
+    phase: P2
+    status: 骨架
+    healthz: "http://fusion:8000/healthz"
+  - module: M8
+    name: 应用层（FEM／承载力／养护决策／孪生）
+    owner: D组
+    phase: P3
+    status: 骨架
+    healthz: "http://apps:8000/healthz"
+
+  # ---------------------------------------------------------- 未指派 / 二期
+  - module: M7
+    name: 语义中枢 · 接入 Copilot
+    owner: 待指派                      # ← P1 结束前须由导师指派（见图 C 待决注记）
+    phase: P4
+    status: 待指派
+    healthz: "http://semantic:8000/healthz"
+  - module: M9
+    name: 平台管理台（集成面）
+    owner: D组
+    phase: "P3·P4"
+    status: 骨架
+    healthz: "http://console:8000/healthz"
+  - module: M10
+    name: Agent 执行引擎（二期）
+    owner: D组
+    phase: P4
+    status: 规划中
+    healthz: "http://agent:8000/healthz"

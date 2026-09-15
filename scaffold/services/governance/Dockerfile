@@ -1,0 +1,23 @@
+# M4 数据治理 · 真数据门
+# 接入五件套第 1 件：模块自带容器定义（见 MODULE-ONBOARDING.md §2）
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 配置外置：规则文件随镜像带上作为**默认**，生产由 volume/环境变量覆盖
+COPY app.py ./
+COPY config/ ./config/
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=20s --timeout=5s --retries=5 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=4).status==200 else 1)"
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]

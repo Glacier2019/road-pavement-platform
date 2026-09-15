@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/governance/quality_rule.v0.1.schema.json",
+  "title": "质量规则定义 v0.1（M4 产出 · 草案）",
+  "description": "M4 真数据门对外承诺的规则结构。消费方（M5 融合、M9 管理台）只认本结构，不认 config/quality_rules.yaml 的文件布局。状态：草案，A 组定稿后升 v1 并冻结。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "calibrated", "rules"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "规则集版本，随规则增删改递增"
+    },
+    "updated": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "calibrated": {
+      "type": "boolean",
+      "description": "整套规则是否已用真实数据标定。false 时校验接口必须返回 503，不得出结论。"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "suite", "target", "rule", "calibrated"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z_]+\\.[a-z0-9_]+$",
+            "description": "规则唯一编码，形如 suite.name。写入 data_quality_log.issue_code 的就是它。"
+          },
+          "suite": {
+            "enum": ["缺失", "越界", "离群", "跨字段", "批次层"],
+            "description": "对应 MODULE-ONBOARDING §4 的'缺失/越界/离群三件套'，另加跨字段与批次层"
+          },
+          "target": {
+            "type": "string",
+            "description": "作用对象：表名或 payload"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段名，多个用逗号分隔；无字段时留空或省略"
+          },
+          "rule": {
+            "type": "string",
+            "minLength": 4,
+            "description": "规则的可读描述。必须能被人读懂，不允许只写编码。"
+          },
+          "threshold": {
+            "type": ["number", "null"],
+            "description": "阈值。null 表示该规则靠分组统计而非固定阈值。"
+          },
+          "calibrated": {
+            "type": "boolean",
+            "description": "本条规则是否已用真实数据标定。**false 的规则不得用于生产判定。**"
+          },
+          "remark": {
+            "type": "string",
+            "description": "标定依据或待办说明"
+          }
+        }
+      }
+    }
+  }
+}

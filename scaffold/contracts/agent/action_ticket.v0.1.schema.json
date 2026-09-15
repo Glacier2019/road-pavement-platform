@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/agent/action_ticket.v0.1.schema.json",
+  "title": "动作工单 v0.1（M10 产出 · 二期草案）",
+  "description": "M10 产出的是**工单**不是执行结果。硬线：不得直连库、写入只经 M2、动作必须人工确认。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ticket_id",
+    "action",
+    "target",
+    "requested_by",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "action": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 200
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "requested_by": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 64
+    },
+    "status": {
+      "enum": [
+        "待确认",
+        "已确认",
+        "已执行",
+        "已驳回",
+        "已撤销"
+      ]
+    },
+    "confirmed_by": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64
+    },
+    "via": {
+      "const": "M6",
+      "description": "唯一对外通道。恒为 M6——不得直连数据库。"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

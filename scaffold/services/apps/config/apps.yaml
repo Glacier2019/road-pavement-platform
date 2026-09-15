@@ -1,0 +1,23 @@
+# M8 应用层 —— 参数配置
+
+version: "0.1-skeleton"
+calibrated: false
+
+fem:
+  # 力学孪生：需设计院提供结构参数与本构模型
+  structure_params: null
+  constitutive_model: null
+  calibrated: false
+  remark: >-
+    待设计院输入。骨架期留 null——凭空生成结构参数只会得到「看起来合理但无依据」的结果。
+
+capacity:
+  model: null               # 待定：承载力评估模型需真实检测数据训练/标定
+  calibrated: false
+
+maintenance:
+  objective: null           # 待定：目标函数需真实养护历史与造价约束
+  budget_cny: null
+  calibrated: false
+  # 硬线：动作必须人工确认后落库，不提供自动执行的开关
+  requires_human_confirm: true

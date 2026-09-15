@@ -209,6 +209,145 @@ services:
       start_period: 10s
     logging: *default-logging
 
+  # ==========================================================================
+  # 以下 6 个服务是**模块骨架**（M4/M5/M7/M8/M9/M10），业务逻辑待各组实现。
+  #
+  # 为什么用 profiles：这 6 个骨架如果默认启动，会污染"6 服务全 healthy"这条
+  # 已验证的基线（而且骨架的 /healthz 在依赖未就位时会如实返回 degraded）。
+  # 用 profile 后：
+  #     docker compose -f docker-compose.skeleton.yml up -d            # 仍是原来的 6 服务
+  #     docker compose -f docker-compose.skeleton.yml --profile m4 up -d   # 只多起 M4
+  # 各组开发自己模块时只启自己的 profile，互不干扰——这就是"可拔插"。
+  # ==========================================================================
+
+  governance:                       # M4 数据治理 · 真数据门  ← P1 关键路径
+    build: ./services/governance
+    container_name: rp-governance
+    profiles: ["m4"]
+    restart: unless-stopped
+    environment:
+      PG_DSN: postgresql://${PG_USER:-rp}:${PG_PASSWORD}@pg:5432/${PG_DB:-road_pavement}
+      QUALITY_RULES_PATH: config/quality_rules.yaml
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${GOVERNANCE_PORT:-8020}:8000"
+    depends_on:
+      pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging: *default-logging
+
+  fusion:                           # M5 融合辨析引擎  ← 门禁：等 M4
+    build: ./services/fusion
+    container_name: rp-fusion
+    profiles: ["m5"]
+    restart: unless-stopped
+    environment:
+      PG_DSN: postgresql://${PG_USER:-rp}:${PG_PASSWORD}@pg:5432/${PG_DB:-road_pavement}
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${FUSION_PORT:-8021}:8000"
+    depends_on:
+      pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging: *default-logging
+
+  semantic:                         # M7 语义中枢  ← 责任人待指派
+    build: ./services/semantic
+    container_name: rp-semantic
+    profiles: ["m7"]
+    restart: unless-stopped
+    environment:
+      PG_DSN: postgresql://${PG_USER:-rp}:${PG_PASSWORD}@pg:5432/${PG_DB:-road_pavement}
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${SEMANTIC_PORT:-8022}:8000"
+    depends_on:
+      pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging: *default-logging
+
+  apps:                             # M8 应用层（4 条容器化条目先合一）
+    build: ./services/apps
+    container_name: rp-apps
+    profiles: ["m8"]
+    restart: unless-stopped
+    environment:
+      PG_DSN: postgresql://${PG_USER:-rp}:${PG_PASSWORD}@pg:5432/${PG_DB:-road_pavement}
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${APPS_PORT:-8023}:8000"
+    depends_on:
+      pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging: *default-logging
+
+  console:                          # M9 平台管理台（集成面）
+    build: ./services/console
+    container_name: rp-console
+    profiles: ["m9"]
+    restart: unless-stopped
+    environment:
+      MODULE_REGISTRY: config/modules.yaml
+      PROBE_TIMEOUT_S: "3"
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${CONSOLE_PORT:-8024}:8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging: *default-logging
+
+  agent:                            # M10 Agent 执行引擎（二期，本阶段不排期）
+    build: ./services/agent
+    container_name: rp-agent
+    profiles: ["m10"]
+    restart: unless-stopped
+    environment:
+      M6_BASE_URL: http://api:8000
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    ports:
+      - "${AGENT_PORT:-8025}:8000"
+    logging: *default-logging
+
+
 volumes:
   pgdata:
   miniodata:

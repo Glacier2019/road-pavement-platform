@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/semantic/mapping_set.v0.1.schema.json",
+  "title": "映射集 v0.1（M7 产出 · 草案）",
+  "description": "M7 语义中枢的映射集：把真实表格的表头/桩号对应到库内字段与规范桩号。**必须人工确认后才生效**（confirmed_by 必填）。状态：草案；表 mapping_set 需契约变更工单批准后方可落库。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "mapping_id",
+    "source_kind",
+    "entries",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "mapping_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "source_kind": {
+      "enum": [
+        "表头",
+        "桩号",
+        "单位",
+        "编码"
+      ],
+      "description": "解决哪一类「不对应」"
+    },
+    "source_sample": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "真实样表来源（文件名/表名），便于复查"
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "raw",
+          "normalized",
+          "target_field"
+        ],
+        "properties": {
+          "raw": {
+            "type": "string",
+            "minLength": 1,
+            "description": "真实表格里的原始写法"
+          },
+          "normalized": {
+            "type": "string",
+            "minLength": 1,
+            "description": "归一化结果"
+          },
+          "target_field": {
+            "type": "string",
+            "minLength": 1,
+            "description": "库内字段/表"
+          },
+          "unit": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "候选",
+        "已确认",
+        "已废弃"
+      ],
+      "description": "只有「已确认」的映射集可被 M2/M4 引用"
+    },
+    "confirmed_by": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64,
+      "description": "确认人。status=已确认 时必填。"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "已确认"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "confirmed_by"
+        ],
+        "properties": {
+          "confirmed_by": {
+            "type": "string",
+            "minLength": 2
+          }
+        }
+      }
+    }
+  ]
+}

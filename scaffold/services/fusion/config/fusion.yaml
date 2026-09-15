@@ -1,0 +1,36 @@
+# M5 融合辨析 —— 参数配置
+#
+# ⚠️ 下面每个参数都未经真实数据标定（calibrated: false）。
+#    "本质是标定工作"指的就是这个文件：真实数据到手后逐项标定并改 true。
+#    未标定的参数不得用于生产判定（app.py 不会拿它们出结论）。
+
+version: "0.1-skeleton"
+calibrated: false
+
+params:
+  # 桩号锚定：真实表格的里程表达 → 库内规范桩号
+  station_anchor:
+    materialized: ["K12+345", "12345", "12.345km"]   # 已知的写法形态（**待真实样表补充**）
+    tolerance_m: 5.0
+    calibrated: false
+    remark: "容差待定：取决于测量方式与 GPS 误差，必须用真实数据定"
+
+  # IRI → RQI 反演
+  iri_to_rqi:
+    model: "linear"            # 待定：可能是分段线性或非线性
+    coefficients: null         # 待标定：真实反演系数只能由实测数据回归得到
+    calibrated: false
+    remark: "骨架期刻意留 null。填任何数字都是编的——IRI/RQI 关系随路面类型变化"
+
+  # 荷载-响应温度修正
+  temperature_correction:
+    reference_temp_c: 20.0
+    coefficient_per_c: null    # 待标定
+    calibrated: false
+    remark: "待定：需实测不同温度下的响应，做温度-响应回归"
+
+  # 实验室真值 ↔ 现场互校
+  lab_field_crosscheck:
+    tolerance_pct: null        # 待标定
+    calibrated: false
+    remark: "待定：需成对的实验室与现场数据才能定互校容差"

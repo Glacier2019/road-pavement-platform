@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/governance/promotion.v0.1.schema.json",
+  "title": "真值晋升 v0.1（M4 产出 · 草案）",
+  "description": "M4 真数据门的核心动作契约：把 data_import_batch.truth_flag 由 false 改为 true。一个批次只有通过全部已标定规则才可晋升；晋升必须留审计。状态：草案。",
+  "$defs": {
+    "PromotionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batch_no", "operator", "reason"],
+      "properties": {
+        "batch_no": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "要晋升的接入批次号，对应 data_import_batch.batch_no"
+        },
+        "operator": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "description": "操作人。审计要求，不接受空值或'系统'。"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 500,
+          "description": "晋升理由。审计要求，必须写人话。"
+        },
+        "override": {
+          "type": "boolean",
+          "default": false,
+          "description": "置 true 表示规则未全过仍要晋升（强制放行）。必须同时提供 override_reason。"
+        },
+        "override_reason": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "强制放行的理由。override=true 时必填。"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"override": {"const": true}},
+            "required": ["override"]
+          },
+          "then": {"required": ["override_reason"]}
+        }
+      ]
+    },
+    "PromotionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batch_no", "truth_flag", "promoted_at", "rules_passed", "rules_failed"],
+      "properties": {
+        "batch_no": {"type": "string"},
+        "truth_flag": {
+          "const": true,
+          "description": "晋升成功后必然为 true；失败不得返回本结构"
+        },
+        "promoted_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "rules_passed": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "通过的质量规则 code 列表"
+        },
+        "rules_failed": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "未通过的质量规则 code 列表。非 override 晋升时本数组必须为空。"
+        },
+        "idempotent": {
+          "type": "boolean",
+          "description": "true 表示该批次此前已晋升过，本次为重复调用（不重复计数）"
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/PromotionRequest"},
+    {"$ref": "#/$defs/PromotionResponse"}
+  ]
+}

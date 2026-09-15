@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/apps/maintenance_plan.v0.1.schema.json",
+  "title": "养护决策建议 v0.1（M8 产出 · 草案）",
+  "description": "M8 养护决策的输出。**这是建议，不是执行单**——动作必须人工确认后落库。状态：草案。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan_id",
+    "items",
+    "generated_at",
+    "requires_human_confirm"
+  ],
+  "properties": {
+    "plan_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "object_ref",
+          "action",
+          "priority",
+          "basis"
+        ],
+        "properties": {
+          "object_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "enum": [
+              "预防性养护",
+              "修补",
+              "铣刨罩面",
+              "结构补强",
+              "继续观测"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "basis": {
+            "type": "string",
+            "minLength": 2,
+            "description": "建议依据（引用诊断 id 或指标）。不许空着。"
+          },
+          "est_cost_cny": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "total_cost_cny": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "requires_human_confirm": {
+      "const": true,
+      "description": "恒为 true。动作必须人工确认——这是硬线，不提供置 false 的选项。"
+    }
+  }
+}
