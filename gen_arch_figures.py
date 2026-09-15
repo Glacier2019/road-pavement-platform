@@ -466,6 +466,230 @@ def build_fig3():
     return fig, "架构图C-落地范围与模块分工"
 
 
+# ================================================================== 图4
+ROLE = {                          # 模块「作用」角色色（图 D：颜色＝模块在干什么）
+    "in":  ("接入",       "#2C6CA8"),
+    "st":  ("存储与访问", "#2E7D4F"),
+    "gov": ("治理",       "#B8860B"),
+    "sem": ("语义中枢",   "#7B5EA7"),
+    "fus": ("融合辨析",   "#C0392B"),
+    "svc": ("服务出口",   "#1A8A8F"),
+    "app": ("应用与集成", "#A34D7F"),
+    "p2":  ("二期",       "#78909C"),
+}
+DOMS = [("GE", "道路几何"), ("SU", "路面表面"), ("RE", "结构响应"),
+        ("LO", "交通荷载"), ("WE", "环境气象"), ("TE", "试验检测"),
+        ("DE", "决策输出")]
+
+# (阶段, 模块, 作用角色, 本行上方的接口契约条, 7 域短标签)
+GROWS = [
+ ("感知源", "现场设备与系统", None, None,
+  ["设计/竣工资料", "三维扫描车＋AI巡检", "应变/光纤/土压/振动",
+   "WIM 轴载站", "路侧气象站", "试验室系统", "底座内生成"]),
+ ("接入层", "M2", "in",
+  "▲ 契约① MQTT topic 规范＋报文 JSON Schema ｜ 承诺方 M2；真源 contracts/messages/",
+  ["ETL 批次导入", "批量上传对象存储", "MQTT／采集仪｜1k~128kHz",
+   "MQTT 边缘汇聚｜秒级", "MQTT／HTTP｜分钟级", "ETL 批次导入", "内部闭环｜事件/日批"]),
+ ("双库存储层", "M1+M3", "st",
+  "▲ 契约② DDL v0.1＋数据字典 ｜ 承诺方 M1；物理 30 表·7 域逻辑视图 25 表",
+  ["PG＋PostGIS｜档案·空间", "MinIO 影像模型＋PG 元数据", "IoTDB 高频＋PG 测点档案",
+   "PG 按月分区＋时序明细", "IoTDB 时序", "PG 三级结构＋MinIO 原件", "PG 决策链四表"]),
+ ("治理层 · 真数据门", "M4", "gov",
+  "▲ 契约③ DAO 契约 ｜ 承诺方 M3；7 域 repository 数据出口（待定稿）",
+  ["设计值一致性", "覆盖率/里程连续", "断流/漂移/量程",
+   "轴数=长度·总重和", "缺测/极值/一致", "批次溯源/单位归一", "人工复核/审计"]),
+ ("融合辨析层", "M5", "fus", None,
+  ["★ 全域桩号锚定基准", "IRI→RQI 反演标定", "与 LO 轴载事件对齐",
+   "超限触发→轴载谱", "荷载-响应温度修正", "实验室真值↔现场互校", "诊断三元组入 DE"]),
+ ("服务层 · 指标语义", "M6", "svc", None,
+  ["几何/桩号查询", "IRI/RQI 指标", "响应特征/阈值",
+   "ESAL/轴载谱", "气象序列", "试验真值比对", "诊断/预警推送"]),
+ ("应用层", "M8", "app",
+  "▲ 契约④ M6 OpenAPI ｜ 承诺方 M6；应用层唯一入口（应用不直连存储）",
+  ["孪生底图/决策", "养护评定", "承载力/诊断",
+   "承载力/孪生", "病害-气象关联", "承载力评估", "管理台/标注"]),
+]
+# 横切能力带（不按域分列，跨全宽）
+XBANDS = [
+ ("sem", "M7", "语义中枢 · 接入 Copilot",
+  "上传表头/单位/桩号 → 结构探查→规则→LLM 候选→人工确认→mapping_set 持久化；"
+  "同时是需求工单闭环入口（左栏绿色虚线起点）"),
+ ("app", "M9+M10", "平台管理台（集成面）＋ Agent 执行引擎（二期）",
+  "设备/映射/质量/工单 UI·权限·Grafana 嵌入·集成测试报告 ｜ "
+  "M10 二期：DeepSeek Harness＋MCP 工具面＋轨迹审计桥"),
+]
+
+
+def tint(hexcolor, a):
+    """把颜色按比例 a 混入白色 —— 作单元格浅底，保住文字对比度。"""
+    r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+    f = lambda v: int(round(255 * (1 - a) + v * a))
+    return f"#{f(r):02X}{f(g):02X}{f(b):02X}"
+
+
+def wrap(s, width, size=S_SMALL):
+    """按可用宽度折行：全角≈size、半角≈0.55×size（保守估算，渲染后由自检复核）。"""
+    out, cur, acc = [], "", 0.0
+    for ch in s:
+        wc = size * (1.0 if ord(ch) > 0x2000 else 0.68)
+        if cur and acc + wc > width:
+            out.append(cur); cur, acc = ch, wc
+        else:
+            cur += ch; acc += wc
+    if cur:
+        out.append(cur)
+    return out
+
+
+def build_fig4():
+    """总体架构 × 模块接口 × 7 域数据流动（一页总图）。"""
+    fig, ax, w, h = new_canvas(5.75)
+    fig_title(ax, w, h,
+              "图 D ｜ 总体架构 · 模块接口 · 7 大对象域数据流动",
+              "纵轴＝流水线阶段与模块落位（▲＝层间接口契约）；横轴＝7 大对象域泳道。"
+              "两侧色系分离：行色＝模块「作用」，列色＝对象域")
+
+    sw = 62.0                                   # 左栏：作用色条＋模块 chip＋作用名
+    x_grid = 3.0 + sw                     # 左栏文字最右到 ~62，须留间隙
+    x_loop = w - 32.0                           # 右侧闭环通道（两条虚线，分开排）
+    gw = x_loop - x_grid - 3.0
+    cw = gw / len(DOMS)
+    ROWH, STRIPH = 31.0, 9.0
+
+    y = h - 26.0
+    txt(ax, 3.0, y - 1.0, "阶段 ／ 模块 ／ 作用", S_SMALL, NEUTRAL["ink"],
+        weight="bold", va="top")
+    txt(ax, w - 3.0, y - 1.0, "闭环", S_SMALL, NEUTRAL["mid"],
+        ha="right", va="top")
+    hh = 18.0
+    for i, (code, cn) in enumerate(DOMS):
+        x = x_grid + i * cw
+        box(ax, x, y - hh, cw - 1.2, hh, "white", NEUTRAL["light"], lw=0.45)
+        box(ax, x, y - 2.4, cw - 1.2, 2.4, DOMAIN[code], None)
+        txt(ax, x + cw / 2 - 0.6, y - 5.2, code, 6.6, DOMAIN[code],
+            weight="bold", ha="center", va="top")
+        txt(ax, x + cw / 2 - 0.6, y - 12.4, cn, S_SMALL, NEUTRAL["ink"],
+            ha="center", va="top")
+    y -= hh + 2.0
+
+    band = {}                                   # 记录供闭环箭头定位
+    for name, mod, rk, strip, cells in GROWS:
+        col = ROLE[rk][1] if rk else NEUTRAL["bg2"]
+        if strip:
+            box(ax, 3.0, y - STRIPH, x_loop - 7.0, STRIPH, "white",
+                NEUTRAL["light"], lw=0.4, ls=(0, (2, 1.4)))
+            fit_lines(ax, x_grid, y - 1.6, wrap(strip, gw + 24.0), gw + 24.0,
+                      S_SMALL, color="#7A2E14")
+            y -= STRIPH
+        box(ax, 3.0, y - ROWH, x_loop - 7.0, ROWH, "white", NEUTRAL["light"], lw=0.45)
+        if rk:
+            ax.add_patch(Rectangle((3.0, y - ROWH), 2.2, ROWH, facecolor=col,
+                                   edgecolor="none", zorder=3))
+            box(ax, 8.0, y - 9.4, 28.0, 8.6, col, None, r=1.0)
+            txt(ax, 22.0, y - 2.9, mod, S_SMALL, "white", weight="bold",
+                ha="center", va="top")
+            txt(ax, 38.4, y - 7.6, ROLE[rk][0], S_SMALL, col, va="top")
+            txt(ax, 8.0, y - 15.6, name, S_BODY, NEUTRAL["ink"], weight="bold",
+                va="top")
+        else:
+            txt(ax, 8.0, y - 3.4, name, S_BODY, NEUTRAL["ink"], weight="bold",
+                va="top")
+            txt(ax, 8.0, y - 11.0, mod, S_SMALL, NEUTRAL["mid"], va="top")
+        for i, tx in enumerate(cells):
+            x = x_grid + i * cw
+            box(ax, x, y - ROWH + 1.4, cw - 1.2, ROWH - 2.8,
+                tint(col, 0.10) if rk else "white", NEUTRAL["light"], lw=0.35)
+            fit_lines(ax, x + 2.0, y - 3.4, wrap(tx, cw - 5.0), cw - 5.0, S_SMALL)
+        band[name] = (y, y - ROWH)
+        y -= ROWH
+
+    grid_bot = y
+    # 域内向下流箭头（每域每行界一枚，域色）—— 复现纵向布局算 y
+    yb = h - 26.0 - 18.0 - 2.0
+    for name, mod, rk, strip, cells in GROWS:
+        if strip:
+            yb -= STRIPH
+        yb -= ROWH
+        if yb > grid_bot + 1.0:
+            for i, (code, cn) in enumerate(DOMS):
+                ax.add_patch(FancyArrow(x_grid + i * cw + cw / 2 - 0.6, yb + 2.6,
+                                        0, -2.2, width=0.8, head_width=2.5,
+                                        head_length=1.5, length_includes_head=True,
+                                        facecolor=DOMAIN[code], edgecolor="none",
+                                        zorder=6))
+
+    # ---------- 横切能力带
+    y -= 4.0
+    for rk, mod, title, note in XBANDS:
+        col = ROLE[rk][1]
+        bh = 19.0
+        box(ax, 3.0, y - bh, x_loop - 7.0, bh, tint(col, 0.10), NEUTRAL["light"], lw=0.45)
+        ax.add_patch(Rectangle((3.0, y - bh), 2.2, bh, facecolor=col,
+                               edgecolor="none", zorder=3))
+        box(ax, 8.0, y - 9.4, 28.0, 8.6, col, None, r=1.0)
+        txt(ax, 22.0, y - 2.9, mod, S_SMALL, "white", weight="bold",
+            ha="center", va="top")
+        txt(ax, 38.4, y - 3.2, title, S_SMALL, col, weight="bold", va="top")
+        fit_lines(ax, 38.4, y - 10.4, wrap(note, w - 6.0 - 40.4), 
+                  w - 6.0 - 40.4, S_SMALL)
+        band.setdefault("X:" + mod, (y, y - bh))
+        y -= bh + 2.5
+
+    # ---------- 闭环虚线（右侧通道）
+    red_top, red_bot = band["双库存储层"][0], band["应用层"][1]
+    ax.add_patch(FancyArrow(x_loop + 12.0, red_bot + 1.5, 0,
+                            (red_top - 1.5) - (red_bot + 1.5), width=0.7,
+                            head_width=3.2, head_length=3.0,
+                            length_includes_head=True, facecolor="none",
+                            edgecolor=ACCENT["fb"], lw=1.0,
+                            linestyle=(0, (3, 1.8)), zorder=4))
+    txt(ax, x_loop + 17.5, (red_top + red_bot) / 2, "反馈回写", S_SMALL,
+        "#B3261E", va="center", rot=90)
+    g_top, g_bot = band["感知源"][0], band["X:M7"][1]
+    ax.add_patch(FancyArrow(x_loop + 1.0, g_bot + 1.5, 0,
+                            (g_top - 8.0) - (g_bot + 1.5), width=0.7,
+                            head_width=3.2, head_length=3.0,
+                            length_includes_head=True, facecolor="none",
+                            edgecolor=ACCENT["ticket"], lw=1.0,
+                            linestyle=(0, (3, 1.8)), zorder=4))
+    txt(ax, x_loop + 6.5, (g_top + g_bot) / 2, "工单补采", S_SMALL,
+        "#1B6B33", va="center", rot=90)
+
+    # ---------- 图例：模块作用
+    y = min(band["X:M9+M10"][1], grid_bot) - 7.0
+    txt(ax, 3.0, y, "模块作用（行色）", S_SMALL, NEUTRAL["ink"], weight="bold",
+        va="top")
+    xx = 62.0
+    for k in ("in", "st", "gov", "sem", "fus", "svc", "app", "p2"):
+        lab, col = ROLE[k]
+        box(ax, xx, y - 3.2, 5.4, 4.4, col, None, r=0.8)
+        txt(ax, xx + 7.0, y, lab, S_SMALL, NEUTRAL["ink"], va="top")
+        xx += 7.0 + len(lab) * 5.0 + 8.5
+    yl = y - 8.0
+    txt(ax, 3.0, yl, "对象域（列色）", S_SMALL, NEUTRAL["ink"], weight="bold",
+        va="top")
+    xx = 62.0
+    for code, cn in DOMS:
+        box(ax, xx, yl - 3.2, 5.4, 4.4, DOMAIN[code], None, r=0.8)
+        txt(ax, xx + 7.0, yl, cn, S_SMALL, NEUTRAL["ink"], va="top")
+        xx += 7.0 + len(cn) * 5.0 + 7.0
+    # ---------- 闭环说明 ＋ 6 服务
+    yc = yl - 8.5
+    fit_lines(ax, 3.0, yc,
+              wrap("红虚线＝反馈闭环：M8 应用（诊断/养护/模型输出）→ 回写底座 DE 域 → 支撑孪生标注与模型再训练；"
+                   "绿虚线＝工单闭环：未知指标/补采需求（M7）→ 感知源补采。", w - 6.0),
+              w - 6.0, S_SMALL, color=ACCENT["ink2"])
+    ys = yc - 14.5
+    fit_lines(ax, 3.0, ys,
+              wrap("骨架栈落地切片（6 服务 · 一条竖切跑通全链，覆盖 M1／M2／M6＋运维）："
+                   "pg＝postgis:16-3.4 业务主库（M1）｜ mqtt＝emqx:5.8 接入 Broker（M2）｜ "
+                   "minio＝对象存储（M1）｜ ingest＝订阅→契约校验→落库＋质量日志＋批次台账（M2）｜ "
+                   "api＝对象/指标查询＋动作层 501 占位（M6）｜ "
+                   "grafana＝运维看板（现直查 PG，违反“不直连存储”，待办②）", w - 6.0),
+              w - 6.0, S_SMALL, color=ACCENT["ink2"])
+    return fig, "架构图D-总体架构与七域数据流"
+
+
 # ================================================================== 自检与导出
 def audit_fit(fig, ax, name, pw, ph):
     """渲染后取真实包围盒，核对每段文字是否越出分配宽度、是否低于 5pt。"""
@@ -524,7 +748,7 @@ def export(fig, stem):
 
 def main():
     total = 0
-    for build in (build_fig1, build_fig2, build_fig3):
+    for build in (build_fig1, build_fig2, build_fig3, build_fig4):
         _MEASURE.clear()
         fig, stem = build()
         total += audit_fit(fig, fig.axes[0], stem, W_IN * PT,
