@@ -34,3 +34,8 @@ __pycache__/
 #     git add -f docpipe/materials docpipe/bands && git commit -m "纳入原始资料"
 docpipe/materials/
 docpipe/bands/
+pgdata/
+miniodata/
+grafanadata/
+*.zst
+.DS_Store
