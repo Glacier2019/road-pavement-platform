@@ -71,7 +71,7 @@ docker compose -f docker-compose.skeleton.yml up -d
 | `modules/M2-ingest/` | M2 接入服务（MQTT → 契约校验 → 落库 / 拒收），**完整竖切参考实现** |
 | `modules/M6-api/` | M6 统一数据出口（只经 M3 取数） |
 | `modules/M4-governance/` | M4 数据治理·真数据门 ← **P1 关键路径** |
-| `services/{fusion,semantic,apps,console,agent}/` | M5/M7/M8/M9/M10 骨架 |
+| `modules/{M5-fusion,M7-semantic,M8-apps,M9-console,M10-agent}/` | M5/M7/M8/M9/M10 骨架 |
 | `contracts/` | 四份契约：报文 / 表结构 / DAO / 服务接口 |
 | `sql/` | **契约② 真源**：`10_ddl_v0.2.sql`（32 表，compose 挂载它建库）＋ 数据字典 ＋ 分区 / 种子脚本 |
 | `tests/contract/` | **九个契约测试**，改动后必跑 |

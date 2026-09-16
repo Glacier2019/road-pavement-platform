@@ -110,7 +110,7 @@ docker exec rp-governance python3 -c \
 
 照抄任一骨架（建议抄 `modules/M4-governance/`，它最完整），六件事：
 
-1. `services/<name>/` 下建 `app.py`、`Dockerfile`、`requirements.txt`、`config/`、`README.md`
+1. `modules/M<n>-<name>/` 下建 `app.py`、`Dockerfile`、`requirements.txt`、`config/`、`README.md`（M 编号对应新模块）
 2. compose 里加服务段，**带自己的 profile**
 3. 契约提交到 `contracts/<模块>/`
 4. `tests/contract/` 里加测试，并在 `run_contract_tests.sh` 的 `TESTS` 数组登记
