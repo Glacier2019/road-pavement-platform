@@ -850,8 +850,11 @@ def main() -> int:
     )
     planned = di.plan(ir_fx, section_id=1)
     counts = {t: len(r) for t, r in planned["tables"].items()}
-    check("行数：桩号 30 / 交点 1 / 单元 4",
-          counts == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4},
+    # 合成 IR 里没有纵断面，故两张新表是 0 行 —— 但仍然必须在 plan 的产出里：
+    # 漏掉一个键会让落库阶段静默少写一张表，而不是报错。
+    check("行数：桩号 30 / 交点 1 / 单元 4 / 设计线 0 / 地面线 0",
+          counts == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4,
+                     "profile_grade_point": 0, "profile_ground_point": 0},
           str(counts))
     check("交点来源 = 推导（.JD 作输入被忽略）",
           planned["pi_source"] == "derived" and planned["pi_from_file_ignored"] is True,
@@ -1220,9 +1223,12 @@ def main() -> int:
           and all("未给字段号" in x for x in planned["skipped_files"]))
     check("★ 元测试：design_file 每行都有 file_kind_code（满足 NOT NULL）",
           all(f["file_kind_code"] for f in planned["tables"]["design_file"]))
-    check("parse_status 只对已实现适配器的后缀给 ok（实测 3 个）",
+    # 已实现适配器的后缀才给 ok。加 .DMX/.ZDM 后从 3 个变 5 个 —— 这条断言当时
+    # 变红是对的（它抓住了行为变化）。103/104 是不是 .DMX/.ZDM 已从库里核实：
+    #   103 = 毕设.DMX         104 = 纵断面设计拟合.ZDM
+    check("parse_status 只对已实现适配器的后缀给 ok（实测 5 个）",
           sorted(f["file_kind_code"] for f in planned["tables"]["design_file"]
-                 if f["parse_status"] == "ok") == ["101", "102", "109"],
+                 if f["parse_status"] == "ok") == ["101", "102", "103", "104", "109"],
           str([f["file_kind_code"] for f in planned["tables"]["design_file"]
                if f["parse_status"] == "ok"]))
     attr = planned["tables"]["section_design_attr"][0]

@@ -151,7 +151,8 @@ def build_ir(project_dir: str | pathlib.Path, *,
             continue
 
         try:
-            text = path.read_text(encoding="utf-8", errors="strict")
+            # utf-8 优先、退 gbk —— 见 base.read_text_any 的说明（.PRJ 是 GBK）
+            text, _used_enc = base.read_text_any(path)
             parser = _PARSERS[seg]
             if not parser.detect(text):
                 raise SourceInvalid(f"魔数不匹配，可能不是纬地 {suffix} 文件", file=path.name)
@@ -159,9 +160,12 @@ def build_ir(project_dir: str | pathlib.Path, *,
             version = version or out["vendor_version"]
             segments[seg] = out[parser.PAYLOAD_KEY]
             files.append({"name": path.name, "kind": kind, "parse_status": "ok", "note": None})
-        except UnicodeDecodeError:
+        except SourceInvalid as exc:
+            # 解码失败（既不是 UTF-8 也不是 GBK）或魔数不符都在这里。
+            # 原来的写法只捕 UnicodeDecodeError，还把原因写成"非 UTF-8/ASCII 文本，
+            # 疑似二进制" —— 对 GBK 文件那是**误判**（GBK 是正经文本编码）。
             files.append({"name": path.name, "kind": kind, "parse_status": "blocked",
-                          "note": "非 UTF-8/ASCII 文本，疑似二进制"})
+                          "note": str(exc)[:120]})
             reasons[seg] = "parse_blocked"
         except ParseBlocked as exc:
             files.append({"name": path.name, "kind": kind, "parse_status": "blocked",

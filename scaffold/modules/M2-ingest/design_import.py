@@ -38,7 +38,8 @@ from adapters import geom
 
 # 落库器只写这几张表。白名单是刻意的：**新增映射必须在这里显式登记**，
 # 免得一个 IR 段的增删悄悄改变写入范围。
-LOADABLE_TABLES = ("station_sequence", "alignment_pi", "alignment_element")
+LOADABLE_TABLES = ("station_sequence", "alignment_pi", "alignment_element",
+                   "profile_grade_point", "profile_ground_point")
 
 # 推导值与 .JD 文件值的允许偏差。实测全部 ≤ 3.6×10⁻⁸，此处留三个数量级余量，
 # 但仍远小于任何有工程意义的差（1 mm = 1×10⁻³）。
@@ -111,6 +112,10 @@ def _plan_stations(ir: Mapping[str, Any], section_id: int, *,
     return [{
         "section_id": section_id,
         "station_seq_no": p["seq_no"],
+        # 内部字段：落库时按它把 station_id 对给 profile_ground_point。
+        # 用**米**（IR 的原始单位）当键，而不是拿 station_local_km 反乘回米 ——
+        # 那样要写两次换算，而两次舍入只要差 1e-6 km 就会静默对不上。
+        "_station_m": round(p["station_m"], 6),
         "station_local_km": round(p["station_m"] / 1000.0, 6),
         "station_absolute_km": (None if base is None
                                 else round(base + p["station_m"] / 1000.0, 6)),
@@ -118,6 +123,45 @@ def _plan_stations(ir: Mapping[str, Any], section_id: int, *,
         "station_type": station_type(p["station_m"], first=first, last=last),
         "is_integer_station": is_integer_station(p["station_m"]),
     } for p in pts]
+
+
+def _plan_grade_points(ir: Mapping[str, Any], section_id: int) -> list[dict[str, Any]]:
+    """``profile_grade_point`` 行（纵断面**设计线**：变坡点）。
+
+    ``station_km`` 是**千米**（表里就是这么定的），IR 里是米 —— 单位换算只在这一处做，
+    不留给每个下游各自换算。纵坡与竖曲线长是 ``zdm.derive_grades`` 在适配器阶段
+    补出的派生量，这里原样带上：``None`` 就是 ``None``
+    （首/末变坡点缺一侧纵坡，或 R>0 却算不出来），不填 0 冒充。
+    """
+    out = []
+    for p in ir["segments"].get("profile_grade_point") or []:
+        out.append({
+            "section_id": section_id,
+            "vpi_seq": p["vpi_seq"],
+            "station_km": round(p["station_m"] / 1000.0, 6),
+            "elevation_m": round(p["elevation_m"], 6),
+            "vertical_curve_radius_m": p.get("vertical_curve_radius_m"),
+            "grade_in_pct": p.get("grade_in_pct"),
+            "grade_out_pct": p.get("grade_out_pct"),
+            "grade_len_m": p.get("grade_len_m"),
+        })
+    return out
+
+
+def _plan_ground_points(ir: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``profile_ground_point`` 行（纵断面**地面线**：逐桩原始地形高程）。
+
+    ▲ 本表**没有 section_id 列** —— 它是 GE 域里唯一锚在 ``station_id`` 上的表。
+    所以这里只带载荷与一个内部 ``_station_m``：id 只有写进 station_sequence 之后
+    才存在，而 plan 是纯函数、不碰数据库。解析发生在 :func:`load` 里。
+    """
+    out = []
+    for p in ir["segments"].get("profile_ground_point") or []:
+        out.append({
+            "ground_elev_m": round(p["ground_elev_m"], 6),
+            "_station_m": round(p["station_m"], 6),
+        })
+    return out
 
 
 def _plan_elements(ir: Mapping[str, Any], section_id: int) -> list[dict[str, Any]]:
@@ -238,6 +282,8 @@ def plan(ir: Mapping[str, Any], *, section_id: int,
                                            section_start_km=section_start_km),
         "alignment_pi": pi_rows,
         "alignment_element": _plan_elements(ir, section_id),
+        "profile_grade_point": _plan_grade_points(ir, section_id),
+        "profile_ground_point": _plan_ground_points(ir),
     }
     return {"tables": tables, "pi_source": pi_source,
             "pi_from_file_ignored": bool(pi_derived) and bool(pi_file)}
@@ -413,11 +459,18 @@ def load(ir: Mapping[str, Any], dao: Any, *,
     }
 
     with dao.write_txn(writer=writer) as tx:
-        # ① 桩号序列（一等实体）：其余表都以它/路段为锚
-        for table in ("station_sequence",):
-            if tables[table]:
-                report["written"][table] = tx.insert(
-                    table, tables[table], on_conflict=("section_id", "station_local_km"))
+        # ① 桩号序列（一等实体）：其余表都以它/路段为锚。
+        #    这里用**逐行 insert_returning**（而不是批量 insert）的唯一理由是拿回
+        #    station_id —— profile_ground_point 锚的就是它，而这一层不许读库，
+        #    id 只能从写入拿。on_conflict 给出时走 DO UPDATE，故重放也必返回 id（非 None）。
+        station_id_by_m: dict[float, int] = {}
+        if tables["station_sequence"]:
+            for row in tables["station_sequence"]:
+                clean = {k: v for k, v in row.items() if not k.startswith("_")}
+                station_id_by_m[row["_station_m"]] = tx.insert_returning(
+                    "station_sequence", clean,
+                    on_conflict=("section_id", "station_local_km"))
+            report["written"]["station_sequence"] = len(tables["station_sequence"])
 
         # ② 交点：先落，因为单元表要 FK 指向它。
         #    按 (section_id, pi_seq) 幂等 —— 重放同一批不会撞唯一约束，
@@ -441,7 +494,30 @@ def load(ir: Mapping[str, Any], dao: Any, *,
                 "alignment_element", element_rows,
                 on_conflict=("section_id", "element_seq"))
 
-        # ④ 批次登记
+        # ④ 纵断面设计线：锚 section_id，与其余 GE 表相同
+        if tables["profile_grade_point"]:
+            report["written"]["profile_grade_point"] = tx.insert(
+                "profile_grade_point", tables["profile_grade_point"],
+                on_conflict=("section_id", "vpi_seq"))
+
+        # ⑤ 纵断面地面线：把内部 _station_m 换成真实 station_id。
+        #    查不到就**在写之前抛错**，绝不留一条挂空的地面点 ——
+        #    逐桩高程错位不会报任何错，只会让整条路的地形静默错位。
+        if tables["profile_ground_point"]:
+            ground_rows = []
+            for row in tables["profile_ground_point"]:
+                sid_of_station = station_id_by_m.get(row["_station_m"])
+                if sid_of_station is None:
+                    raise LoadError(
+                        f"地面线桩号 {row['_station_m']} m 在桩号序列里找不到对应"
+                        f"（section_id={section_id}）—— 本表锚 station_id，错位不报错，"
+                        f"故此处直接拒收")
+                ground_rows.append({"station_id": sid_of_station,
+                                    "ground_elev_m": row["ground_elev_m"]})
+            report["written"]["profile_ground_point"] = tx.insert(
+                "profile_ground_point", ground_rows, on_conflict=("station_id",))
+
+        # ⑥ 批次登记
         tx.insert("data_import_batch", [batch], on_conflict=("batch_no",))
 
     return report
@@ -486,7 +562,8 @@ ARCHIVE_TABLES = ("design_project", "road_line", "road_section",
 
 #: 已实现适配器的后缀 → 该文件可解析。用于 design_file.parse_status。
 _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
-                       ".pm": "alignment_element", ".prj": "design_project"}
+                       ".pm": "alignment_element", ".prj": "design_project",
+                       ".dmx": "profile_ground_point", ".zdm": "profile_grade_point"}
 
 
 def _basename(rel_path: str | None) -> str | None:

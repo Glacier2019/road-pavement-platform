@@ -16,7 +16,11 @@
 """
 from __future__ import annotations
 
+import pathlib
+
 from typing import Any, Iterable
+
+from .errors import SourceInvalid
 
 # 几何段名 —— 一律用 GE 域物理表名（与契约⑤ schema 的 enum 严格一致）
 SEGMENTS: tuple[str, ...] = (
@@ -51,6 +55,31 @@ _LEVEL_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
 # 因为横断面表（cross_section 系）是 GE 完整化的**第二批**，要等 DDL v0.4。
 # 若 L3 定义成"平纵横全量"，那本工程在 v0.4 之前**永远达不到 L3**，
 # 等级就退化成"一直显示 L2"的噪声——一个永远不会变的状态码，比没有更糟。
+
+
+def read_text_any(path: Any) -> tuple[str, str]:
+    """读文本文件，返回 ``(文本, 实际用的编码)``。**utf-8 优先，退到 gbk。**
+
+    为什么必须退这一步：纬地的 **`.PRJ` 是 GBK**（实测首行 `HINTCAD6.00_PRJ_SHUJU`，
+    第 24 字节 `0xCF` 就不是合法 UTF-8），而它恰恰是**档案五表**（项目名、等级、
+    设计速度、路面结构…）唯一的来源。用 ``utf-8 errors="replace"`` 硬读不会报错，
+    只会解出一堆 `\ufffd`，然后解析器报"没有解析到任何 [项目设置] 字段"——
+    错误信息指向解析器，真凶却是编码。这个坑实测踩过一次。
+
+    依次尝试 utf-8 → gbk：`.STA/.JD/.pm/.DMX/.ZDM` 都是纯 ASCII，
+    gbk 对 ASCII 与 utf-8 完全一致，故这个顺序不会有歧义。
+    两种都失败才抛，且把两个失败原因都带上。
+    """
+    raw = pathlib.Path(path).read_bytes()
+    tries: list[str] = []
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError as exc:
+            tries.append(f"{enc}: {exc}")
+    raise SourceInvalid(
+        "既不是 UTF-8 也不是 GBK（疑似二进制文件）：" + "；".join(tries),
+        file=pathlib.Path(path).name)
 
 
 def level_hit(required: tuple[str, ...], present: set[str], mode: str) -> bool:
