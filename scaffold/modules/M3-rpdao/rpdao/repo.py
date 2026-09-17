@@ -261,11 +261,19 @@ class GeRepository(DomainRepository):
 
     #: 线形单元。`pi_id` 为空的是**直线段**——直线不属于任何交点，这是正常的，
     #: 不是漏挂（实测 33 个单元里 9 条直线、`pi_id` 全空，双向都成立）。
+    #:
+    #: `azimuth_deg` 就是**起点**方位角（表里另有 `end_azimuth_deg`）。实测确认：
+    #: 直线段两端相等；过渡段起止相接，且等于下一段的起点。表里"有 end_ 却没有
+    #: start_"的写法会让调用方猜错 —— 几何浏览页第一版正是把它当成了并不存在的
+    #: `start_azimuth_deg`，于是整列静默显示成空（值没错，是名字对不上）。
+    #: 在 DAO 里显式起别名，属于这一层"语义化命名"的职责。
     ELEMENTS_SQL = """
     SELECT e.element_seq, e.element_type, e.pi_id,
            e.start_station_km, e.end_station_km, e.length_m,
            e.start_x, e.start_y, e.end_x, e.end_y,
-           e.center_x, e.center_y, e.azimuth_deg, e.end_azimuth_deg,
+           e.center_x, e.center_y,
+           e.azimuth_deg     AS start_azimuth_deg,
+           e.end_azimuth_deg AS end_azimuth_deg,
            e.radius_start_m, e.radius_end_m,
            p.pi_seq
     FROM alignment_element e

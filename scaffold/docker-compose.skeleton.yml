@@ -325,6 +325,9 @@ services:
     environment:
       MODULE_REGISTRY: config/modules.yaml
       PROBE_TIMEOUT_S: "3"
+      # 几何浏览页经此地址转发到 M6（容器内服务名与端口，不是宿主映射端口 8001）
+      GATEWAY_BASE: http://api:8000
+      GATEWAY_TIMEOUT_S: "10"
       LOG_LEVEL: INFO
       TZ: Asia/Shanghai
     ports:

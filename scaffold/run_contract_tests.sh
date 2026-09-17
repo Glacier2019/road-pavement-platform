@@ -25,6 +25,9 @@ export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PWD/../.uvpython}"
 PY_DEPS=(--with jsonschema --with pyyaml --with pydantic)
 DAO_DEPS=(--with "psycopg[binary,pool]==3.2.3")
 API_DEPS=(--with fastapi==0.115.6 --with httpx --with "psycopg[binary,pool]==3.2.3")
+# M9 集成面：要 fastapi+httpx 起 TestClient，还要 pyyaml 读模块登记表；
+# 它**不需要** psycopg —— M9 不直连库（这正是 test_console.py 第 1 组钉的事）。
+CONSOLE_DEPS=(--with fastapi==0.115.6 --with httpx --with pyyaml==6.0.2)
 
 # name | 说明 | 负责模块 | 依赖 | 测试文件
 TESTS=(
@@ -38,6 +41,7 @@ TESTS=(
   "m3-写权|契约③写入侧：表级写权守卫（应通过/应拒绝两侧）+ M2 不绕契约|M2/M3|PY|tests/contract/test_write_guard.py"
   "m1-表数|契约②：DDL ↔ 数据字典 ↔ catalog 三处表数一致|M1/M3|PY|tests/contract/test_ddl_dict_catalog.py"
   "design-导入|契约⑤：设计导入 IR + 纬地 .STA/.JD/.pm 适配器 + 落库器（应通过/应拒绝两侧）|M2|PY|tests/contract/test_design_import.py"
+  "m9-集成面|M9 集成面：页面只经 /gw 取数、不直连库、转发的边界（应通过/应拒绝两侧）|M9|CONSOLE|tests/contract/test_console.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -72,6 +76,7 @@ for t in "${TESTS[@]}"; do
     PY)  dep_args=("${PY_DEPS[@]}") ;;
     DAO) dep_args=("${DAO_DEPS[@]}") ;;
     API) dep_args=("${API_DEPS[@]}") ;;
+    CONSOLE) dep_args=("${CONSOLE_DEPS[@]}") ;;
     *)   dep_args=("${PY_DEPS[@]}") ;;
   esac
 

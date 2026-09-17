@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GE 道路几何 · 平台管理台</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --ink:#1c1f23; --muted:#6b7280;
+    --accent:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --bad:#b42318; --chip:#eef2f7;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",
+    "Source Han Sans SC","Microsoft YaHei",sans-serif}
+  header{padding:18px 24px 14px;background:var(--card);border-bottom:1px solid var(--line)}
+  h1{margin:0 0 4px;font-size:18px;font-weight:650}
+  .path{color:var(--muted);font-size:12.5px}
+  .path code{font-family:var(--mono);background:var(--chip);padding:1px 5px;border-radius:4px}
+  main{padding:18px 24px 48px;max-width:1400px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:16px 18px;margin-bottom:16px}
+  h2{margin:0 0 12px;font-size:15px;font-weight:620;display:flex;align-items:center;gap:8px}
+  h2 .n{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    background:var(--chip);padding:2px 7px;border-radius:20px;font-weight:500}
+  .row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center}
+  label{color:var(--muted);font-size:13px}
+  select,input{font:inherit;padding:6px 9px;border:1px solid var(--line);border-radius:7px;
+    background:#fff;color:var(--ink)}
+  input[type=number]{width:92px}
+  button{font:inherit;padding:6px 13px;border:1px solid var(--line);border-radius:7px;
+    background:var(--chip);cursor:pointer}
+  button:hover{background:#e5e9ef}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:5px 9px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  th{color:var(--muted);font-weight:600;background:#fafbfc;position:sticky;top:0}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  .scroll{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:13px}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px}
+  .lvl{font-family:var(--mono);font-size:26px;font-weight:700;line-height:1}
+  .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;
+    background:var(--chip);color:var(--muted)}
+  .badge.ok{background:#e6f4ea;color:var(--ok)}
+  .badge.warn{background:#fff4e0;color:var(--warn)}
+  .badge.bad{background:#fde8e6;color:var(--bad)}
+  .muted{color:var(--muted)}
+  .mono{font-family:var(--mono)}
+  .empty{padding:22px 8px;color:var(--muted);text-align:center}
+  #err{display:none;background:#fde8e6;border:1px solid #f5c2bd;color:var(--bad);
+    border-radius:10px;padding:14px 18px;margin-bottom:16px}
+  #err code{font-family:var(--mono);background:#fff;padding:1px 5px;border-radius:4px}
+  .links a{color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:12.5px}
+  .links a:hover{text-decoration:underline}
+  footer{color:var(--muted);font-size:12.5px;padding:0 24px 40px;max-width:1400px}
+</style>
+</head>
+<body>
+<header>
+  <h1>GE 道路几何</h1>
+  <div class="path">
+    数据来源：本页 → <code>M9 /gw/</code> → <code>M6 统一数据出口</code> → <code>M3 rpdao</code> → PostgreSQL。
+    <b>本页不接触数据库</b>，全部经 M6 契约取数。
+  </div>
+</header>
+
+<main>
+  <div id="err"></div>
+
+  <section>
+    <h2>路段 <span class="n">GET /v1/geometry/sections</span></h2>
+    <div class="row">
+      <label>选择路段</label>
+      <select id="pick"></select>
+      <span id="pickmeta" class="muted"></span>
+    </div>
+  </section>
+
+  <div id="body" hidden>
+    <section>
+      <h2>概览与几何完整度 <span class="n">GET /v1/geometry/sections/{id}/summary</span></h2>
+      <div class="grid2">
+        <div>
+          <dl class="kv" id="ov"></dl>
+        </div>
+        <div>
+          <div class="row" style="margin-bottom:10px">
+            <span class="lvl" id="lvl">—</span>
+            <span id="lvlwhy" class="muted"></span>
+          </div>
+          <div id="present"></div>
+          <div style="margin-top:12px" id="gaps"></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>桩号序列 <span class="n">GET /v1/geometry/sections/{id}/stations</span></h2>
+      <div class="row" style="margin-bottom:12px">
+        <label>起 (km)</label><input type="number" id="from" step="0.001" placeholder="不限">
+        <label>止 (km)</label><input type="number" id="to" step="0.001" placeholder="不限">
+        <label><input type="checkbox" id="intonly"> 只看整桩</label>
+        <label>条数</label>
+        <select id="lim">
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="500">500</option>
+          <option value="5000">全部</option>
+        </select>
+        <button id="apply">查询</button>
+        <span id="stcount" class="muted"></span>
+      </div>
+      <div class="scroll"><table id="sttbl"></table></div>
+    </section>
+
+    <section>
+      <h2>平面线形 · 交点链 <span class="n">GET /v1/geometry/sections/{id}/alignment</span></h2>
+      <div class="scroll"><table id="pitbl"></table></div>
+    </section>
+
+    <section>
+      <h2>平面线形 · 线元链 <span class="n">GET /v1/geometry/sections/{id}/alignment</span></h2>
+      <div id="elnote" class="muted" style="font-size:12.5px;margin-bottom:8px"></div>
+      <div class="scroll"><table id="eltbl"></table></div>
+    </section>
+
+    <section>
+      <h2>原始 JSON（可自行核对）</h2>
+      <div class="links" id="raw"></div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  等级是<b>当场算出来的派生量</b>（依据：哪些段有数据），不是存下来的字段——所以本页连依据一起显示，结论可核对。
+  缺口分两类：<b>表还没建</b>（schema 没到）与<b>表建好了但没数据</b>（解析器没做），含义不同，不混为一谈。
+</footer>
+
+<script>
+"use strict";
+
+// 一律经 M9 自己的只读转发取数：同源、无需 CORS，M6 的地址留在服务端配置里。
+const GW = "/gw";
+
+function esc(v) {
+  return String(v === null || v === undefined ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+function num(v, d) {
+  return (v === null || v === undefined || v === "") ? "—" : Number(v).toFixed(d === undefined ? 3 : d);
+}
+function showErr(msg, detail) {
+  const e = document.getElementById("err");
+  e.innerHTML = "取不到数据：" + esc(msg) +
+    (detail ? "<br><span class='mono' style='font-size:12px'>" + esc(detail) + "</span>" : "") +
+    "<br><span class='mono' style='font-size:12px'>检查 M6 是否在运行（" +
+    "<a href='/healthz'>M9 /healthz</a> 只报 M9 自身；M6 见 /v1/modules/status）</span>";
+  e.style.display = "block";
+}
+function clearErr() { document.getElementById("err").style.display = "none"; }
+
+async function api(path) {
+  const r = await fetch(GW + path, { headers: { "Accept": "application/json" } });
+  if (!r.ok) {
+    let d = "";
+    try { d = JSON.stringify((await r.json()).detail); } catch (e) { /* 非 JSON 错误体 */ }
+    throw new Error(r.status + " " + r.statusText + (d ? " " + d : ""));
+  }
+  return r.json();
+}
+
+function table(el, cols, rows) {
+  const t = document.getElementById(el);
+  const head = "<tr>" + cols.map(c => "<th" + (c.num ? " class='num'" : "") + ">" + esc(c.t) + "</th>").join("") + "</tr>";
+  const body = rows.map(r => "<tr>" + cols.map(c =>
+    "<td" + (c.num ? " class='num'" : "") + ">" + (c.f ? c.f(r) : esc(r[c.k])) + "</td>").join("") + "</tr>").join("");
+  t.innerHTML = head + body;
+}
+
+const LEVEL_CLASS = { L0: "bad", L1: "warn", L2: "ok", L3: "ok", L4: "ok" };
+
+let SECTIONS = [];
+
+async function loadSections() {
+  const d = await api("/v1/geometry/sections");
+  SECTIONS = d.items || [];
+  const sel = document.getElementById("pick");
+  if (!SECTIONS.length) {
+    sel.innerHTML = "<option>（数据库里还没有任何路段）</option>";
+    sel.disabled = true;
+    document.getElementById("body").hidden = true;
+    clearErr();
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = SECTIONS.map(s =>
+    "<option value='" + s.id + "'>" + esc(s.section_name) + "　·　线 " + esc(s.line_code) +
+    "　·　" + esc(s.start_station_text) + "–" + esc(s.end_station_text) +
+    "　·　桩号 " + s.station_count + "</option>").join("");
+  const firstWithData = SECTIONS.find(s => s.station_count || s.pi_count || s.element_count) || SECTIONS[0];
+  sel.value = firstWithData.id;
+  await loadSection(firstWithData.id);
+}
+
+async function loadSection(id) {
+  clearErr();
+  document.getElementById("body").hidden = false;
+  const sel = SECTIONS.find(s => String(s.id) === String(id));
+  document.getElementById("pickmeta").textContent = sel
+    ? "桩号 " + sel.station_count + "　交点 " + sel.pi_count + "　线元 " + sel.element_count
+    : "";
+
+  let sum;
+  try {
+    sum = await api("/v1/geometry/sections/" + id + "/summary");
+  } catch (e) { showErr(e.message, "GET /v1/geometry/sections/" + id + "/summary"); return; }
+
+  const s = sum.section || {}, c = sum.completeness || {};
+  document.getElementById("ov").innerHTML = [
+    ["路段", esc(s.section_name) + "　<span class='mono'>section_id=" + esc(s.id) + "</span>"],
+    ["所属路线", esc(s.line_code) + "　" + esc(s.road_class || "—") +
+      "　" + esc(s.design_speed || "—") + " km/h　" + esc(s.lane_count || "—") + " 车道"],
+    ["桩号范围", "<span class='mono'>" + esc(s.start_station_text) + " – " + esc(s.end_station_text) + "</span>"],
+    ["长度", num(s.length_m, 3) + " m"],
+    ["设计项目", esc(s.project_name || "—") + (s.designer ? "　（设计人 " + esc(s.designer) + "）" : "")],
+    ["来源（文件级）", "<span class='mono' style='font-size:12px'>" + esc(s.project_source_file || s.attr_source_file || "—") + "</span>"],
+    ["路幅 / 横坡", num(s.roadway_width_m, 2) + " m　车道横坡 " + num(s.carriageway_crossfall_pct, 2) +
+      "%　路肩 " + num(s.shoulder_crossfall_pct, 2) + "%　最大超高 " + num(s.max_superelev_pct, 2) + "%"]
+  ].map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>").join("");
+
+  const lv = c.geometry_level || "—";
+  const badge = document.getElementById("lvl");
+  badge.textContent = lv;
+  badge.className = "lvl badge " + (LEVEL_CLASS[lv] || "");
+  document.getElementById("lvlwhy").textContent = c.level_reason || "";
+
+  const present = c.present || {};
+  const pkeys = Object.keys(present);
+  document.getElementById("present").innerHTML =
+    "<div class='muted' style='font-size:12.5px;margin-bottom:5px'>有数据的段</div>" +
+    (pkeys.length
+      ? "<div class='row'>" + pkeys.map(k =>
+          "<span class='badge ok'>" + esc(k) + " " + present[k] + "</span>").join("") + "</div>"
+      : "<span class='muted'>无</span>");
+
+  const nb = c.missing_not_built || [], nd = c.missing_no_data || [];
+  document.getElementById("gaps").innerHTML =
+    "<div class='muted' style='font-size:12.5px;margin-bottom:5px'>缺口（两类含义不同）</div>" +
+    "<div style='margin-bottom:4px'><span class='badge warn'>表还没建</span> " +
+      (nb.length ? nb.map(esc).join("、") : "<span class='muted'>无</span>") + "</div>" +
+    "<div><span class='badge'>建好了但没数据</span> " +
+      (nd.length ? nd.map(esc).join("、") : "<span class='muted'>无</span>") + "</div>";
+
+  document.getElementById("raw").innerHTML = [
+    ["路段列表", "/v1/geometry/sections"],
+    ["本路段概要", "/v1/geometry/sections/" + id + "/summary"],
+    ["桩号序列", "/v1/geometry/sections/" + id + "/stations?limit=5000"],
+    ["平面线形", "/v1/geometry/sections/" + id + "/alignment"]
+  ].map(([t, p]) => "<div><a href='" + GW + p + "' target='_blank'>" + t + "</a>　<span class='muted mono' style='font-size:12px'>" + p + "</span></div>").join("");
+
+  await loadStations(id);
+  await loadAlignment(id);
+}
+
+async function loadStations(id) {
+  const from = document.getElementById("from").value;
+  const to = document.getElementById("to").value;
+  const intonly = document.getElementById("intonly").checked;
+  const lim = document.getElementById("lim").value;
+  const q = new URLSearchParams();
+  if (from !== "") q.set("from_km", from);
+  if (to !== "") q.set("to_km", to);
+  if (intonly) q.set("integer_only", "true");
+  q.set("limit", lim);
+
+  let d;
+  try { d = await api("/v1/geometry/sections/" + id + "/stations?" + q.toString()); }
+  catch (e) { showErr(e.message, "GET stations"); return; }
+
+  const items = d.items || [];
+  document.getElementById("stcount").textContent =
+    "返回 " + d.count + " 点" + (d.count >= Number(lim) ? "（已达条数上限，可能还有更多）" : "");
+  if (!items.length) {
+    document.getElementById("sttbl").innerHTML =
+      "<tr><td class='empty'>该筛选条件下没有桩号</td></tr>";
+    return;
+  }
+  table("sttbl", [
+    { t: "序", num: true, k: "station_seq_no" },
+    { t: "桩号文本", f: r => "<span class='mono'>" + esc(r.station_text) + "</span>" },
+    { t: "路段内里程 km", num: true, f: r => num(r.station_local_km, 6) },
+    { t: "绝对桩号 km", num: true, f: r => num(r.station_absolute_km, 6) },
+    { t: "类型", k: "station_type" },
+    { t: "整桩", f: r => (r.is_integer_station ? "是" : "<span class='muted'>否</span>") }
+  ], items);
+}
+
+async function loadAlignment(id) {
+  let d;
+  try { d = await api("/v1/geometry/sections/" + id + "/alignment"); }
+  catch (e) { showErr(e.message, "GET alignment"); return; }
+
+  const pis = d.pis || [], els = d.elements || [];
+  if (!pis.length) {
+    document.getElementById("pitbl").innerHTML =
+      "<tr><td class='empty'>该路段没有交点数据（几何等级通常为 L0 或 L1）</td></tr>";
+  } else {
+    table("pitbl", [
+      { t: "交点", f: r => "PI" + esc(r.pi_seq) },
+      { t: "类型", k: "pi_type" },
+      { t: "X", num: true, f: r => num(r.x_coord, 4) },
+      { t: "Y", num: true, f: r => num(r.y_coord, 4) },
+      { t: "R (m)", num: true, f: r => num(r.radius_m, 4) },
+      { t: "Ls1 (m)", num: true, f: r => num(r.spiral_ls1_m, 4) },
+      { t: "Ls2 (m)", num: true, f: r => num(r.spiral_ls2_m, 4) },
+      { t: "A1", num: true, f: r => num(r.spiral_a1, 8) },
+      { t: "T (m)", num: true, f: r => num(r.tangent_len_m, 4) },
+      { t: "曲线长 (m)", num: true, f: r => num(r.curve_len_m, 4) },
+      { t: "转角 (°)", num: true, f: r => num(r.deflection_deg, 6) },
+      { t: "外距 (m)", num: true, f: r => num(r.external_m, 6) }
+    ], pis);
+  }
+
+  if (!els.length) {
+    document.getElementById("eltbl").innerHTML =
+      "<tr><td class='empty'>该路段没有线元数据</td></tr>";
+  } else {
+    const unattached = els.filter(e => e.pi_id === null || e.pi_id === undefined).length;
+    table("eltbl", [
+      { t: "序", num: true, k: "element_seq" },
+      { t: "类型", k: "element_type" },
+      { t: "属于交点", f: r => (r.pi_id === null || r.pi_id === undefined)
+          ? "<span class='muted'>—（直线段不属于任何交点）</span>" : "PI" + esc(r.pi_seq) },
+      { t: "起桩号 km", num: true, f: r => num(r.start_station_km, 6) },
+      { t: "止桩号 km", num: true, f: r => num(r.end_station_km, 6) },
+      { t: "长度 m", num: true, f: r => num(r.length_m, 4) },
+      { t: "起点 X / Y", num: true, f: r => num(r.start_x, 3) + " / " + num(r.start_y, 3) },
+      { t: "终点 X / Y", num: true, f: r => num(r.end_x, 3) + " / " + num(r.end_y, 3) },
+      { t: "起点方位角°", num: true, f: r => num(r.start_azimuth_deg, 6) },
+      { t: "终点方位角°", num: true, f: r => num(r.end_azimuth_deg, 6) }
+    ], els);
+    // 直线段不属于任何交点，这不是漏挂 —— 说清楚，免得看的人自己去怀疑数据
+    document.getElementById("elnote").textContent = unattached
+      ? "其中 " + unattached + " 条直线段未挂交点（直线不属于任何交点，正常）"
+      : "全部线元都挂在某个交点上";
+  }
+}
+
+function wire() {
+  document.getElementById("pick").addEventListener("change", e => loadSection(e.target.value));
+  document.getElementById("apply").addEventListener("click", () => {
+    const id = document.getElementById("pick").value;
+    if (id) loadStations(id);
+  });
+  document.getElementById("intonly").addEventListener("change", () => {
+    const id = document.getElementById("pick").value;
+    if (id) loadStations(id);
+  });
+  document.getElementById("lim").addEventListener("change", () => {
+    const id = document.getElementById("pick").value;
+    if (id) loadStations(id);
+  });
+}
+
+wire();
+loadSections().catch(e => showErr(e.message, "GET /v1/geometry/sections —— M6 可能未启动或 /gw 转发不通"));
+</script>
+</body>
+</html>

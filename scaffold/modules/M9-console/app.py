@@ -26,14 +26,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 from typing import Any
 
 import yaml
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -44,6 +46,15 @@ LOG = logging.getLogger("m9-console")
 # 模块登记表走配置外置：M9 是**读**各模块，自己不需要先建表
 REGISTRY_PATH = os.getenv("MODULE_REGISTRY", "config/modules.yaml")
 PROBE_TIMEOUT = float(os.getenv("PROBE_TIMEOUT_S", "3"))
+
+# 几何浏览页取数用的 M6 地址。**只在服务端**（配置全外置，五件套第 3 件）：
+# 页面自身不写死主机端口，所以 M9 部署到哪台机器、从哪个地址打开都能用。
+GATEWAY_BASE = os.getenv("GATEWAY_BASE", "http://localhost:8001").rstrip("/")
+GATEWAY_TIMEOUT_S = float(os.getenv("GATEWAY_TIMEOUT_S", "10"))
+#: 只转发这些前缀。**这不是通用代理**：只有 GET，且必须落在 M6 的 API 命名空间内 ——
+#: 目的是让页面与 M9 同源（不必给 M6 放开 CORS），而不是把 M9 变成任意转发器。
+GATEWAY_ALLOWED_PREFIXES = ("v1/",)
+GEOMETRY_PAGE = pathlib.Path(__file__).with_name("geometry.html")
 
 MODULE_CONTRACTS = {
     "consumes": ["各模块 GET /healthz（五件套第 2 件）"],
@@ -200,6 +211,47 @@ def modules_status() -> dict[str, Any]:
         })
     ok_n = sum(1 for r in out if r["probe"].get("reachable"))
     return {"total": len(out), "reachable": ok_n, "unreachable": len(out) - ok_n, "items": out}
+
+
+@app.get("/geometry", response_class=HTMLResponse, include_in_schema=False)
+def geometry_page() -> HTMLResponse:
+    """GE 道路几何浏览页（自包含 HTML：内联 JS + CSS，无构建步骤、无新依赖）。
+
+    **本页不接触数据库**：它经 `/gw/` 转发到 M6（契约④），M6 再经 M3 rpdao（契约③）
+    取数。三条数据硬线里的"读只经 rpdao"因此仍然成立 —— M9 只是网络中转，
+    手里没有任何 SQL，也没有 PG_DSN（compose 里刻意不给它）。
+    """
+    if not GEOMETRY_PAGE.exists():
+        raise HTTPException(500, f"页面文件缺失：{GEOMETRY_PAGE.name}")
+    return HTMLResponse(GEOMETRY_PAGE.read_text(encoding="utf-8"))
+
+
+@app.get("/gw/{path:path}", include_in_schema=False)
+def gateway_get(path: str, request: Request) -> JSONResponse:
+    """只读转发到 M6。存在的唯一理由是**同源**：省掉给 M6 放开 CORS。
+
+    只允许 GET 且限 `v1/` 前缀 —— 一个无限制的转发器等于把 M9 变成任意 URL 抓手，
+    那不是在集成，是在开洞。转发失败一律 502 并说明上游是谁（不静默、不假装 200）。
+    """
+    if not any(path.startswith(p) for p in GATEWAY_ALLOWED_PREFIXES):
+        raise HTTPException(
+            404, f"只转发 {'/'.join('/' + p for p in GATEWAY_ALLOWED_PREFIXES)} 下的只读接口：{path}")
+    url = f"{GATEWAY_BASE}/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    try:
+        with urllib.request.urlopen(url, timeout=GATEWAY_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # 上游的语义化状态码（404/422…）**原样透传**：页面要能区分"路段不存在"与"代理坏了"
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        raise HTTPException(exc.code, detail=f"上游 M6 返回 {exc.code}：{detail}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(
+            502, detail=f"取不到上游数据：M6（{GATEWAY_BASE}）不可达 —— {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, detail=f"上游返回的不是 JSON：{exc}") from exc
+    return JSONResponse(payload)
 
 
 if __name__ == "__main__":  # pragma: no cover
