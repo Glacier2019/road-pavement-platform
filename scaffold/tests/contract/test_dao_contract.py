@@ -261,6 +261,37 @@ def main() -> int:
     ok("★ 交叉核对：GeRepository.LEVEL_RULES == M2 base._LEVEL_RULES",
        tuple(repo_mod.GeRepository.LEVEL_RULES) == tuple(m2base._LEVEL_RULES),
        f"M3={repo_mod.GeRepository.LEVEL_RULES} M2={m2base._LEVEL_RULES}")
+
+    # 只对"规则数据"还不够：两边可以一个写成 any、一个写成 all，上面那条照样全绿，
+    # 而同一个路段在两处会得到**不同的等级**。所以再拿同一批用例对拍判定逻辑本身。
+    _modes = {lv: m for lv, _segs, m in repo_mod.GeRepository.LEVEL_RULES}
+    ok("★★ L3 的组合方式是 all（只给地面线不得算作'有纵断面设计'）",
+       _modes.get("L3") == "all", f"实为 {_modes.get('L3')}：{_modes}")
+    ok("★★ L2 的组合方式仍是 any（刻意保留：交点链已足以定出平面线形）",
+       _modes.get("L2") == "any", f"实为 {_modes.get('L2')}")
+
+    _cases = [
+        ((), set(), "any", False),
+        (("a",), {"a"}, "any", True),
+        (("a",), set(), "any", False),
+        (("a", "b"), {"a"}, "any", True),
+        (("a", "b"), {"a"}, "all", False),
+        (("a", "b"), {"b"}, "all", False),
+        (("a", "b"), {"a", "b"}, "all", True),
+        ((), set(), "all", True),
+    ]
+    _diff = [c for c in _cases
+             if repo_mod.GeRepository.level_hit(c[0], c[1], c[2])
+             != m2base.level_hit(c[0], c[1], c[2])]
+    ok("★★ 交叉核对：M3 与 M2 的等级判定逻辑逐个用例一致（不只是规则数据）",
+       not _diff, f"不一致 {_diff}")
+
+    # 元测试：把 L3 改回 any 时，上面那条"必须是 all"的检查会失败吗？
+    # 不验这一下，就无法排除"检查写得永远为真"。
+    _l3req = next(segs for lv, segs, _m in repo_mod.GeRepository.LEVEL_RULES if lv == "L3")
+    ok("★★ 元测试：L3 若改回 any，'只给地面线'就会判为命中（说明该检查非摆设）",
+       repo_mod.GeRepository.level_hit(_l3req, {"profile_ground_point"}, "any") is True
+       and repo_mod.GeRepository.level_hit(_l3req, {"profile_ground_point"}, "all") is False)
     m3_segs = set(repo_mod.GeRepository.SEGMENT_ANCHOR) | set(
         repo_mod.GeRepository.SEGMENTS_NOT_BUILT)
     ok("★ 交叉核对：M3 覆盖的段集合 == M2 声明的 SEGMENTS（不多不少）",

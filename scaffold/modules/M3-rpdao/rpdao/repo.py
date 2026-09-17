@@ -288,11 +288,14 @@ class GeRepository(DomainRepository):
     #: 而"哪个段齐了算几级"这条规则两边都要用。既然只能各写一遍，
     #: 就用测试把两遍钉在一起（tests/contract/test_dao_contract.py 里有交叉核对）。
     #: 改这里必须同时改那边，否则测试会红。
-    LEVEL_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("L4", ("cross_section",)),
-        ("L3", ("profile_grade_point", "profile_ground_point")),
-        ("L2", ("alignment_pi", "alignment_element")),
-        ("L1", ("station_sequence",)),
+    #: 每条是 (等级, 该级要求的段, 组合方式)。**组合方式也在数据里**，
+    #: 所以上面那条 == 交叉核对会把组合方式一起钉住 —— 只对规则、不对组合方式的话，
+    #: 两边可以一个 any 一个 all 而测试全绿，等级却在两处给出不同答案。
+    LEVEL_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+        ("L4", ("cross_section",), "any"),
+        ("L3", ("profile_grade_point", "profile_ground_point"), "all"),
+        ("L2", ("alignment_pi", "alignment_element"), "any"),
+        ("L1", ("station_sequence",), "any"),
     )
 
     #: 段 → (表, **定位列**)。
@@ -338,6 +341,17 @@ class GeRepository(DomainRepository):
         """所有路段（含所属路线/项目/分段属性/三类几何计数）。"""
         return self._dao.query(self.SECTIONS_SQL)
 
+    @staticmethod
+    def level_hit(required: tuple[str, ...], present: set[str], mode: str) -> bool:
+        """单个等级的判定。**必须与 M2 `adapters/base.level_hit` 逐字同义。**
+
+        M3 不许 import M2，所以只能各写一遍 —— 那就用测试拿着同一批用例对拍两边，
+        而不是靠"我记得两处写得一样"。归一化成"有数据的段集合"之后，
+        这个函数就是纯函数，离线可测。
+        """
+        got = [s for s in required if s in present]
+        return bool(got) if mode == "any" else len(got) == len(required)
+
     def section(self, section_id: int) -> dict[str, Any]:
         row = self._dao.query_one(self.ONE_SECTION_SQL, {"sid": section_id})
         if row is None:
@@ -375,13 +389,31 @@ class GeRepository(DomainRepository):
         for seg in self.SEGMENTS_NOT_BUILT:
             counts[seg] = 0
 
+        # 归一化成"有数据的段集合"再判定：与 M2 用同一个纯函数，
+        # 差别只在"有没有数据"怎么算（这里是行数 > 0）。
+        present_set = {s for s, n in counts.items() if n}
         level = "L0"
         reason = "没有任何几何段"
-        for lv, required in self.LEVEL_RULES:
-            hit = [s for s in required if counts.get(s)]
-            if hit:
-                level, reason = lv, f"{'／'.join(hit)} 有数据"
-                break
+        for lv, required, mode in self.LEVEL_RULES:
+            if not self.level_hit(required, present_set, mode):
+                continue
+            hit = [s for s in required if s in present_set]
+            if mode == "all" or len(required) == 1:
+                reason = f"{'／'.join(hit)} 有数据"
+            else:
+                reason = f"{'／'.join(hit)} 有数据"
+            break
+        else:
+            # 差一档时，把"还差什么"直接写进理由 —— 这个方法存在的意义就是
+            # 回答"为什么是 L2 而不是 L3"，只报命中的段回答不了这个问题。
+            for lv, required, mode in self.LEVEL_RULES:
+                need = [s for s in required if s not in present_set]
+                have = [s for s in required if s in present_set]
+                if have and need:
+                    reason = (f"{'／'.join(have)} 有数据，"
+                              f"但 {lv} 要求 {'／'.join(required)} **全部**有数据，"
+                              f"缺 {'／'.join(need)}")
+                    break
 
         present = {s: n for s, n in counts.items() if n}
         missing = [s for s in counts if not counts.get(s)]

@@ -40,7 +40,7 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import jd, pm, prj as prj_mod, sta       # noqa: E402
+from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta       # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.1.schema.json"
@@ -158,11 +158,16 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         print(f"  ✗ {name}  {detail}")
 
 
-def check_raises(name: str, text: str, *, expect: str = "") -> None:
-    """应拒绝侧：必须抛 SourceInvalid（而不是静默跳过或返回半截数据）。"""
+def check_raises(name: str, text: str, *, expect: str = "", parser=sta) -> None:
+    """应拒绝侧：必须抛 SourceInvalid（而不是静默跳过或返回半截数据）。
+
+    `parser` 默认 `.STA`（历史调用方）；验别的文件**必须显式传** —— 否则会拿
+    `.STA` 的魔数去比，每个用例都"恰好"因为魔数不符被拒，输出看起来全绿，
+    实际**一条也没走到目标解析器自己的校验逻辑上**。本组第一版正是这样翻车的。
+    """
     global PASS, FAIL
     try:
-        out = sta.parse(text, file="<test>")
+        out = parser.parse(text, file="<test>")
     except SourceInvalid as exc:
         msg = str(exc)
         if expect and expect not in msg:
@@ -224,9 +229,26 @@ def main() -> int:
     check("仅桩号 → L1", base.derive_level({"station_sequence": pts}) == "L1")
     check("+平面交点 → L2",
           base.derive_level({"station_sequence": pts, "alignment_pi": [{"id": 1}]}) == "L2")
-    check("+纵断变坡点 → L3",
+    # ★ 2026-09 变更：L3 的组合方式由 any 改为 all。
+    #   起因是**实测**：只接入 .DMX（地面线）时，等级立刻从 L2 跳到 L3 —— 而地面线是
+    #   测量结果、不是设计成果，用它宣称"有纵断面设计"是个**假断言**：拿着它依然
+    #   回答不了"这个桩号该铺多厚"。等级虚高比等级偏低更糟，它让人以为数据齐了。
+    #   这条断言当时就是红的，**它的红是对的**；现按新语义重写并补齐两侧。
+    check("★ 只给纵断变坡点（设计线）→ 仍是 L2（L3 要求两条线同时具备）",
           base.derive_level({"station_sequence": pts, "alignment_pi": [{"id": 1}],
-                             "profile_grade_point": [{"id": 1}]}) == "L3")
+                             "profile_grade_point": [{"id": 1}]}) == "L2")
+    check("★ 只给地面线 → 仍是 L2（地面线不是设计成果）",
+          base.derive_level({"station_sequence": pts, "alignment_pi": [{"id": 1}],
+                             "profile_ground_point": [{"id": 1}]}) == "L2")
+    check("★ 设计线 + 地面线**都**齐 → L3",
+          base.derive_level({"station_sequence": pts, "alignment_pi": [{"id": 1}],
+                             "profile_grade_point": [{"id": 1}],
+                             "profile_ground_point": [{"id": 1}]}) == "L3")
+    check("★ 元测试：L3 若退回 any，'只给设计线'就会判成 L3（说明上面两条非摆设）",
+          base.level_hit(("profile_grade_point", "profile_ground_point"),
+                         {"profile_grade_point"}, "any") is True
+          and base.level_hit(("profile_grade_point", "profile_ground_point"),
+                             {"profile_grade_point"}, "all") is False)
     check("空数组不算「有」（防占位漂白等级）",
           base.derive_level({"station_sequence": [], "alignment_pi": []}) == "L0")
 
@@ -279,6 +301,60 @@ def main() -> int:
             rejected = True
         check(f"{name} → schema 拒绝" if rejected else f"{name} —— **schema 没能拒绝**", rejected)
 
+    # ── 第 6a 组：.DMX 纵断面地面线解析器（应通过 / 应拒绝两侧）─────────────
+    print("\n第 6a 组  .DMX 纵断面地面线解析器（应通过 / 应拒绝两侧）")
+    _hdr = "HINTCAD5.83_DMX_SHUJU\r\n"
+    _ok_txt = _hdr + "      0.000\t 57.262000\r\n     20.000\t 57.224000\r\n     40.000\t 57.159000\r\n"
+    _out = dmx.parse(_ok_txt, file="ok.DMX")
+    check("应通过：正例解析出 3 条", len(_out["points"]) == 3, str(_out["points"]))
+    check("应通过：厂商版本从魔数取出", _out["vendor_version"] == "5.83", _out["vendor_version"])
+    check("应通过：detect 认得自家魔数", dmx.detect(_ok_txt) is True)
+    check("应通过：段名与文件类别与 SEGMENT_FILES 登记一致",
+          dmx.SEGMENT == "profile_ground_point"
+          and weidi.SEGMENT_FILES["profile_ground_point"][0] == ".DMX"
+          and weidi.SEGMENT_FILES["profile_ground_point"][1] == dmx.FILE_KIND,
+          f"{dmx.SEGMENT} / {dmx.FILE_KIND}")
+
+    check_raises("应拒绝：魔数是 .STA 的（张冠李戴）",
+                 "HINTCAD5.84_STA_SHUJU\r\n      0.000\t1\r\n", parser=dmx, expect="魔数不匹配")
+    check_raises("应拒绝：非纬地文件", "随便一个文本\n1\t2\n", parser=dmx, expect="魔数不匹配")
+    check_raises("应拒绝：字段数只有 1（漏了高程列）",
+                 _hdr + "      0.000\r\n     20.000\r\n", parser=dmx, expect="字段数应为 2")
+    check_raises("应拒绝：高程不是数字",
+                 _hdr + "      0.000\t 57.262000\r\n     20.000\t abc\r\n", parser=dmx, expect="不是合法数字")
+    check_raises("应拒绝：桩号倒退",
+                 _hdr + "     40.000\t 57.262000\r\n     20.000\t 57.224000\r\n", parser=dmx, expect="桩号倒退")
+    check_raises("应拒绝：桩号为负",
+                 _hdr + "     -1.000\t 57.262000\r\n     20.000\t 57.224000\r\n", parser=dmx, expect="桩号为负")
+    # ★ 列错位：把桩号读进了高程列 —— 不设界限，这种错会静默入库。
+    check_raises("★ 应拒绝：高程串成了桩号那种量级（列错位）",
+                 _hdr + "      0.000\t5805421.000000\r\n     20.000\t5806000.000000\r\n",
+                 parser=dmx, expect="超出合理区间")
+    check_raises("应拒绝：文件中间有空行（漏读一段地形）",
+                 _hdr + "      0.000\t 57.262000\r\n\r\n     40.000\t 57.159000\r\n",
+                 parser=dmx, expect="中间出现空行")
+    check_raises("应拒绝：只有 1 条数据", _hdr + "      0.000\t 57.262000\r\n", parser=dmx, expect="不足 2 条")
+    check_raises("应拒绝：空文件", "", parser=dmx, expect="空文件")
+
+    # 元测试 + **能力边界**：这条界限是**粗**筛，不是精判。
+    # 第一版这两条断言我写错了：拿 5805.421 当"错位"的例子，可它本身就是个合法高程
+    # （西藏公路真的在 5000 m 以上），界限当然放它过去 —— 是**我的断言声称了检查做不到的事**。
+    # 正确的做法不是收紧界限（那会误杀高海拔的真实道路），而是把边界明写出来：
+    # 它抓的是"串成了另一列的量级"，抓不了"看着像高程但其实是别的数"。
+    check("元测试：量级错位确实被判超界（界限非摆设）",
+          not (dmx.ELEV_MIN_M <= 5805421.0 <= dmx.ELEV_MAX_M))
+    check("能力边界明示：合法的高海拔高程必须放行（界限不得误杀真实道路）",
+          dmx.ELEV_MIN_M <= 5805.421 <= dmx.ELEV_MAX_M)
+
+    # 跨文件对账：条数不等 / 桩号不同，都必须报出来（而不是默默错位）
+    _st = [{"station_m": 0.0}, {"station_m": 20.0}]
+    check("对账：条数不等要报", bool(dmx.check_against_stations(
+        [{"station_m": 0.0}], _st)))
+    check("对账：桩号不同要报", bool(dmx.check_against_stations(
+        [{"station_m": 0.0}, {"station_m": 25.0}], _st)))
+    check("对账：完全对齐则不报", not dmx.check_against_stations(
+        [{"station_m": 0.0}, {"station_m": 20.0}], _st))
+
     # ── 第 6 组：真实完整文件（可选，docpipe/ 不入库）──────────────────────
     print("\n第 6 组  真实完整工程文件（可选：docpipe/ 未入库，干净检出会跳过）")
     if d and REAL_DIR.is_dir():
@@ -292,11 +368,29 @@ def main() -> int:
         # 等级断言故意把「已实现段清单」也一起钉住：将来往 IMPLEMENTED 里加了新解析器，
         # 这条会立刻红，逼你回来确认新等级是否符合预期——而不是让它悄悄变。
         # 已经生效过一次：加 .pm 时它红了，提醒"3 段了，确认等级仍是 L2 吗"。
-        check("等级 = L2（已实现 .STA/.JD/.pm 三段；升 L3 需纵断面，尚未实现）",
+        # 等级断言故意把「已实现段清单」也一起钉住：将来往 IMPLEMENTED 里加了新解析器，
+        # 这条会立刻红，逼你回来确认新等级是否符合预期——而不是让它悄悄变。
+        # 已经生效过两次：加 .pm 时红了；加 .DMX 时又红了，而这次答案是"等级**不该**动"。
+        check("等级仍 = L2（已实现 4 段；.DMX 只给地面线，不足以升 L3）",
               full["geometry_level"] == "L2"
               and sorted(weidi.IMPLEMENTED)
-              == ["alignment_element", "alignment_pi", "station_sequence"],
+              == ["alignment_element", "alignment_pi", "profile_ground_point",
+                  "station_sequence"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
+        gpts = full["segments"].get("profile_ground_point", [])
+        check("纵断面地面线 332 条（与桩号条数相同）", len(gpts) == 332, f"实为 {len(gpts)}")
+        if gpts:
+            check("地面线起点 57.262 m", abs(gpts[0]["ground_elev_m"] - 57.262) < 1e-9,
+                  f"实为 {gpts[0]['ground_elev_m']}")
+            check("地面线终点 65.543 m", abs(gpts[-1]["ground_elev_m"] - 65.543) < 1e-9,
+                  f"实为 {gpts[-1]['ground_elev_m']}")
+        check("地面线与桩号逐条对齐 → 无跨文件告警（.DMX 自己没有计数行，只能对账验）",
+              not any("地面线" in w for w in full["source"].get("warnings", [])),
+              str(full["source"].get("warnings")))
+        check("缺口从 4 项降到 3 项（地面线已不再是缺口）",
+              sorted(x["segment"] for x in full["gaps"])
+              == ["cross_section", "geometry_point", "profile_grade_point"],
+              str([x["segment"] for x in full["gaps"]]))
         check("台账登记了 7 类文件（含未实现的）", len(full["source"]["files"]) == 7,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",

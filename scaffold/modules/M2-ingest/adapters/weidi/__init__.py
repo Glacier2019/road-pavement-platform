@@ -3,10 +3,10 @@
 能力 vs 已实现（**这个区分必须留在代码里，不能只留在文档里**）
 -------------------------------------------------------------------------------
 一套完整的纬地工程（.PRJ〔文件名〕段列了 18 类文件）**有能力**提供 7 个几何段；
-本适配器**已实现 3 段**：`.STA` → `station_sequence`、`.JD` → `alignment_pi`、
-`.pm` → `alignment_element`（平面线形单元）。
+本适配器**已实现 4 段**：`.STA` → `station_sequence`、`.JD` → `alignment_pi`、
+`.pm` → `alignment_element`（平面线形单元）、`.DMX` → `profile_ground_point`（纵断面地面线）。
 
-因此 IR 里 `capabilities` 列 7 项、`segments` 有 3 项，`gaps` 如实登记 4 项，
+因此 IR 里 `capabilities` 列 7 项、`segments` 有 4 项，`gaps` 如实登记 3 项，
 其中多为 `not_supported`（"适配器还没写"），可能是 `source_absent`（"源里没这个文件"）。
 **这两种缺口对用户的含义完全不同**：前者等代码、后者要去找文件。
 混成一个"缺纵断面"，用户无从下手。
@@ -18,7 +18,7 @@ from typing import Any
 
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
-from . import jd, pm, sta
+from . import dmx, jd, pm, sta
 
 VENDOR = "weidi-hintcad"
 
@@ -34,14 +34,19 @@ CAPABILITIES: tuple[str, ...] = (
 )
 
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
-IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_element")
+IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_element",
+                                "profile_ground_point")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
+#
+# 例外：若新段与已有段之间存在**跨文件对账**（如 .DMX 逐桩对齐 .STA），
+# 那部分不在解析器里，而在 build_ir 末尾（同 _link_elements_to_pi 的做法）。
 _PARSERS: dict[str, Any] = {
     "station_sequence": sta,
     "alignment_pi": jd,
     "alignment_element": pm,
+    "profile_ground_point": dmx,
 }
 
 
@@ -158,11 +163,18 @@ def build_ir(project_dir: str | pathlib.Path, *,
                           "note": str(exc)})
             reasons[seg] = "parse_blocked"
 
-    # 两段都拿到之后才能做的一次跨文件动作：把线形单元挂到交点，并拿 .JD 由坐标
-    # 独立算出的转角符号去核对 .pm 的转向符号。单看一份文件做不了这件事。
+    # 只有两段都拿到才能做的跨文件动作。单看一份文件做不了这些事。
     warns: list[str] = []
+
+    # ① 把线形单元挂到交点，并拿 .JD 由坐标独立算出的转角符号去核对 .pm 的转向符号。
     if segments.get("alignment_element") and segments.get("alignment_pi"):
         warns = _link_elements_to_pi(segments["alignment_element"], segments["alignment_pi"])
+
+    # ② 纵断面地面线逐桩对账 .STA。`.DMX` 自己**没有计数行**，行数不可自证；
+    #    而它入库时锚的是 station_id —— 对不上就会错位，且错位不报错。
+    if segments.get("profile_ground_point") and segments.get("station_sequence"):
+        warns += dmx.check_against_stations(segments["profile_ground_point"],
+                                            segments["station_sequence"])
 
     return make_ir(
         vendor=VENDOR,
@@ -177,4 +189,5 @@ def build_ir(project_dir: str | pathlib.Path, *,
     )
 
 
-__all__ = ["VENDOR", "CAPABILITIES", "IMPLEMENTED", "SEGMENT_FILES", "build_ir", "sta", "jd"]
+__all__ = ["VENDOR", "CAPABILITIES", "IMPLEMENTED", "SEGMENT_FILES", "build_ir",
+           "sta", "jd", "pm", "prj", "dmx"]

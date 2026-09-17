@@ -35,11 +35,15 @@ SEGMENTS: tuple[str, ...] = (
 #   L3 平纵  ：需纵断面（变坡点或地面线任一）
 #   L2 平面  ：需平面线形（交点或线形单元任一）
 #   L1 骨架  ：需桩号序列
-_LEVEL_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("L4", ("cross_section",)),
-    ("L3", ("profile_grade_point", "profile_ground_point")),
-    ("L2", ("alignment_pi", "alignment_element")),
-    ("L1", ("station_sequence",)),
+# 每条规则是 (等级, 该级要求的段, 组合方式)。**组合方式放进数据里**，
+# 而不是在判定函数里写死成 any —— 因为两条规则的正确组合方式**本来就不一样**
+# （见下方 derive_level 的说明），写死一个，另一条就会长期错着且测不出来。
+# 放进数据的额外好处：M3 侧那份副本用 == 就能整条对齐，连组合方式一起钉住。
+_LEVEL_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("L4", ("cross_section",), "any"),
+    ("L3", ("profile_grade_point", "profile_ground_point"), "all"),
+    ("L2", ("alignment_pi", "alignment_element"), "any"),
+    ("L1", ("station_sequence",), "any"),
 )
 
 # 为什么把「平纵」独立为 L3、而不是我最初提的「L3 = 平纵横全量」
@@ -47,6 +51,17 @@ _LEVEL_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 # 因为横断面表（cross_section 系）是 GE 完整化的**第二批**，要等 DDL v0.4。
 # 若 L3 定义成"平纵横全量"，那本工程在 v0.4 之前**永远达不到 L3**，
 # 等级就退化成"一直显示 L2"的噪声——一个永远不会变的状态码，比没有更糟。
+
+
+def level_hit(required: tuple[str, ...], present: set[str], mode: str) -> bool:
+    """单个等级的判定：``required`` 里的段算不算"齐"。
+
+    纯函数，只吃一个"哪些段有数据"的**集合** —— 因为两个调用方的"有没有数据"
+    判法不同（M2 看解析结果是否非空列表，M3 看行数是否 > 0），但**判定逻辑必须一致**。
+    归一化成集合之后，两边的这个函数可以逐个用例对拍（见 test_dao_contract.py）。
+    """
+    got = [s for s in required if s in present]
+    return bool(got) if mode == "any" else len(got) == len(required)
 
 
 def derive_level(segments: dict[str, Any]) -> str:
@@ -58,18 +73,24 @@ def derive_level(segments: dict[str, Any]) -> str:
     'L1'
     >>> derive_level({"station_sequence": [1, 2], "alignment_pi": [1]})
     'L2'
+    >>> derive_level({"station_sequence": [1, 2], "alignment_pi": [1],
+    ...               "alignment_element": [1], "profile_ground_point": [1]})
+    'L2'
 
-    ⚠ 注意这里是 **any** 不是 all，且两种情形**意图不同**，改动前先读完这段：
+    组合方式**每条规则不同**，改动前先读完这段：
       · L2（alignment_pi / alignment_element）用 any 是**刻意的**：拿到交点链 + R + A(Ls)
         在数学上已足以定出整条平面线形，线形单元只是同一定线的另一种表述。
       · L4（cross_section）单元素，any/all 无差别。
-      · L3（profile_grade_point / profile_ground_point）**用 any 是可疑的、尚未定论**：
-        "只有地面线、没有设计线"不该被称作"有纵断面设计"。等 .ZDM/.DMX 解析器落地时
-        （见契约⑤ README 待办）必须回来把 L3 改成 all 或拆成 L3a/L3b，否则等级会**虚高**。
-        现在没有这两个解析器，任何断言都测不到这条——所以先把话写在这里，不装看不见。
+      · L3（profile_grade_point / profile_ground_point）**用 all**：
+        L3 的含义是"有纵断面**设计**"，而地面线是测量结果、不是设计成果 ——
+        "只有地面线、没有设计线"依然回答不了"这个桩号该铺多厚"。
+        这条曾经写成 any，代码里留了"落地时必须回来改"的话；
+        2026-09：`.DMX` 解析器落地后**实测复现了虚高**（只加地面线，等级即从 L2 跳到 L3），
+        于是改成 all。那条预言写在解析器存在之前，正是为了这一刻。
     """
-    for level, required in _LEVEL_RULES:
-        if any(seg in segments and segments[seg] for seg in required):
+    present = {seg for seg, v in segments.items() if v}
+    for level, required, mode in _LEVEL_RULES:
+        if level_hit(required, present, mode):
             return level
     return "L0"
 
