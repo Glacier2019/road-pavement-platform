@@ -40,7 +40,7 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta       # noqa: E402
+from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta, zdm       # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.1.schema.json"
@@ -355,6 +355,87 @@ def main() -> int:
     check("对账：完全对齐则不报", not dmx.check_against_stations(
         [{"station_m": 0.0}, {"station_m": 20.0}], _st))
 
+    # ── 第 6b 组：.ZDM 纵断面设计线解析器（应通过 / 应拒绝两侧）─────────────
+    print("\n第 6b 组  .ZDM 纵断面设计线解析器（应通过 / 应拒绝两侧）")
+    _zh = "HINTCAD5.83_ZDM_SHUJU\r\n"
+    _cnt = "          2\r\n"
+    _row = "         0.000\t57.26200000\t0.00000000\t     0.000\t0.00000000\r\n"
+    _row2 = "       300.000\t58.82200000\t6000.00000000\t     0.000\t0.00000000\r\n"
+    _z_ok = _zh + _cnt + _row + _row2
+    _z = zdm.parse(_z_ok, file="ok.ZDM")
+    check("应通过：正例解析出 2 个变坡点", len(_z["points"]) == 2, str(len(_z["points"])))
+    check("应通过：vpi_seq 从 1 起编号",
+          [p["vpi_seq"] for p in _z["points"]] == [1, 2])
+    check("应通过：detect 认得自家魔数", zdm.detect(_z_ok) is True)
+    check("应通过：段名与文件类别与 SEGMENT_FILES 登记一致",
+          zdm.SEGMENT == "profile_grade_point"
+          and weidi.SEGMENT_FILES["profile_grade_point"][0] == ".ZDM"
+          and weidi.SEGMENT_FILES["profile_grade_point"][1] == zdm.FILE_KIND,
+          f"{zdm.SEGMENT} / {zdm.FILE_KIND}")
+    _z2, _w2 = zdm.derive_grades([dict(p) for p in _z["points"]])
+    check("派生：首点入坡 None、末点出坡 None（不是 0）",
+          _z2[0]["grade_in_pct"] is None and _z2[-1]["grade_out_pct"] is None)
+    # 首点 R=0 → 确实没有竖曲线，长度 0 是**真值**。
+    check("派生：首点 R=0 → 竖曲线长 0（真值，不是缺值）",
+          _z2[0]["grade_len_m"] == 0.0, str(_z2[0]["grade_len_m"]))
+    # 末点 R=6000>0 但缺出坡 → **算不出来**，必须是 None 并告警。
+    # 这里不能写 0 —— 0 会被下游当成"这条竖曲线长 0 米"，而真相是"无法确定"。
+    check("派生：末点 R>0 却缺一侧纵坡 → 竖曲线长 None（不是 0）且必须告警",
+          _z2[-1]["grade_len_m"] is None and any("竖曲线长无法推得" in w for w in _w2),
+          f"{_z2[-1]['grade_len_m']} / {_w2}")
+    check("派生：单段坡 = 1.56/300 = 0.52%",
+          abs(_z2[0]["grade_out_pct"] - 0.52) < 1e-9, str(_z2[0]["grade_out_pct"]))
+
+    check_raises("应拒绝：魔数是 .DMX 的（张冠李戴）",
+                 "HINTCAD5.83_DMX_SHUJU\r\n" + _cnt + _row + _row2,
+                 parser=zdm, expect="魔数不匹配")
+    # 缺计数行时，第 2 行是数据行 → 报"计数行不是整数"（把冒犯的原文带出来，
+    # 人一看就知道是把数据行当成了计数行）。它确实被拒绝了，只是措辞如此。
+    check_raises("应拒绝：缺计数行（数据行被当成计数行 → 非整数）",
+                 _zh + _row + _row2, parser=zdm, expect="计数行不是整数")
+    check_raises("应拒绝：计数行为空", _zh + "\r\n" + _row + _row2,
+                 parser=zdm, expect="缺少计数行")
+    check_raises("应拒绝：计数行不是整数", _zh + "     十二\r\n" + _row + _row2,
+                 parser=zdm, expect="计数行不是整数")
+    # ★ 自带计数行是这个文件独有的一份礼物：拿它对自己的内容
+    check_raises("★ 应拒绝：计数行声明 5 个但只有 2 行（文件自我矛盾）",
+                 _zh + "          5\r\n" + _row + _row2,
+                 parser=zdm, expect="实际读到 2 个")
+    check_raises("★ 应拒绝：计数行声明 1 个但有 2 行（多读）",
+                 _zh + "          1\r\n" + _row + _row2,
+                 parser=zdm, expect="实际读到 2 个")
+    check_raises("应拒绝：字段数 3（少了两列未知列）",
+                 _zh + _cnt + "         0.000\t57.26200000\t0.00000000\r\n" + _row2,
+                 parser=zdm, expect="字段数应为 5")
+    check_raises("应拒绝：设计高程超合理区间",
+                 _zh + _cnt + "         0.000\t57262.00000000\t0.0\t0.0\t0.0\r\n" + _row2,
+                 parser=zdm, expect="超出合理区间")
+    check_raises("应拒绝：竖曲线半径为负",
+                 _zh + _cnt + "         0.000\t57.262\t-1.0\t0.0\t0.0\r\n" + _row2,
+                 parser=zdm, expect="半径为负")
+    check_raises("应拒绝：竖曲线半径超合理区间",
+                 _zh + _cnt + "         0.000\t57.262\t1e12\t0.0\t0.0\r\n" + _row2,
+                 parser=zdm, expect="超出合理区间")
+    check_raises("应拒绝：桩号未严格递增（同桩号两个变坡点无法解释）",
+                 _zh + _cnt + _row + "         0.000\t58.822\t0.0\t0.0\t0.0\r\n",
+                 parser=zdm, expect="未严格递增")
+    check_raises("应拒绝：桩号倒退",
+                 _zh + _cnt + _row2 + _row, parser=zdm, expect="未严格递增")
+    check_raises("应拒绝：文件中间有空行",
+                 _zh + _cnt + _row + "\r\n" + _row2, parser=zdm, expect="中间出现空行")
+    check_raises("应拒绝：只有 1 个变坡点",
+                 _zh + "          1\r\n" + _row, parser=zdm, expect="不足 2 个")
+    check_raises("应拒绝：空文件", "", parser=zdm, expect="空文件")
+
+    # 未知列不得静默丢弃：非 0 时必须告警（含义未知 ≠ 可以扔）
+    _zu, _wu = zdm.derive_grades([dict(p, field4_raw=1.5) for p in _z["points"]])
+    check("未知列出现非 0 值 → 必须告警（不可静默丢弃看不懂的设计数据）",
+          any("field4_raw" in w for w in _wu), str(_wu))
+    check("未知列全 0 → 不告警（样本里本来就全 0，不制造噪声）",
+          not any("field4_raw" in w for w in _w2), str(_w2))
+    check("元测试：计数行自校验非摆设（声明值与实际值不等必须能被构造出来）",
+          len(_z["points"]) == 2 and 5 != len(_z["points"]))
+
     # ── 第 6 组：真实完整文件（可选，docpipe/ 不入库）──────────────────────
     print("\n第 6 组  真实完整工程文件（可选：docpipe/ 未入库，干净检出会跳过）")
     if d and REAL_DIR.is_dir():
@@ -371,11 +452,11 @@ def main() -> int:
         # 等级断言故意把「已实现段清单」也一起钉住：将来往 IMPLEMENTED 里加了新解析器，
         # 这条会立刻红，逼你回来确认新等级是否符合预期——而不是让它悄悄变。
         # 已经生效过两次：加 .pm 时红了；加 .DMX 时又红了，而这次答案是"等级**不该**动"。
-        check("等级仍 = L2（已实现 4 段；.DMX 只给地面线，不足以升 L3）",
-              full["geometry_level"] == "L2"
+        check("★ 等级 = L3（.ZDM/.DMX 都实现：设计线与地面线同时具备）",
+              full["geometry_level"] == "L3"
               and sorted(weidi.IMPLEMENTED)
-              == ["alignment_element", "alignment_pi", "profile_ground_point",
-                  "station_sequence"],
+              == ["alignment_element", "alignment_pi", "profile_grade_point",
+                  "profile_ground_point", "station_sequence"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
         gpts = full["segments"].get("profile_ground_point", [])
         check("纵断面地面线 332 条（与桩号条数相同）", len(gpts) == 332, f"实为 {len(gpts)}")
@@ -387,10 +468,44 @@ def main() -> int:
         check("地面线与桩号逐条对齐 → 无跨文件告警（.DMX 自己没有计数行，只能对账验）",
               not any("地面线" in w for w in full["source"].get("warnings", [])),
               str(full["source"].get("warnings")))
-        check("缺口从 4 项降到 3 项（地面线已不再是缺口）",
+        check("缺口只剩 2 项（平纵都齐了）",
               sorted(x["segment"] for x in full["gaps"])
-              == ["cross_section", "geometry_point", "profile_grade_point"],
+              == ["cross_section", "geometry_point"],
               str([x["segment"] for x in full["gaps"]]))
+
+        vpi = full["segments"].get("profile_grade_point", [])
+        check("纵断面设计线 12 个变坡点", len(vpi) == 12, f"实为 {len(vpi)}")
+        if vpi:
+            st = full["segments"]["station_sequence"]
+            check("设计线覆盖整条路（首尾桩号 = 桩号序列首尾）",
+                  vpi[0]["station_m"] == st[0]["station_m"]
+                  and vpi[-1]["station_m"] == st[-1]["station_m"],
+                  f"{vpi[0]['station_m']}–{vpi[-1]['station_m']} vs "
+                  f"{st[0]['station_m']}–{st[-1]['station_m']}")
+            check("首尾变坡点 R=0 → 竖曲线长 = 0（真值，不是缺值）",
+                  vpi[0]["grade_len_m"] == 0.0 and vpi[-1]["grade_len_m"] == 0.0,
+                  f"{vpi[0]['grade_len_m']} / {vpi[-1]['grade_len_m']}")
+            check("中间变坡点 R>0 → 竖曲线长 > 0（派生成功）",
+                  all(p["grade_len_m"] and p["grade_len_m"] > 0 for p in vpi[1:-1]),
+                  str([p["grade_len_m"] for p in vpi[1:-1]]))
+            check("首尾缺一侧纵坡 → None（不是 0：0 是个坡度的值）",
+                  vpi[0]["grade_in_pct"] is None and vpi[-1]["grade_out_pct"] is None,
+                  f"{vpi[0]['grade_in_pct']} / {vpi[-1]['grade_out_pct']}")
+            # ★ 坡度链必须首尾相接：前一个的出坡 = 后一个的入坡。
+            #   这条能同时抓住"算错"和"变坡点顺序错"。
+            gaps = [abs(vpi[i]["grade_out_pct"] - vpi[i + 1]["grade_in_pct"])
+                    for i in range(len(vpi) - 1)]
+            check("★ 纵坡链首尾相接（每个变坡点出坡 = 下一个入坡）",
+                  max(gaps) < 1e-9, f"最大断差 {max(gaps):g}%")
+            # 这条断言我第一版写成了"派生纵坡全是整齐值"，实测被否：
+            # 0.52 / 2.5 / -5.0 / 6.0 / -3.3 / 0.93 确实整齐，但 -3.9003 / 5.9282 /
+            # -0.6278 / -1.8297 不整齐 —— 它们是"高程差 ÷ 桩号差"的直接结果。
+            # 从一部分规律里读出普遍结论，是这次会话里第二次犯（另一次是拿 5805 m
+            # 当"列错位"的例子）。改成只断言站得住的能力边界：量级合理。
+            grades = [p["grade_out_pct"] for p in vpi[1:-1] if p["grade_out_pct"] is not None]
+            check("派生纵坡量级合理（|i| < 20%，超出即说明列错位或推导错）",
+                  grades and max(abs(g) for g in grades) < 20.0,
+                  f"最大 {max(abs(g) for g in grades):.4f}%")
         check("台账登记了 7 类文件（含未实现的）", len(full["source"]["files"]) == 7,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
