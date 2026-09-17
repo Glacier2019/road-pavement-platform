@@ -37,6 +37,7 @@ TESTS=(
   "m5-m10|M5–M10 模块产出契约（诊断/映射/养护/登记/工单）|M5–M10|PY|tests/contract/test_module_contracts.py"
   "m3-写权|契约③写入侧：表级写权守卫（应通过/应拒绝两侧）+ M2 不绕契约|M2/M3|PY|tests/contract/test_write_guard.py"
   "m1-表数|契约②：DDL ↔ 数据字典 ↔ catalog 三处表数一致|M1/M3|PY|tests/contract/test_ddl_dict_catalog.py"
+  "design-导入|契约⑤：设计导入 IR + 纬地 .STA/.JD/.pm 适配器 + 落库器（应通过/应拒绝两侧）|M2|PY|tests/contract/test_design_import.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

@@ -1,0 +1,520 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://road-pavement-platform/contracts/design-import/road_geometry_ir.v0.1.schema.json",
+  "title": "道路几何中间表示（Road Geometry IR）v0.1",
+  "description": "契约⑤。设计数据导入的**格式无关**中间表示：任何来源（纬地 HintCAD / 鸿业 / 图纸人工录入 / 由监测数据反推）的采集适配器都产出本结构，下游的校验与落库**只认它**。因此新增一家厂商格式 = 新增一个适配器，校验规则与落库路径不必重写。",
+  "type": "object",
+  "required": [
+    "ir_version",
+    "source",
+    "geometry_level",
+    "capabilities",
+    "segments",
+    "gaps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "ir_version": {
+      "const": "0.1"
+    },
+    "source": {
+      "$ref": "#/definitions/source"
+    },
+    "geometry_level": {
+      "$ref": "#/definitions/level"
+    },
+    "capabilities": {
+      "description": "本来源**有能力提供**的几何段（由适配器声明，与实际解析结果无关）。用于区分「源里就没有」与「有但没解析出来」。",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/segment"
+      },
+      "uniqueItems": true
+    },
+    "segments": {
+      "description": "**实际解析出来**的几何段。键必须 ⊆ capabilities；capabilities 中未出现的段必须登记进 gaps。",
+      "$ref": "#/definitions/segments"
+    },
+    "gaps": {
+      "description": "缺失登记。「按段填充」的核心：导入不是成功/失败二元，而是逐段落地 + 逐段说明缺口。",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/gap"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "**可疑但合法**——不阻断导入，但预检报告必须顶到人眼前。与 gaps 严格区分：gaps 是「没有」，warnings 是「有但对不上」。例：.pm 的转向符号与 .JD 由坐标独立算出的转角符号相反。"
+    }
+  },
+  "definitions": {
+    "segment": {
+      "description": "几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对（不另造一套别名）。",
+      "enum": [
+        "station_sequence",
+        "station_equation",
+        "alignment_pi",
+        "alignment_element",
+        "profile_grade_point",
+        "profile_ground_point",
+        "geometry_point",
+        "cross_section"
+      ]
+    },
+    "level": {
+      "description": "几何完整度等级。下游据此**优雅降级**，而不是面对「有/没有」两种崩法。判据见 base.derive_level()。",
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4"
+      ],
+      "title": "L0 无几何 / L1 骨架 / L2 平面 / L3 平纵 / L4 平纵横"
+    },
+    "origin": {
+      "description": "采集方式。file=厂商数据文件；manual=人工录入（含图纸数字化）；inferred=由既有监测数据反推。",
+      "enum": [
+        "file",
+        "manual",
+        "inferred"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "vendor",
+        "origin",
+        "files"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "vendor": {
+          "type": "string",
+          "minLength": 1,
+          "description": "厂商标识：weidi-hintcad / hongye / manual / inferred …"
+        },
+        "vendor_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/definitions/origin"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/source_file"
+          }
+        }
+      }
+    },
+    "source_file": {
+      "description": "来源文件台账 —— 逐文件登记，使「某文件覆盖哪一段桩号/为什么没解析出来」成为可查询事实（对应 design_file 表）。",
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "parse_status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "description": "文件类别（取 .PRJ〔文件名〕段的名字，如「桩号序列文件」）"
+        },
+        "parse_status": {
+          "enum": [
+            "ok",
+            "blocked",
+            "pending",
+            "absent"
+          ],
+          "description": "ok=明文已解析；blocked=存在但解析不了（二进制/需专有工具）；pending=未验；absent=源里没有这个文件"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "station_point": {
+      "description": "桩号序列的一个点。桩号单位一律「米」——源文件原生单位，落库时再换算 km，避免在 IR 层就丢精度。",
+      "type": "object",
+      "required": [
+        "station_m",
+        "seq_no"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "station_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "seq_no": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "segments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "station_sequence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/station_point"
+          },
+          "minItems": 2,
+          "description": "全线桩号基准。至少 2 点——单点构不成序列。"
+        },
+        "station_equation": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "alignment_pi": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/pi_point"
+          },
+          "minItems": 3,
+          "description": "平面交点链。至少 3 点（起点+交点+终点）——少于此构不成线形。"
+        },
+        "alignment_element": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          },
+          "minItems": 3,
+          "description": "平面线形单元链。至少 3 个（起直线+曲线+终直线）。"
+        },
+        "profile_grade_point": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "profile_ground_point": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "geometry_point": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "cross_section": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "required": [
+        "segment",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "segment": {
+          "$ref": "#/definitions/segment"
+        },
+        "reason": {
+          "enum": [
+            "source_absent",
+            "parse_blocked",
+            "manual_required",
+            "not_supported"
+          ],
+          "description": "source_absent=源里根本没有；parse_blocked=有但解不开；manual_required=需人工录入；not_supported=适配器不支持该段"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "pi_point": {
+      "type": "object",
+      "description": "一个平面交点/控制点。由 weidi/jd.py 产出，字段语义经三重几何交叉验证（见该模块 docstring）。",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "tag",
+        "x",
+        "y",
+        "station_m",
+        "deflection_deg"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "控制点序号，从 0 起（含 QD 与 ZD）"
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "description": "厂商给的标签（QD / 1…8 / ZD），原样保留"
+        },
+        "pi_type": {
+          "enum": [
+            "QD",
+            "ZD",
+            "JD"
+          ],
+          "description": "归一化类别 —— DDL 的 alignment_pi.pi_type 就是这一列。tag 是厂商标签，pi_type 是平台类别；只有交点有半径/缓和曲线。"
+        },
+        "type_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "x": {
+          "type": "number",
+          "description": "高斯平面 X（北）"
+        },
+        "y": {
+          "type": "number",
+          "description": "高斯平面 Y（东）"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "该控制点桩号（米）"
+        },
+        "feat_stations_m": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "曲线特征点桩号 [ZH, HY, 曲中点, YH, HZ]（米）。⚠ 源文件那一列是 6 个值，第 0 个是**前段直线长**不是桩号，已拆到 prev_tangent_len_m，勿混为一类。"
+        },
+        "prev_tangent_len_m": {
+          "type": "number",
+          "description": "前段直线长（米）。源文件与特征点桩号同列，易被误读为桩号——PI2 的 674.493 是长度，它的 ZH 是 1393.176。"
+        },
+        "radius_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "圆曲线半径 R"
+        },
+        "spiral_a1": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "spiral_a2": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "spiral_ls1": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "spiral_ls2": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tangent_len_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tangent_len2_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "arc_len_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "curve_len_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "external_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "azimuth_deg": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "deflection_deg": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "转角（度），**由相邻控制点坐标独立算出**，不读文件里的角度字段。QD/ZD 为 null。"
+        }
+      }
+    },
+    "element": {
+      "type": "object",
+      "description": "一个平面线形单元（直线/缓和曲线/圆曲线）。由 weidi/pm.py 产出；起点/终点/圆心的语义经三条不变量定量验证（见该模块 docstring）。",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "type",
+        "start_station_m",
+        "end_station_m",
+        "azimuth_deg"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "enum": [
+            "line",
+            "transition",
+            "circular"
+          ]
+        },
+        "code": {
+          "type": "integer",
+          "description": "纬地原始类型码 1/3/21/22"
+        },
+        "turn_flag": {
+          "type": "integer",
+          "enum": [
+            1,
+            -1
+          ],
+          "description": "文件第 0 列。实测＝该单元所属交点的转向符号；由 build_ir 与 .JD 转角符号交叉验证"
+        },
+        "start_station_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "end_station_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "length_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "start_x": {
+          "type": "number"
+        },
+        "start_y": {
+          "type": "number"
+        },
+        "end_x": {
+          "type": "number"
+        },
+        "end_y": {
+          "type": "number"
+        },
+        "center": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "description": "圆心。直线或切线端为 null（文件里写 0,0）"
+        },
+        "azimuth_deg": {
+          "type": "number"
+        },
+        "end_azimuth_deg": {
+          "type": "number"
+        },
+        "radius_start_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "radius_end_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "spiral_a": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pi_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "所属交点在 alignment_pi 里的 seq；由桩号包容推出，非文件字段"
+        },
+        "aux_x": {
+          "type": "number",
+          "description": "第 2 组坐标，**用途未定论**：直线单元的它是中点（已验证），曲线单元的它不是弧中点（到圆心 453.5 而 R=450）。未定论前不赋予语义。"
+        },
+        "aux_y": {
+          "type": "number",
+          "description": "第 2 组坐标，**用途未定论**：直线单元的它是中点（已验证），曲线单元的它不是弧中点（到圆心 453.5 而 R=450）。未定论前不赋予语义。"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,844 @@
+"""契约⑤：设计数据导入（IR + 纬地 .STA 适配器）契约测试。
+
+运行（**完全离线，不触库、不需网络**）：
+    cd /data/cy/shujuku/scaffold
+    ./run_contract_tests.sh design
+    # 或单独跑：
+    uv run --with jsonschema --with pyyaml tests/contract/test_design_import.py
+
+为什么这个测试必须存在
+-------------------------------------------------------------------------------
+「导入设计文件」在以往是**一次性脚本**：读一遍、填一次库、脚本丢掉。
+后果是换一条路就得重写一遍，且**没人能证明它解析对了**——
+上一次纬地可行性分析读文件的那段代码就没留下来，于是"能不能导"变成了一句口头结论。
+
+本测试把三件事变成可执行断言：
+  ① **IR 结构合法**：适配器产出必须过契约⑤ schema（含等级、能力、缺口三者自洽）；
+  ② **解析器对真实格式正确**：用**真实纬地文件节选**当 fixture，断言逐点数值，
+     而不是拿自造样本自证——自造样本只能证明"我的解析器能读我的样本"；
+  ③ **应拒绝的一侧真的会拒绝**：桩号倒退、序号乱序、字段数错、魔数错…逐一必须抛错。
+
+第 ③ 条是关键。**一个永远不会失败的检查，比没有检查更糟**：
+只测"合法文件能读"只能证明放行逻辑存在，不能证明拦截逻辑存在。
+而这里拦截逻辑失效的代价特别大——桩号是下游一切逐桩数据的对齐基准，
+静默读错一条，挂在它上面的 WIM / 病害 / 试验数据全部错位，且不会有任何报错。
+"""
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+import pathlib
+import re
+import sys
+from decimal import ROUND_HALF_UP, Decimal
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
+
+import design_import as di                              # noqa: E402
+from adapters import base, detect_vendor, geom, weidi          # noqa: E402
+from adapters.errors import SourceInvalid                # noqa: E402
+from adapters.weidi import jd, pm, sta                       # noqa: E402
+
+IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.1.schema.json"
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
+
+
+def ddl_table_body(table: str) -> str:
+    "从 DDL 取某张表的建表体（测试用，避免把列清单硬编码成第二个漂移源）。"
+    m = re.search(rf"CREATE TABLE IF NOT EXISTS {re.escape(table)} \((.*?)\n\);",
+                  DDL_PATH.read_text(encoding="utf-8"), re.S)
+    assert m, f"DDL 里找不到表 {table}"
+    return m.group(1)
+
+
+def ddl_columns(table: str) -> set[str]:
+    "该表全部列名（含生成列）。"
+    cols = set()
+    for line in ddl_table_body(table).splitlines():
+        tok = line.split("--")[0].strip().rstrip(",").split(" ")[0]
+        if tok.isidentifier() and tok.upper() not in ("UNIQUE", "PRIMARY", "FOREIGN", "CHECK"):
+            cols.add(tok)
+    return cols
+
+
+def ddl_generated(table: str) -> set[str]:
+    "该表里 GENERATED ALWAYS AS … STORED 的列名。**从 DDL 读**，不硬编码——"
+    "以后谁再加生成列，本组自动开始检查它，不需要有人记得来改测试。"
+    gen = set()
+    for line in ddl_table_body(table).splitlines():
+        if "GENERATED ALWAYS AS" in line.upper():
+            tok = line.strip().split(" ")[0]
+            if tok.isidentifier():
+                gen.add(tok)
+    return gen
+FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_sta_excerpt.STA"
+# 真实完整文件在 docpipe/（gitignored，不入库）→ 干净检出时不存在，属可选校验
+REAL_DIR = ROOT.parent / "docpipe" / "materials" / "纬地工程项目文件"
+
+PASS = 0
+FAIL = 0
+
+
+def pg_dsn() -> str | None:
+    """真库 DSN：优先环境变量，否则读 scaffold/.env（PG_PORT 是宿主端口 55432）。
+
+    第 12 组是**唯一**碰库的一组，没有库就跳过 —— 本套件主体保持离线可跑。
+
+    ⚠ 必须处理**行内注释**：本仓 .env 里写的是
+    ``PG_PORT=55432          # 本机 5432 已被其它服务占用``。
+    天真的 ``line.split("=")`` 会把注释一起吞进值里，得到
+    ``postgresql://…@localhost:55432          # 本机…/road_pavement`` ——
+    一个语法上看着像 DSN、连不上又不报错的字符串（本组第一次跑就是这么"跳过"的）。
+    """
+    if os.getenv("PG_DSN"):
+        return os.environ["PG_DSN"]
+    envf = ROOT / ".env"
+    if not envf.exists():
+        return None
+    vals: dict[str, str] = {}
+    for line in envf.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip()
+        if v[:1] in ("'", '"'):                    # 带引号：取到配对引号为止
+            q = v[0]
+            v = v[1:v.index(q, 1)] if q in v[1:] else v[1:]
+        else:                                      # 不带引号：去掉行内注释
+            v = re.split(r"\s+#", v, maxsplit=1)[0].strip()
+        vals[k.strip()] = v
+    if not vals.get("PG_PASSWORD"):
+        return None
+    return (f"postgresql://{vals.get('PG_USER', 'rp')}:{vals['PG_PASSWORD']}"
+            f"@localhost:{vals.get('PG_PORT', '55432')}/{vals.get('PG_DB', 'road_pavement')}")
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    global PASS, FAIL
+    if ok:
+        PASS += 1
+        print(f"  ✓ {name}" + (f"  {detail}" if detail else ""))
+    else:
+        FAIL += 1
+        print(f"  ✗ {name}  {detail}")
+
+
+def check_raises(name: str, text: str, *, expect: str = "") -> None:
+    """应拒绝侧：必须抛 SourceInvalid（而不是静默跳过或返回半截数据）。"""
+    global PASS, FAIL
+    try:
+        out = sta.parse(text, file="<test>")
+    except SourceInvalid as exc:
+        msg = str(exc)
+        if expect and expect not in msg:
+            FAIL += 1
+            print(f"  ✗ {name}  抛错了，但信息不含 {expect!r}：{msg[:70]}")
+        else:
+            PASS += 1
+            print(f"  ✓ {name}  → 已拒绝：{msg[:58]}")
+        return
+    FAIL += 1
+    print(f"  ✗ {name}  **本应拒绝却通过了**，返回 {len(out.get('points', []))} 点")
+
+
+def main() -> int:
+    import jsonschema
+
+    schema = json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    # ── 第 1 组：真实格式 · 应通过 ──────────────────────────────────────────
+    print("\n第 1 组  真实纬地 .STA 节选（应通过，逐点数值断言）")
+    text = FIXTURE.read_text(encoding="utf-8")
+    check("魔数探测认得它", detect_vendor(text) == "weidi-hintcad")
+    out = sta.parse(text, file=FIXTURE.name)
+    pts = out["points"]
+    check("点数 = 30", len(pts) == 30, f"实为 {len(pts)}")
+    check("版本号 = 5.84", out["vendor_version"] == "5.84", f"实为 {out['vendor_version']}")
+    check("首点 = 0.000 m / 序号 1", pts[0] == {"station_m": 0.0, "seq_no": 1}, f"实为 {pts[0]}")
+    check("第 2 点 = 20.000 m", pts[1]["station_m"] == 20.0, f"实为 {pts[1]['station_m']}")
+    # ★ 实测第 30 点是 545.874，不是 560.000 —— 校验解析器**没有假设等距**
+    check("末点 = 545.874 m（非等距点，防「假设 20m 间隔」）",
+          pts[-1]["station_m"] == 545.874, f"实为 {pts[-1]['station_m']}")
+    check("序号连续 1..30", [p["seq_no"] for p in pts] == list(range(1, 31)))
+    check("列车严格不减", all(pts[i]["station_m"] <= pts[i + 1]["station_m"]
+                             for i in range(len(pts) - 1)))
+
+    # ── 第 2 组：应拒绝（拦截逻辑是否真的存在）────────────────────────────
+    print("\n第 2 组  畸形输入（**必须拒绝**，否则静默写错几何）")
+    HDR = "HINTCAD5.84_STA_SHUJU\r\n"
+    check_raises("空文件", "")
+    check_raises("魔数错", "HINTCAD5.84_XXX\r\n     0.000\t     1\r\n    20.000\t     2\r\n", expect="魔数")
+    check_raises("缺魔数（直接上数据）", "     0.000\t     1\r\n    20.000\t     2\r\n", expect="魔数")
+    check_raises("字段数 = 1", HDR + "     0.000\r\n    20.000\t     2\r\n", expect="字段数")
+    check_raises("字段数 = 3", HDR + "     0.000\t     1\textra\r\n    20.000\t     2\r\n", expect="字段数")
+    check_raises("桩号非数字", HDR + "   abc.def\t     1\r\n    20.000\t     2\r\n", expect="桩号不是合法数字")
+    check_raises("序号非整数", HDR + "     0.000\t     1.5\r\n    20.000\t     2\r\n", expect="序号不是合法整数")
+    check_raises("桩号倒退", HDR + "   100.000\t     1\r\n    20.000\t     2\r\n", expect="桩号倒退")
+    check_raises("桩号为负", HDR + "   -10.000\t     1\r\n    20.000\t     2\r\n", expect="桩号为负")
+    check_raises("序号未递增", HDR + "     0.000\t     5\r\n    20.000\t     5\r\n", expect="序号未递增")
+    check_raises("只有 1 条数据", HDR + "     0.000\t     1\r\n", expect="不足 2 条")
+    check_raises("中间空行（疑似漏读）",
+                 HDR + "     0.000\t     1\r\n\r\n    40.000\t     3\r\n", expect="空行")
+    # 末尾空行**应通过**（导出工具常留）——拒绝侧的对称性检查
+    tail_ok = sta.parse(HDR + "     0.000\t     1\r\n    20.000\t     2\r\n\r\n", file="<t>")
+    check("末尾空行应通过（不误杀）", len(tail_ok["points"]) == 2)
+
+    # ── 第 3 组：几何完整度等级由实际产出推导 ──────────────────────────────
+    print("\n第 3 组  几何完整度等级（L0–L4，不允许外部手填）")
+    check("空 → L0", base.derive_level({}) == "L0")
+    check("仅桩号 → L1", base.derive_level({"station_sequence": pts}) == "L1")
+    check("+平面交点 → L2",
+          base.derive_level({"station_sequence": pts, "alignment_pi": [{"id": 1}]}) == "L2")
+    check("+纵断变坡点 → L3",
+          base.derive_level({"station_sequence": pts, "alignment_pi": [{"id": 1}],
+                             "profile_grade_point": [{"id": 1}]}) == "L3")
+    check("空数组不算「有」（防占位漂白等级）",
+          base.derive_level({"station_sequence": [], "alignment_pi": []}) == "L0")
+
+    # ── 第 4 组：IR 三处自洽（能力 / 实得 / 缺口）＋ schema 校验 ────────────
+    print("\n第 4 组  契约⑤ IR：结构合法 + 能力/实得/缺口三者自洽")
+    d = REAL_DIR if REAL_DIR.is_dir() else None
+    if d is None:
+        # 干净检出：用 fixture 所在目录造的临时工程目录代替，保证测试离线可跑
+        import tempfile
+        proj = pathlib.Path(tempfile.mkdtemp()) / "weidi_proj"
+        proj.mkdir()
+        (proj / FIXTURE.name).write_text(text, encoding="utf-8")
+        d = proj
+    ir = weidi.build_ir(d, project_name="契约测试工程")
+    jsonschema.validate(ir, schema)
+    check("产出过契约⑤ schema", True, f"等级 {ir['geometry_level']}")
+    segs, caps = set(ir["segments"]), set(ir["capabilities"])
+    check("segments ⊆ capabilities", segs <= caps, f"越界 {segs - caps or '无'}")
+    gaps = {g["segment"] for g in ir["gaps"]}
+    check("capabilities − segments == gaps（无遗漏、无多余）",
+          caps - segs == gaps, f"差集 {caps - segs} / gaps {gaps}")
+    check("等级与实得一致", ir["geometry_level"] == base.derive_level(ir["segments"]))
+    check("每个 gap 都带 reason", all(g.get("reason") for g in ir["gaps"]))
+    check("未实现的段记 not_supported（≠ source_absent）",
+          all(g["reason"] in ("source_absent", "parse_blocked", "manual_required", "not_supported")
+              for g in ir["gaps"]))
+    check("来源方式 = file", ir["source"]["origin"] == "file")
+    print(f"      能力 {len(caps)} 段 ／ 实得 {len(segs)} 段 ／ 缺口 {len(gaps)} 段")
+    for g in ir["gaps"]:
+        print(f"        · {g['segment']:22} {g['reason']}")
+
+    # ── 第 5 组：元测试 —— 确认上面的 schema 校验不是恒真的空断言 ──────────
+    print("\n第 5 组  元测试：schema 必须真的会拒绝坏 IR")
+    for name, mutate in (
+        ("等级非法值 L9", lambda x: x.update(geometry_level="L9")),
+        ("段名不在枚举内", lambda x: x.update(capabilities=["bogus_segment"])),
+        ("缺 gaps 字段", lambda x: x.pop("gaps")),
+        ("origin 非法", lambda x: x["source"].update(origin="telepathy")),
+        ("桩号序列只 1 点（minItems=2）",
+         lambda x: x["segments"].update(station_sequence=[{"station_m": 0.0, "seq_no": 1}])),
+        ("files 里 parse_status 非法",
+         lambda x: x["source"]["files"][0].update(parse_status="maybe")),
+    ):
+        bad = json.loads(json.dumps(ir))
+        mutate(bad)
+        try:
+            jsonschema.validate(bad, schema)
+            rejected = False
+        except jsonschema.ValidationError:
+            rejected = True
+        check(f"{name} → schema 拒绝" if rejected else f"{name} —— **schema 没能拒绝**", rejected)
+
+    # ── 第 6 组：真实完整文件（可选，docpipe/ 不入库）──────────────────────
+    print("\n第 6 组  真实完整工程文件（可选：docpipe/ 未入库，干净检出会跳过）")
+    if d and REAL_DIR.is_dir():
+        full = weidi.build_ir(REAL_DIR)
+        fpts = full["segments"].get("station_sequence", [])
+        check("全文件 332 个桩号", len(fpts) == 332, f"实为 {len(fpts)}")
+        if fpts:
+            check("起点 0.000 m", fpts[0]["station_m"] == 0.0)
+            check("终点 5805.421 m", fpts[-1]["station_m"] == 5805.421,
+                  f"实为 {fpts[-1]['station_m']}")
+        # 等级断言故意把「已实现段清单」也一起钉住：将来往 IMPLEMENTED 里加了新解析器，
+        # 这条会立刻红，逼你回来确认新等级是否符合预期——而不是让它悄悄变。
+        # 已经生效过一次：加 .pm 时它红了，提醒"3 段了，确认等级仍是 L2 吗"。
+        check("等级 = L2（已实现 .STA/.JD/.pm 三段；升 L3 需纵断面，尚未实现）",
+              full["geometry_level"] == "L2"
+              and sorted(weidi.IMPLEMENTED)
+              == ["alignment_element", "alignment_pi", "station_sequence"],
+              f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
+        check("台账登记了 7 类文件（含未实现的）", len(full["source"]["files"]) == 7,
+              f"实为 {len(full['source']['files'])}")
+        check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
+              f"实为 {full['source']['vendor_version']}")
+    else:
+        print("  – 跳过（docpipe/materials/纬地工程项目文件 不在本机）")
+
+    # ── 第 7 组：桩号精度 —— 真实数据必须装得进 DDL 声明的精度 ──────────────
+    # 本轮实测抓到：.STA 里 1659.917 与 1660.000 相距仅 0.083 m，
+    # 而 station_local_km 原为 numeric(10,3)（km 3 位小数＝米级）→ 两者都成 1.660 km
+    # → 撞 UNIQUE(section_id, station_local_km) → **第一次导入就失败**。
+    # 本组把这个事故变成回归断言：DDL 的精度必须能区分真实数据的最小间距。
+    print("\n第 7 组  桩号精度回归（真实数据 ↔ DDL 声明精度）")
+    edge_f = ROOT / "tests" / "fixtures" / "design_import" / "weidi_sta_precision_edge.STA"
+    ep = sta.parse(edge_f.read_text(encoding="utf-8"), file=edge_f.name)["points"]
+    a, b = ep[0]["station_m"], ep[1]["station_m"]
+    check("真实最小间距对已入 fixture（相邻两点）", (a, b) == (1659.917, 1660.0),
+          f"实为 {a} / {b}，相距 {round(b - a, 3)} m")
+    check("解析器接纳这一对（不因过近而拒绝）", len(ep) == 5, f"实为 {len(ep)} 点")
+
+    ddl_text = (ROOT / "sql" / "10_ddl_v0.3.sql").read_text(encoding="utf-8")
+    m = re.search(r"station_local_km\s+numeric\((\d+),\s*(\d+)\)", ddl_text)
+    check("DDL 中能取到 station_local_km 的精度声明", bool(m))
+    if m:
+        prec, scale = int(m.group(1)), int(m.group(2))
+        check(f"小数位 scale={scale} ≥ 6（km 毫米级）", scale >= 6, f"实为 scale={scale}")
+        check(f"整数位 {prec - scale} 位 ≥ 5（容得下 4635 km 路网桩号）", prec - scale >= 5,
+              f"实为 {prec - scale} 位")
+        q = Decimal(1).scaleb(-scale)
+        qa = Decimal(str(a / 1000)).quantize(q, rounding=ROUND_HALF_UP)
+        qb = Decimal(str(b / 1000)).quantize(q, rounding=ROUND_HALF_UP)
+        check("两点在该精度下**不碰撞**（唯一约束成立）", qa != qb, f"{a} m→{qa} ／ {b} m→{qb}")
+
+    # 元测试：证明上面那组不是空断言 —— 旧的 3 位小数**确实**会碰撞
+    q3 = Decimal("0.001")
+    c3a = Decimal(str(a / 1000)).quantize(q3, rounding=ROUND_HALF_UP)
+    c3b = Decimal(str(b / 1000)).quantize(q3, rounding=ROUND_HALF_UP)
+    check("元测试：旧精度 numeric(10,3) **确实会碰撞**（证明本组非空断言）", c3a == c3b,
+          f"两者都成 {c3a} km")
+
+    # ── 第 8 组：.JD 平面交点 —— 字段语义不靠"看"，靠几何恒等式**证明** ─────────
+    # 为什么值得单列一组：.JD 的 12/10 字段行**没有表头**，字段归属只能靠推。
+    # 而 DDL 里 alignment_pi 的注释恰好把两个值标错了（把 A 当切线长、把 Ls 当转角）。
+    # 所以本组不复述注释，而是拿四条互相独立的几何恒等式去卡：
+    # 只要它们同时成立，字段归属就是**被证明的**；一条不成立，就说明推错了。
+    print("\n第 8 组  .JD 平面交点（契约⑤ 第二个适配器：语义靠几何自洽证明）")
+    jd_f = ROOT / "tests" / "fixtures" / "design_import" / "weidi_jd_excerpt_3cp.JD"
+    # 注意：必须走 bytes —— Path.read_text() 会**静默**把 CRLF 折成 LF，
+    # 于是下面按 "\r\n" 切行的构造型反例会退化成"整文件 1 个元素"，索引越界。
+    # 这是个只有真跑才会暴露的坑，留一行注释免得后人再踩。
+    jd_text = jd_f.read_bytes().decode("utf-8")
+    check("fixture 保留 CRLF（构造反例依赖真实行尾）", "\r\n" in jd_text)
+    check(".JD 魔数可识别（.JD 是 5.83，与 .STA 的 5.84 不是同一版本）", jd.detect(jd_text))
+    jd_out = jd.parse(jd_text, file=jd_f.name)
+    cps = jd_out["control_points"]
+    check("声明点数 ≡ 实际解析出的控制点数（防截断静默通过）",
+          jd_out["declared_count"] == len(cps) == 3,
+          f"声明 {jd_out['declared_count']}／实得 {len(cps)}")
+    check("控制点标识 QD / 1 / 2", [c["tag"] for c in cps] == ["QD", "1", "2"],
+          str([c["tag"] for c in cps]))
+    check("QD 桩号 = 0", cps[0]["station_m"] == 0.0, f"实为 {cps[0]['station_m']}")
+
+    pi1 = cps[1]
+    R, Ls = pi1["radius_m"], pi1["spiral_ls1"]
+    check("R 与 DDL 注释一致（450）", R == 450.0, f"实为 {R}")
+    alpha = math.radians(pi1["deflection_deg"])      # ← 由坐标独立算出，没读文件的角度字段
+    beta = Ls / (2 * R)
+    arc = R * (alpha - 2 * beta)
+    ext = (R + Ls ** 2 / (24 * R)) / math.cos(alpha / 2) - R
+    check("① A = √(R·Ls) —— 那个 164.31676725 是缓和曲线参数，不是切线长",
+          abs(pi1["spiral_a1"] - math.sqrt(R * Ls)) < 1e-6,
+          f"文件 {pi1['spiral_a1']} ／ √(450×60)={math.sqrt(R*Ls):.10f}")
+    check("② 圆弧长 R(α−2β) 与文件值一致（α 由坐标得出，非取自文件）",
+          abs(arc - pi1["arc_len_m"]) < 1e-3, f"算得 {arc:.5f} ／ 文件 {pi1['arc_len_m']}")
+    check("③ 外距 (R+ΔR)/cos(α/2)−R 与文件值一致",
+          abs(ext - pi1["external_m"]) < 1e-3, f"算得 {ext:.5f} ／ 文件 {pi1['external_m']}")
+    check("④ 总曲线长 = 2·Ls + 圆弧长",
+          abs(pi1["curve_len_m"] - (2 * Ls + pi1["arc_len_m"])) < 1e-3,
+          f"算得 {2*Ls + pi1['arc_len_m']:.5f} ／ 文件 {pi1['curve_len_m']}")
+    check("⑤ 切线长 = 交点桩号 − ZH 桩号（注释把它标成了 164.31676725）",
+          abs(pi1["tangent_len_m"] - (pi1["station_m"] - 485.87357484)) < 1e-4,
+          f"文件 {pi1['tangent_len_m']} ／ {pi1['station_m']:.3f}−485.874"
+          f"={pi1['station_m'] - 485.87357484:.6f}")
+    check("⑥ 转角由坐标演出 22.0027°，而文件里那个 60 是 Ls",
+          abs(pi1["deflection_deg"] - 22.0027) < 0.001,
+          f"算得 {pi1['deflection_deg']}°（注释却写 -60.0）")
+
+    # 跨文件验证：.JD 给的曲线特征点桩号必须能在 .STA 桩号序列里找到。
+    # 两份文件是纬地从同一工程导出的；只要解析器有一边错位，本条立刻红。
+    sta_pts = sta.parse(FIXTURE.read_text(encoding="utf-8"), file=FIXTURE.name)["points"]
+    have = {round(p["station_m"], 3) for p in sta_pts}
+    inside = sorted({round(s, 3) for s in pi1["feat_stations_m"] if round(s, 3) <= max(have)})
+    check("PI1 有特征点落在 .STA fixture 范围内（否则下面几条是空断言）", len(inside) > 0)
+    for s in inside:
+        check(f"  .JD 特征点 {s:.3f} m 出现在 .STA 桩号序列中", s in have)
+
+    # 契约 schema 必须真的约束已实现的段（此前 alignment_pi 只写了 {"type":"object"}）
+    import jsonschema                                        # noqa: PLC0415
+    pi_schema = json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"]["pi_point"]
+    v = jsonschema.Draft7Validator(pi_schema)
+    errs = [e.message for c in cps for e in v.iter_errors(c)]
+    check("每个控制点都符合 schema 的 pi_point 定义", not errs, str(errs[:2]))
+    check("元测试：schema 会拒绝缺 deflection_deg 的控制点（证明本组非空断言）",
+          bool(list(v.iter_errors({k: val for k, val in pi1.items() if k != "deflection_deg"}))))
+
+    # 应拒绝侧
+    def jd_rejects(name: str, text: str, expect: str = "") -> None:
+        global PASS, FAIL
+        try:
+            jd.parse(text, file="<test>")
+            FAIL += 1
+            print(f"  ✗ {name}  **未抛异常（本应被拒绝）**")
+        except SourceInvalid as exc:
+            msg = str(exc)
+            if expect and expect not in msg:
+                FAIL += 1
+                print(f"  ✗ {name}  抛错了，但信息不含 {expect!r}：{msg[:70]}")
+            else:
+                PASS += 1
+                print(f"  ✓ {name}  → 已拒绝：{msg[:56]}")
+
+    JL = jd_text.split("\r\n")
+
+    def _swap_first(texts: list[str], fields: int, frm: str, to: str) -> list[str]:
+        """把第一个「字段数为 fields 且首字段等于 frm」的行的首字段换成 to。"""
+        out = list(texts)
+        for i, ln in enumerate(out):
+            p = ln.split("\t")
+            if len(p) == fields and p[0].strip() == frm:
+                out[i] = "\t".join([to] + p[1:])
+                break
+        return out
+
+    jd_rejects("魔数是 .STA 的（认错文件类型）",
+               jd_text.replace("HINTCAD5.83_PM_SHUJU_JD", "HINTCAD5.83_STA_SHUJU"), "魔数")
+    jd_rejects("声明点数与实际不符（防截断被当成完整文件）",
+               "\r\n".join([JL[0], "        10\t" + JL[1].split("\t")[1]] + JL[2:]), "控制点数不符")
+    # 「不足 3 个」要单独构造：截断的同时把声明点数也改成 2，否则先撞上"点数不符"那条。
+    # （第一版就是这么写错的——被测的拒绝发生了，但不是我以为的那条规则在拒绝。）
+    jd_rejects("控制点不足 3 个（构不成线形）",
+               "\r\n".join([JL[0], "         2\t" + JL[1].split("\t")[1]] + JL[2:21]), "不足 3 个")
+    jd_rejects("缺第 2 行", JL[0], "第 2 行")
+    jd_rejects("第 2 行字段数不对", "\r\n".join([JL[0], "        3"] + JL[2:]), "2 字段")
+    jd_rejects("控制点记录形状不符（应为 5+12+10）",
+               "\r\n".join(JL[:18] + ["1\t0.0\t0.0\t0.0\t9999\t9999\t0"] + JL[19:]), "形状不符")
+    jd_rejects("控制点桩号倒退",
+               "\r\n".join(_swap_first(JL, 10, "1531.81656009", "-5.00000000")), "倒退")
+    jd_rejects("起点桩号不为 0",
+               "\r\n".join(_swap_first(JL, 10, "0.00000000", "7.50000000")), "起点桩号")
+    jd_rejects("数字字段不是数字",
+               "\r\n".join(JL[:3] + ["\t".join(["abc"] + JL[3].split("\t")[1:])] + JL[4:]), "不是合法数字")
+
+    # ── 第 9 组：.pm 平面线形单元 —— 三条不变量 + 跨文件转向印证 ───────────────
+    # .pm 是扁平结构（每 3 行一个单元），比 .JD 好解析；难点在 8 字段行的语义。
+    # 同样不靠"看"，靠三条不变量：链连续 / 圆心距离 ≡ R / 弦长 = 2R·sin(L/2R)。
+    print("\n第 9 组  .pm 平面线形单元（契约⑤ 第三个适配器）")
+    pm_f = ROOT / "tests" / "fixtures" / "design_import" / "weidi_pm_excerpt_4units.pm"
+    pm_text = pm_f.read_bytes().decode("utf-8")
+    check(".pm 魔数可识别", pm.detect(pm_text))
+    pm_out = pm.parse(pm_text, file=pm_f.name)
+    els = pm_out["elements"]
+    check("声明单元数 ≡ 实际解析数", pm_out["declared_count"] == len(els) == 4,
+          f"声明 {pm_out['declared_count']}／实得 {len(els)}")
+    check("首单元起点桩号 ≡ 文件头起点桩号",
+          els[0]["start_station_m"] == pm_out["start_station_m"] == 0.0)
+    check("类型序列 line/transition/circular/transition",
+          [e["type"] for e in els] == ["line", "transition", "circular", "transition"],
+          str([e["type"] for e in els]))
+
+    # 不变量①：链连续（桩号 + 方位角 + 坐标，三重都要接上）
+    chain_ok = all(
+        abs(b["start_station_m"] - a["end_station_m"]) < 1e-9
+        and abs(b["azimuth_deg"] - a["end_azimuth_deg"]) < 1e-6
+        and math.dist((a["end_x"], a["end_y"]), (b["start_x"], b["start_y"])) < 1e-6
+        for a, b in zip(els, els[1:]))
+    check("① 链连续：桩号 / 方位角 / 坐标三重接续（解析器已强制，此处复核）", chain_ok)
+
+    # 不变量②：第 4 点是**圆心** —— 到该单元终点的距离必须精确等于 R
+    for e in els:
+        if e.get("center") and e["radius_end_m"]:
+            dd = math.dist((e["center"]["x"], e["center"]["y"]), (e["end_x"], e["end_y"]))
+            check(f"② 单元 {e['seq']} 的「第 4 点」到终点距离 ≡ R",
+                  abs(dd - e["radius_end_m"]) < 1e-6, f"{dd:.6f} vs R={e['radius_end_m']}")
+
+    # 不变量③：直线弦长 ≡ 单元长；圆曲线弦长 = 2R·sin(L/2R)（弦必然短于弧）
+    for e in els:
+        chord = math.dist((e["start_x"], e["start_y"]), (e["end_x"], e["end_y"]))
+        if e["type"] == "line":
+            check(f"③ 直线单元 {e['seq']} 弦长 ≡ 单元长", abs(chord - e["length_m"]) < 0.001,
+                  f"{chord:.4f} vs {e['length_m']:.4f}")
+        elif e["type"] == "circular":
+            rr = e["radius_start_m"]
+            expect = 2 * rr * math.sin(e["length_m"] / (2 * rr))
+            check(f"③ 圆曲线单元 {e['seq']} 弦长 = 2R·sin(L/2R)：弦短于弧",
+                  abs(chord - expect) < 0.001 and chord < e["length_m"],
+                  f"弦 {chord:.4f} / 算得 {expect:.4f} / 弧 {e['length_m']:.4f}")
+
+    # 直线单元：由坐标算的方位角 ≡ 声明的起始方位角（这条把 (4) 行的弧度制也钉住了）
+    for e in els:
+        if e["type"] == "line":
+            calc = math.degrees(math.atan2(e["end_y"] - e["start_y"],
+                                           e["end_x"] - e["start_x"])) % 360
+            check(f"直线单元 {e['seq']} 坐标方位角 ≡ 声明方位角", abs(calc - e["azimuth_deg"]) < 1e-4,
+                  f"坐标算 {calc:.6f}° / 声明 {e['azimuth_deg']:.6f}°")
+
+    # 跨文件：把两段喂给挂接器，验证 pi_seq 归属 + .pm 转向符号与 .JD 转角同号
+    linked = [dict(e) for e in els]
+    warns = weidi._link_elements_to_pi(linked, cps)
+    check("跨文件挂接：4 个单元全部挂到交点 1（引道直线也算进去）",
+          [e.get("pi_seq") for e in linked] == [1, 1, 1, 1], str([e.get("pi_seq") for e in linked]))
+    check("跨文件印证：.pm 转向符号与 .JD 由坐标算出的转角同号（无告警）", warns == [], str(warns))
+    # 元测试：把转向符号翻过来必须产生告警，否则上一条是空断言
+    flipped = [dict(e, turn_flag=-e["turn_flag"]) for e in els]
+    check("元测试：转向符号翻转后**必须**产生告警",
+          len(weidi._link_elements_to_pi(flipped, cps)) > 0)
+
+    el_schema = json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"]["element"]
+    ve = jsonschema.Draft7Validator(el_schema)
+    eerrs = [x.message for e in els for x in ve.iter_errors(e)]
+    check("每个线形单元都符合 schema 的 element 定义", not eerrs, str(eerrs[:2]))
+
+    def pm_rejects(name: str, text: str, expect: str = "") -> None:
+        global PASS, FAIL
+        try:
+            pm.parse(text, file="<test>")
+            FAIL += 1
+            print(f"  ✗ {name}  **未抛异常（本应被拒绝）**")
+        except SourceInvalid as exc:
+            msg = str(exc)
+            if expect and expect not in msg:
+                FAIL += 1
+                print(f"  ✗ {name}  抛错了，但信息不含 {expect!r}：{msg[:70]}")
+            else:
+                PASS += 1
+                print(f"  ✓ {name}  → 已拒绝：{msg[:56]}")
+
+    PL = pm_text.split("\r\n")
+
+    def _set(texts: list[str], idx: int, field: int, val: str) -> list[str]:
+        out = list(texts)
+        f = out[idx].split("\t")
+        f[field] = val
+        out[idx] = "\t".join(f)
+        return out
+
+    def _count(texts: list[str], n: int) -> list[str]:
+        """只改计数行的数值，宽度沿用原样 —— 按字符切片会切坏填充（第一版就这么写错的）。"""
+        out = list(texts)
+        f = out[1].split("\t")
+        f[0] = f"{n:>{len(f[0])}}"
+        out[1] = "\t".join(f)
+        return out
+
+    pm_rejects("魔数是 .JD 的（认错文件类型）",
+               pm_text.replace("HINTCAD5.83_PM_SHUJU_PM", "HINTCAD5.83_PM_SHUJU_JD"), "魔数")
+    pm_rejects("声明单元数多于实际（防截断被当成完整文件）",
+               "\r\n".join(_count(PL, 5)), "单元数不足")
+    pm_rejects("单元数被少声明（会悄悄丢掉路尾）",
+               "\r\n".join(_count(PL, 3)), "残余")
+    pm_rejects("坐标链断裂（单元终点 ≠ 下一单元起点）",
+               "\r\n".join(_set(PL, 4, 4, "2789000.00000000")), "坐标链断裂")
+    pm_rejects("方位角链断裂",
+               "\r\n".join(_set(PL, 5, 3, "9.999999")), "方位角链断裂")
+    pm_rejects("单元坐标字段数不符（8 字段行写成 7）",
+               "\r\n".join(PL[:4] + ["\t".join(PL[4].split("\t")[:7])] + PL[5:]), "字段数")
+    pm_rejects("未知类型码",
+               "\r\n".join(_set(PL, 3, 6, "99")), "未知的类型码")
+    pm_rejects("起点桩号与文件头不符",
+               "\r\n".join(_set(PL, 5, 0, "7.50000000")), "与文件头")
+    pm_rejects("缺起点记录行", "\r\n".join(PL[:2] + PL[3:]), "字段数")
+
+    # ── 第 10 组：由单元链**推导**交点 —— .JD 从「输入」降为「验算」────────────
+    # 这是契约⑤ 最关键的一条：两个平面段不是两份数据，是同一个东西的两种记法。
+    # 折点是线的摘要，两条相邻切线求交即得。所以 .JD 不该是数据入口。
+    print("\n第 10 组  由 .pm 单元链推导交点（.JD 降为验算）")
+    der = geom.derive_control_points(els)
+    check("4 个单元推出 1 个交点（第一个曲线组）", len(der) == 1, f"实为 {len(der)}")
+    d1 = der[0]
+    check("推导交点的 tag/seq 与 .JD 的 PI1 对应", (d1["seq"], d1["tag"]) == (pi1["seq"], pi1["tag"]),
+          f"{d1['seq']}/{d1['tag']} vs {pi1['seq']}/{pi1['tag']}")
+
+    # 逐字段对质：推导值 vs .JD 文件值。**.JD 一个数都没参与推导**，纯属对质。
+    scalar = ["x", "y", "station_m", "azimuth_deg", "deflection_deg", "radius_m",
+              "spiral_ls1", "spiral_ls2", "spiral_a1", "spiral_a2", "tangent_len_m",
+              "tangent_len2_m", "arc_len_m", "curve_len_m", "external_m", "prev_tangent_len_m"]
+    worst = 0.0
+    for k in scalar:
+        if d1[k] is None or pi1.get(k) is None:
+            continue
+        dv = abs(d1[k] - pi1[k])
+        worst = max(worst, dv)
+        check(f"  {k} 推导 ≡ .JD", dv < 1e-6, f"推导 {d1[k]!r} vs .JD {pi1[k]!r}")
+    fs = max(abs(a - b) for a, b in zip(d1["feat_stations_m"], pi1["feat_stations_m"]))
+    check("  feat_stations_m 推导 ≡ .JD", fs < 1e-6, f"最大差 {fs:.3e}")
+
+    # ⚠ 外距：**教科书公式是错的**，把这件事钉死，免得以后有人"化简"回去。
+    # E = (R+ΔR)/cos(α/2) − R 是级数近似；实测对 PI8 差 1.24 mm，而精确几何差 6e-9 m。
+    _R, _Ls = d1["radius_m"], d1["spiral_ls1"]
+    _a = math.radians(abs(d1["deflection_deg"]) / 2)
+    textbook = (_R + _Ls ** 2 / (24 * _R)) / math.cos(_a) - _R
+    check("元测试：教科书外距公式**必须**与 .JD 有明显偏差（证明它不能用）",
+          abs(textbook - pi1["external_m"]) > 1e-5,
+          f"教科书 {textbook:.8f} vs .JD {pi1['external_m']:.8f}，差 {abs(textbook-pi1['external_m']):.3e}")
+    check("精确几何外距与 .JD 吻合（圆心 + 角平分线，不做级数展开）",
+          abs(d1["external_m"] - pi1["external_m"]) < 1e-6,
+          f"{d1['external_m']:.9f} vs {pi1['external_m']:.9f}")
+
+    # 元测试：动一个方位角，推导出的交点必须跟着动 —— 否则上面全是空断言
+    bent = [dict(e) for e in els]
+    bent[-1]["end_azimuth_deg"] = bent[-1]["end_azimuth_deg"] + 1.0
+    moved = geom.derive_control_points(bent)[0]
+    check("元测试：出切线方位角改 1°，推导交点必须跟着移动",
+          math.dist((d1["x"], d1["y"]), (moved["x"], moved["y"])) > 1.0,
+          f"移动 {math.dist((d1['x'], d1['y']), (moved['x'], moved['y'])):.3f} m")
+    check("元测试：转角也随之改变 1°",
+          abs(abs(moved["deflection_deg"] - d1["deflection_deg"]) - 1.0) < 1e-9)
+
+    pv = jsonschema.Draft7Validator(
+        json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"]["pi_point"])
+    derr = [e.message for e in der for e in pv.iter_errors(e)]
+    check("推导出的交点也符合 schema（与 .JD 解析结果同一形态）", not derr, str(derr[:2]))
+
+    # 切线平行（复曲线）必须报错，不能返回一个假的交点
+    try:
+        geom.derive_control_points([dict(e, azimuth_deg=90.0, end_azimuth_deg=90.0) for e in els])
+        FAIL_GUARD = True
+    except SourceInvalid as exc:
+        FAIL_GUARD = "平行" in str(exc)
+    check("两条切线平行时报错（不编造交点）", FAIL_GUARD)
+
+    # ── 第 11 组：落库器。plan/verify 是**纯函数**，所以这一组完全离线 ──────────
+    # 把"映射对不对"与"事务/写权对不对"分开测：前者不需要库（本组），
+    # 后者由 test_write_guard.py 覆盖 —— 两边各自都不依赖对方。
+    print("\n第 11 组  落库器：IR → 待写行 + 一致性检查（离线，不碰数据库）")
+    ir_fx = base.make_ir(
+        vendor="weidi-hintcad", origin="file",
+        files=[{"file_name": "x.STA", "parse_status": "ok"},
+               {"file_name": "x.JD", "parse_status": "ok"},
+               {"file_name": "x.pm", "parse_status": "ok"}],
+        capabilities=("station_sequence", "alignment_pi", "alignment_element"),
+        segments={"station_sequence": pts, "alignment_pi": cps, "alignment_element": els},
+    )
+    planned = di.plan(ir_fx, section_id=1)
+    counts = {t: len(r) for t, r in planned["tables"].items()}
+    check("行数：桩号 30 / 交点 1 / 单元 4",
+          counts == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4},
+          str(counts))
+    check("交点来源 = 推导（.JD 作输入被忽略）",
+          planned["pi_source"] == "derived" and planned["pi_from_file_ignored"] is True,
+          f"{planned['pi_source']} / {planned['pi_from_file_ignored']}")
+
+    # 桩号文本：★ K0+00.000 这个 bug 正是本组抓出来的（宽度写成 6 少一位整数位）
+    check("桩号文本 0 m → K0+000.000", di.station_text(0.0) == "K0+000.000", di.station_text(0.0))
+    check("桩号文本 545.874 m → K0+545.874", di.station_text(545.874) == "K0+545.874")
+    check("桩号文本 5805.421 m → K5+805.421", di.station_text(5805.421) == "K5+805.421")
+    check("桩号文本长度恒为 10（K + n + '+' + 7 位）",
+          all(len(di.station_text(s)) == 10 for s in (0.0, 545.874, 5805.421, 999.999)))
+    check("整桩判据：20 m 整桩", di.is_integer_station(20.0) and not di.is_integer_station(545.874))
+    check("桩号类型：起终点 / 整桩 / 加桩",
+          (di.station_type(0.0, first=0.0, last=545.874) == "endpoint"
+           and di.station_type(20.0, first=0.0, last=545.874) == "integer"
+           and di.station_type(485.874, first=0.0, last=545.874) == "jiazi"))
+
+    # ★ 元测试：落库器**绝不能**去写生成列 —— 那会在真库上直接报
+    #   "cannot insert a non-DEFAULT value into column"。离线就把它挡住。
+    #   列清单从 DDL 现读，所以以后新增生成列会被自动纳入检查。
+    for table in ("alignment_pi", "alignment_element"):
+        gen = ddl_generated(table)
+        check(f"元测试：DDL 里 {table} 确有生成列（否则下面的断言是空的）", bool(gen), str(gen))
+        for row in planned["tables"][table]:
+            hit = gen & set(row)
+            check(f"元测试：{table} 不写生成列 {sorted(gen)}", not hit, f"写了 {sorted(hit)}")
+    check("元测试：也不写已删除的 curvature_1pm",
+          not any("curvature_1pm" in r for r in planned["tables"]["alignment_element"]))
+
+    # ★ 更强的一条：**每一个非下划线开头**的键都必须是该表真实存在的列。
+    #   这挡住了三件事：内部字段漏剔除、列名拼错、DDL 改名后落库器没跟上。
+    for table, rows in planned["tables"].items():
+        if not rows:
+            continue
+        cols = ddl_columns(table)
+        stray = {k for r in rows for k in r if not k.startswith("_")} - cols
+        check(f"{table} 的每个待写键都是真实列（{len(cols)} 列）", not stray, f"多出 {sorted(stray)}")
+
+    # 干净用例：`.JD` 与 `.pm` 的**覆盖范围**要先对齐 —— .JD fixture 含 2 个交点，
+    # 而 .pm fixture 只到 PI1。覆盖不同本身是另一条用例（见下），别混进来。
+    ir_ok = copy.deepcopy(ir_fx)
+    ir_ok["segments"]["alignment_pi"] = [p for p in cps if p["tag"] in ("QD", "1")]
+    v = di.verify(ir_ok, di.plan(ir_ok, section_id=1))
+    check("干净 IR：0 错 0 警", not v["errors"] and not v["warnings"],
+          f"errors={v['errors']} warnings={v['warnings']}")
+
+    # ★ 覆盖范围不同 **不该** 被报成"数值不符"：按序号硬配会造出假警报，
+    #   而假警报会让真警报被淹没 —— 这是本组抓到的一个真实设计缺陷。
+    v_cov = di.verify(ir_fx, di.plan(ir_fx, section_id=1))
+    check("元测试：覆盖范围不同 → 只报「未对应」，不报数值不符",
+          not v_cov["errors"] and len(v_cov["warnings"]) == 1
+          and "没有对应" in v_cov["warnings"][0],
+          str(v_cov["warnings"]))
+
+    # 单元链断裂必须是**硬错误**（链一断，后面所有推导都不可信）
+    bent = copy.deepcopy(ir_ok)
+    bent["segments"]["alignment_element"][1]["start_station_m"] += 1.0
+    check("单元链桩号断裂 → 错误", di.verify(bent, di.plan(bent, section_id=1))["errors"])
+
+    bent2 = copy.deepcopy(ir_ok)
+    bent2["segments"]["alignment_element"][2]["start_x"] += 1.0
+    check("单元链坐标断裂 → 错误", di.verify(bent2, di.plan(bent2, section_id=1))["errors"])
+
+    sts_bad = copy.deepcopy(ir_ok)
+    sts_bad["segments"]["station_sequence"][5]["station_m"] = 1.0
+    check("桩号非严格递增 → 错误", di.verify(sts_bad, di.plan(sts_bad, section_id=1))["errors"])
+
+    # ★ .JD 作验算：把交点坐标挪 1 mm，必须告警（而不是静默采信推导值）
+    jd_bent = copy.deepcopy(ir_ok)
+    jd_bent["segments"]["alignment_pi"][1]["x"] += 0.001
+    w = di.verify(jd_bent, di.plan(jd_bent, section_id=1))["warnings"]
+    check("元测试：.JD 与推导差 1 mm → 告警", any("x_coord" in x for x in w), str(w[:1]))
+    # 反过来：差 1 nm 不该报（阈值不能过紧，否则全是噪声）
+    jd_tight = copy.deepcopy(ir_ok)
+    jd_tight["segments"]["alignment_pi"][1]["x"] += 1e-9
+    check("元测试：差 1 nm 不告警（阈值不过紧）",
+          not di.verify(jd_tight, di.plan(jd_tight, section_id=1))["warnings"])
+
+    # ★ 跨文件不变量：.STA 的非整桩 ⊆ 曲线特征点 ∪ {首末}。造一个"孤零零的加桩"必须被抓。
+    #   注意要插在**中间**：追加到末尾会先触发单调性错误，就走不到这条路径了。
+    odd_ir = copy.deepcopy(ir_ok)
+    sp = odd_ir["segments"]["station_sequence"]
+    sp.insert(len(sp) - 1, {"station_m": sp[-2]["station_m"] + 0.5, "seq_no": len(sp)})
+    sp[-1]["seq_no"] = len(sp)
+    w2 = di.verify(odd_ir, di.plan(odd_ir, section_id=1))["warnings"]
+    check("元测试：凭空多一个加桩 → 告警", any("非整桩" in x for x in w2), str(w2[:1]))
+
+    # 只有 .pm 没有 .JD 时，不变量照样成立（这是它比"对质 .JD"更强的地方）
+    no_jd = base.make_ir(vendor="weidi-hintcad", origin="file", files=[],
+                         capabilities=("station_sequence", "alignment_element"),
+                         segments={"station_sequence": pts, "alignment_element": els})
+    pj = di.plan(no_jd, section_id=1)
+    check("只有 .pm 时仍能推导交点（.JD 不是必需）",
+          pj["pi_source"] == "derived" and len(pj["tables"]["alignment_pi"]) == 1)
+    check("只有 .pm 时跨文件不变量仍成立（无告警）", not di.verify(no_jd, pj)["warnings"])
+
+    # ── 第 12 组：真库端到端。无库 / 无 psycopg 则跳过 ──────────────────────
+    # 这一组测的**只有**事务与写权 —— 映射正确性已由第 11 组离线覆盖。
+    print("\n第 12 组  落库器端到端（真库；无库或未装 psycopg 则跳过）")
+    sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
+    dao_e2e = None
+    batch = f"test-di-{os.getpid()}"
+    line_id = sec_id = None
+    try:
+        from rpdao.errors import WriteGuardError
+        from rpdao.write import WriteDao
+        dao_e2e = WriteDao(pg_dsn() or "", app_name="contract-test",
+                           min_size=1, max_size=2, timeout=10)
+        dao_e2e.open()                             # 池是懒打开的，不 open 会到第一次用时才炸
+        if not dao_e2e.ping():                     # ping 按设计吞异常只回真假，故必须显式判它
+            raise RuntimeError("ping 失败（DSN 或库不可达）")
+    except Exception as exc:                       # noqa: BLE001
+        print(f"  ⊘ 跳过：{type(exc).__name__}: {str(exc)[:90]}")
+        print("    需要时：uv run --with psycopg[binary] --with jsonschema --with pyyaml <本文件>")
+    else:
+        MARK = "契约⑤落库器自测"
+        try:
+            line_id = dao_e2e.insert_returning(
+                "road_line", {"line_code": f"TEST-DI-{os.getpid()}",
+                              "line_name": MARK}, writer="M2")
+            sec_id = dao_e2e.insert_returning(
+                "road_section", {"line_id": line_id, "section_name": MARK}, writer="M2")
+
+            # ① 预检：dry_run 必须一行都不写（这就是 M9 导入页"预检"的语义）
+            rep = di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch, dry_run=True)
+            check("dry_run 报告计划行数（桩号 30 / 交点 1 / 单元 4）",
+                  rep["planned"] == {"station_sequence": 30, "alignment_pi": 1,
+                                     "alignment_element": 4}, str(rep["planned"]))
+            check("dry_run 后没有批次行",
+                  dao_e2e.scalar("SELECT count(*) FROM data_import_batch WHERE batch_no=%(b)s",
+                                 {"b": batch}) == 0)
+            check("dry_run 后没有桩号行",
+                  dao_e2e.scalar("SELECT count(*) FROM station_sequence WHERE section_id=%(s)s",
+                                 {"s": sec_id}) == 0)
+
+            # ② 真落库
+            rep = di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch,
+                          source_desc="契约测试 fixture", strict=True)
+            check("落库行数 = 计划行数", rep["written"] == rep["planned"], str(rep["written"]))
+            remark = dao_e2e.scalar(
+                "SELECT remark FROM data_import_batch WHERE batch_no=%(b)s", {"b": batch}) or ""
+            check("批次已登记（source_type=file）",
+                  dao_e2e.scalar("SELECT source_type FROM data_import_batch WHERE batch_no=%(b)s",
+                                 {"b": batch}) == "file")
+            check("批次备注含几何等级", "几何等级 L2" in remark, remark[:90])
+            check("批次备注说明了交点来源是**推导**", "交点来源 derived" in remark, remark[:90])
+
+            # ③ 生成列由**数据库**算出，不是客户端编的
+            a1 = dao_e2e.scalar("SELECT spiral_a1 FROM alignment_pi WHERE section_id=%(s)s",
+                                {"s": sec_id})
+            check("库里 spiral_a1 = √(450×60) = 164.31676725",
+                  abs(float(a1) - 164.31676725) < 1e-8, str(a1))
+            lm = dao_e2e.scalar("SELECT length_m FROM alignment_element "
+                                "WHERE section_id=%(s)s AND element_seq=2", {"s": sec_id})
+            check("库里 length_m = 60.000000（由桩号差算出）",
+                  abs(float(lm) - 60.0) < 1e-9, str(lm))
+            check("单元已挂到交点上（pi_id 非空）",
+                  dao_e2e.scalar("SELECT count(*) FROM alignment_element "
+                                 "WHERE section_id=%(s)s AND pi_id IS NOT NULL",
+                                 {"s": sec_id}) > 0)
+
+            # ④ 幂等：同批次重放不产生重复行
+            n0 = dao_e2e.scalar("SELECT count(*) FROM alignment_element WHERE section_id=%(s)s",
+                                {"s": sec_id})
+            di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch, strict=True)
+            check("重放同批次不产生重复行",
+                  dao_e2e.scalar("SELECT count(*) FROM alignment_element WHERE section_id=%(s)s",
+                                 {"s": sec_id}) == n0)
+
+            # ⑤ ★ 写权守卫：「写只经 M2」在这里是**实证**，不是文档约定
+            try:
+                di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch + "-x",
+                        writer="M5", strict=True)
+                blocked = False
+            except WriteGuardError:
+                blocked = True
+            check("元测试：以 M5 身份落库被 WriteGuard 拒绝", blocked)
+            check("越权尝试没留下批次行",
+                  dao_e2e.scalar("SELECT count(*) FROM data_import_batch WHERE batch_no=%(b)s",
+                                 {"b": batch + "-x"}) == 0)
+
+            # ⑥ ★ 硬错误必须**写库前**抛出，否则会留下半条数据
+            bad = copy.deepcopy(ir_ok)
+            bad["segments"]["alignment_element"][1]["start_x"] += 1.0
+            try:
+                di.load(bad, dao_e2e, section_id=sec_id, batch_no=batch + "-bad", strict=True)
+                raised = False
+            except di.LoadError as exc:
+                raised = "坐标链断裂" in str(exc)
+            check("元测试：链断裂 → LoadError，且在任何写入之前", raised)
+            check("失败那次没留下批次行",
+                  dao_e2e.scalar("SELECT count(*) FROM data_import_batch WHERE batch_no=%(b)s",
+                                 {"b": batch + "-bad"}) == 0)
+        finally:
+            # 清理：按 FK 反序删掉本组造的一切（不留痕，种子数据不受影响）
+            def _del(table: str, sql: str, params: dict) -> None:
+                try:
+                    dao_e2e.execute_write(table, sql, params, writer="M2")
+                except Exception:                  # noqa: BLE001
+                    pass
+            if sec_id:
+                for tbl in ("alignment_element", "alignment_pi", "station_sequence"):
+                    _del(tbl, f"DELETE FROM {tbl} WHERE section_id=%(s)s", {"s": sec_id})
+                for b in (batch, batch + "-x", batch + "-bad"):
+                    _del("data_import_batch",
+                         "DELETE FROM data_import_batch WHERE batch_no=%(b)s", {"b": b})
+                _del("road_section", "DELETE FROM road_section WHERE id=%(i)s", {"i": sec_id})
+            if line_id:
+                _del("road_line", "DELETE FROM road_line WHERE id=%(i)s", {"i": line_id})
+            dao_e2e.close()
+            print(f"  （已清理：路段 {sec_id} / 批次 {batch}）")
+
+    print("\n" + "=" * 74)
+    print(f"通过 {PASS} ｜ 失败 {FAIL}")
+    print("=" * 74)
+    if FAIL == 0:
+        print("\n结论：契约⑤ 的 IR 结构、能力/实得/缺口自洽性、等级推导、落库器，")
+        print("      以及纬地 .STA / .JD / .pm 三个解析器的**放行侧与拦截侧**均已成立。")
+        print("      .JD 与 .pm 的字段语义都不是照抄注释，而是被几何恒等式证明的：")
+        print("      .JD 用了 6 条（含发现 DDL 把 A 当切线长、把 Ls 当转角）；")
+        print("      .pm 用了 3 条（链连续 / 圆心距离 ≡ R / 弦长 = 2R·sin(L/2R)）。")
+        print("      两者还能互相印证：.pm 的转向符号与 .JD 由坐标算出的转角符号一致。")
+        print('      落库器（第 11/12 组）把"映射"与"事务"分开测：前者是纯函数、完全离线，')
+        print("      后者打真库、只验多表同事务、幂等、以及**以 M5 身份落库会被 WriteGuard 拒绝**")
+        print("      —— 即「写只经 M2」是跑出来的，不是写文档里的。")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

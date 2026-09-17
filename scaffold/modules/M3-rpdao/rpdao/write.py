@@ -169,11 +169,23 @@ class WriteMixin:
         *,
         writer: str,
         returning: str = "id",
+        on_conflict: Sequence[str] | None = None,
     ) -> Any:
-        """插入一行并返回指定列（如自增主键），供需要外键串联的场景使用。"""
+        """插入一行并返回指定列（如自增主键），供需要外键串联的场景使用。
+
+        ``on_conflict`` 给出后即为**幂等**写入：已存在则更新并仍返回该行的
+        ``returning`` 列。原先这里没有这个参数，而 ``insert`` 又有冲突键却拿不到 id
+        —— 结果是"按业务键幂等 + 需要拿回主键去挂外键"这件事**根本表达不出来**。
+        M2 的设计数据落库器就卡在这上面：重放同一批会撞
+        ``UNIQUE (section_id, pi_seq)``，而单元表又必须拿到交点 id 才能填 ``pi_id``。
+
+        ⚠ 若 ``on_conflict`` 覆盖了该行的**全部**列，``_build_insert`` 会退化成
+        ``DO NOTHING``，此时冲突行不会返回，本方法返回 ``None``。需要拿到 id 时，
+        请保证冲突键之外至少还有一列（本项目 ``alignment_pi`` 即属此情况）。
+        """
         assert_writer(table, writer)
         payload = _guard_rows([row])[0]
-        sql, params = self._build_insert(table, payload, None)
+        sql, params = self._build_insert(table, payload, on_conflict)
         sql += f" RETURNING {quote_ident(returning)}"
         with self.cursor() as cur:                     # type: ignore[attr-defined]
             cur.execute(sql, params)
@@ -245,10 +257,12 @@ class TxnWriter:
         row: Mapping[str, Any],
         *,
         returning: str = "id",
+        on_conflict: Sequence[str] | None = None,
     ) -> Any:
+        """插入一行并返回指定列；``on_conflict`` 给出时按业务键幂等（同 :meth:`WriteMixin.insert_returning`）。"""
         assert_writer(table, self._writer)
         payload = _guard_rows([row])[0]
-        sql, params = self._dao._build_insert(table, payload, None)
+        sql, params = self._dao._build_insert(table, payload, on_conflict)
         sql += f" RETURNING {quote_ident(returning)}"
         self._cur.execute(sql, params)
         got = self._cur.fetchone()
