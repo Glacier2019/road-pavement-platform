@@ -2,9 +2,10 @@
 
 约定（对齐报告第十章 10.5 的"对象—函数—动作"三层）：
   · 对象查询：GET /v1/objects/{object_type}            ← 对应本体对象类型
+  · 几何查询：GET /v1/geometry/...                     ← GE 域按路段取子树（工单 #4）
   · 指标查询：GET /v1/metrics/...
   · 动作提交：POST /v1/actions/{action_name}           ← 受治理事务（P3 落地，先占位 501）
-契约真源：本服务的 /openapi.json（contracts/openapi/m6-gateway.v0.2.yaml 是它的手写摘要）
+契约真源：本服务的 /openapi.json（contracts/openapi/m6-gateway.v0.3.yaml 是它的手写摘要）
 
 ==================== M3 落地后的变化（2026-09-15）====================
 本服务**不再 import psycopg、不再持有连接池、不再内联 SQL**，全部改为调用 M3（rpdao）。
@@ -38,8 +39,8 @@ from rpdao import (
 
 dao = Dao(os.getenv("PG_DSN"), app_name="rp-api")
 
-# 对象类型白名单 = 7 大对象域**已建**的物理表（共 21 张），来自 M3 的域目录。
-# 跨域支撑表（字典/质量日志/批次台账等 9 张）刻意不在此列：它们是治理设施，
+# 对象类型白名单 = 7 大对象域**已建**的物理表（共 31 张），来自 M3 的域目录。
+# 跨域支撑表（字典/质量日志/批次台账等 11 张）刻意不在此列：它们是治理设施，
 # 不是本体对象，不应经"对象查询"暴露。越白名单即越界 → 404。
 OBJECT_TYPES: dict[str, str] = {
     table: code for code, d in DOMAINS.items() for table in d.tables
@@ -55,8 +56,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="M6 统一数据出口（骨架版）",
-    version="0.2.0",
-    description="对象查询 / 指标查询 / 动作提交三类接口。上层（Grafana、Copilot、课题组脚本）"
+    version="0.3.0",
+    description="对象查询 / 几何查询 / 指标查询 / 动作提交四类接口。上层（Grafana、Copilot、课题组脚本）"
                 "一律通过本服务访问数据，不允许直连库。数据访问全部经 M3（rpdao）。",
     lifespan=lifespan,
 )
@@ -103,7 +104,7 @@ def catalog() -> dict[str, Any]:
 # ⚠ 注册顺序 = 匹配顺序（Starlette 取第一个 FULL match）。静态路径必须排在参数化路径
 #   /v1/objects/{object_type} 之前，否则 /v1/objects/wim_axle 会被它吃掉、永远返回 404。
 #   新增对象查询端点时，一律加在下面这一段（list_objects 之前）。
-#   契约：contracts/openapi/m6-gateway.v0.2.yaml；回归保护：tests/contract/test_api_routes.py
+#   契约：contracts/openapi/m6-gateway.v0.3.yaml；回归保护：tests/contract/test_api_routes.py
 @app.get("/v1/objects/wim_axle", tags=["对象查询"],
          summary="WIM 过车记录（按时间/桩号/超载筛选）")
 def list_wim(
@@ -139,6 +140,63 @@ def list_objects(object_type: str, limit: int = Query(100, ge=1, le=1000)) -> di
     except DaoError as exc:
         raise _http(exc) from exc
     return {"object_type": object_type, "domain": code, "count": len(rows), "items": rows}
+
+
+# --------------------------------------------------------------- 几何查询（GE 域）
+# 工单 #4。为什么 GE 要单独一组路由，而不是用 /v1/objects/{object_type} 平铺取：
+#   GE 的数据是以 road_section 为根的一棵树（桩号/交点/线元全锚在路段上）。
+#   平铺取「所有交点」在只有一个路段时看着没问题，路段一多就**静默串台** ——
+#   把 A 路的交点混进 B 路的线形，而两条路的桩号都从 0 开始，混了看不出来。
+# 本层只做两件事：转发筛选参数、把 M3 的语义化异常翻成 HTTP。SQL 一律在 M3。
+@app.get("/v1/geometry/sections", tags=["几何查询"],
+         summary="路段列表（含路线/设计项目/分段属性 + 三类几何计数）")
+def list_sections() -> dict[str, Any]:
+    try:
+        rows = dao.ge.sections()
+    except DaoError as exc:
+        raise _http(exc) from exc
+    return {"count": len(rows), "items": rows}
+
+
+@app.get("/v1/geometry/sections/{section_id}/stations", tags=["几何查询"],
+         summary="桩号序列（可按区间与是否整桩筛）")
+def list_stations(
+    section_id: int,
+    from_km: float | None = Query(None, ge=0, description="起（路段内里程，km，含）"),
+    to_km: float | None = Query(None, ge=0, description="止（路段内里程，km，含）"),
+    integer_only: bool = Query(False, description="只要整桩"),
+    limit: int = Query(500, ge=1, le=5000),
+) -> dict[str, Any]:
+    try:
+        rows = dao.ge.stations(section_id, from_km=from_km, to_km=to_km,
+                               integer_only=integer_only, limit=limit)
+    except DaoError as exc:
+        raise _http(exc) from exc
+    return {"section_id": section_id, "count": len(rows), "items": rows}
+
+
+@app.get("/v1/geometry/sections/{section_id}/alignment", tags=["几何查询"],
+         summary="平面线形：交点链 + 线形单元链（一次取回）")
+def get_alignment(section_id: int) -> dict[str, Any]:
+    try:
+        return dao.ge.alignment(section_id)
+    except DaoError as exc:
+        raise _http(exc) from exc
+
+
+@app.get("/v1/geometry/sections/{section_id}/summary", tags=["几何查询"],
+         summary="单条路段的概要 + 几何完整度报告")
+def get_section_summary(section_id: int) -> dict[str, Any]:
+    """`section` 答"这是哪条路"，`completeness` 答"这份数据够不够用、为什么"。
+
+    ⚠ 给不出"哪个导入批次导的"：批次台账 `data_import_batch` **没有指回路段的列**
+    （实测确认），只能给到**文件级**来源。不假装能给。
+    """
+    try:
+        return {"section": dao.ge.section(section_id),
+                "completeness": dao.ge.completeness(section_id)}
+    except DaoError as exc:
+        raise _http(exc) from exc
 
 
 # ----------------------------------------------------------------- 指标查询

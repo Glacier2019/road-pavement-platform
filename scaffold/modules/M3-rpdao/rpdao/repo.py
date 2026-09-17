@@ -223,10 +223,11 @@ class GeRepository(DomainRepository):
            s.start_station_km, s.end_station_km, s.length_m,
            s.pavement_type, s.climate_zone, s.direction,
            l.line_code, l.line_name, l.road_class, l.design_speed, l.lane_count,
-           p.project_name, p.project_uid,
+           p.project_name, p.project_uid, p.source_file AS project_source_file,
            a.road_grade, a.cross_section_form, a.roadway_width_m,
            a.carriageway_crossfall_pct, a.shoulder_crossfall_pct,
-           a.max_superelev_pct, a.superelev_rotate_mode, a.widening_mode
+           a.max_superelev_pct, a.superelev_rotate_mode, a.widening_mode,
+           a.source_file AS attr_source_file
     FROM road_section s
     JOIN road_line l        ON l.id = s.line_id
     LEFT JOIN design_project p      ON p.id = s.design_project_id

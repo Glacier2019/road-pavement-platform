@@ -1,5 +1,5 @@
 # ============================================================================
-# M6 统一数据出口（骨架版）契约摘要 v0.1
+# M6 统一数据出口（骨架版）契约摘要 v0.3
 # ----------------------------------------------------------------------------
 # 真源：服务运行后自动生成的 /openapi.json。本文件是它的人工摘要，用于评审与对接，
 #       不参与运行时校验——避免"文档与实现两套真源"。
@@ -8,8 +8,8 @@
 openapi: 3.1.0
 info:
   title: M6 统一数据出口（骨架版）
-  version: 0.2.0
-  description: 对象查询 / 指标查询 / 动作提交三类接口。
+  version: 0.3.0
+  description: 对象查询 / 几何查询 / 指标查询 / 动作提交四类接口。
 servers:
   - url: http://localhost:8001        # 骨架栈映射端口（容器内 8000）
 
@@ -103,6 +103,97 @@ paths:
           description: 记录字段 + axles 明细数组
         "404":
           description: 记录不存在
+
+  # ── 几何查询（工单 #4）────────────────────────────────────────────────────
+  # GE 的数据不是"一堆并列对象"，而是**以 road_section 为根的一棵树**：桩号序列、
+  # 平面交点、线形单元全部锚在路段上。平铺查「所有交点」在只有一个路段时看着没问题，
+  # 路段一多就静默串台（两条路的桩号都从 0 开始，混了看不出来）。
+  # 所以这里一律**按路段取子树**，不提供无 section 的取法。
+  # 实现全部落在 M3 的 GeRepository（契约③），本服务只做翻译与筛选参数转发。
+  /v1/geometry/sections:
+    get:
+      summary: 路段列表（含路线/设计项目/分段属性 + 三类几何计数）
+      description: >-
+        GE 域的入口。返回全部路段；每个路段带 station_count / pi_count / element_count，
+        供前端在打开某个路段前就知道它有没有几何数据。
+      responses:
+        "200":
+          description: count 与 items 数组
+
+  /v1/geometry/sections/{section_id}/stations:
+    get:
+      summary: 桩号序列（可按区间与是否整桩筛）
+      description: >-
+        桩号是 GE 域的一等实体，其余逐桩数据全部锚在它上面，故这是几何浏览的主视图。
+        返回 station_local_km（路段内里程）与 station_text（原样桩号文本）。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: from_km
+          in: query
+          schema:
+            type: number
+          example: 0.6
+        - name: to_km
+          in: query
+          schema:
+            type: number
+        - name: integer_only
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 500
+      responses:
+        "200":
+          description: section_id、count 与 items 数组
+
+  /v1/geometry/sections/{section_id}/alignment:
+    get:
+      summary: 平面线形（交点链 + 线形单元链，一次取回）
+      description: >-
+        pis 为交点（R / Ls / A / T / 转角 / 外距），elements 为线形单元
+        （circular / transition / line）。element 的 pi_id 为空表示**直线段** ——
+        直线不属于任何交点，这是正常的，不是漏挂。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: section_id、pis 数组与 elements 数组
+
+  /v1/geometry/sections/{section_id}/summary:
+    get:
+      summary: 单条路段的概要 + 几何完整度报告
+      description: >-
+        section 为该路段自身（含所属路线、设计项目与源文件名）；
+        completeness 回答「为什么这个路段的几何等级是 L2 而不是 L3」——
+        等级是由"哪些段有数据"当场推出的派生量，故连依据（每张表的行数）一并返回，
+        让结论可被核对。缺口分 missing_not_built（schema 没到，如 v0.4 的横断面）
+        与 missing_no_data（表建好了但解析器没做）两类，含义不同。
+        注意：设计数据的**导入批次台账**（data_import_batch）没有指回路段的列，
+        故这里给不出"哪个批次导的"，只能给到文件级来源。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: section 对象与 completeness 对象
+        "404":
+          description: 路段不存在
 
   /v1/metrics/wim_hourly:
     get:

@@ -18,7 +18,7 @@ Starlette/FastAPI **按注册顺序取第一个完全匹配的路由**。若把�
   · 报文契约测试（test_wim_contract.py）查不出来；
   · 只有"真的发一次 HTTP 请求"才暴露。
 
-而契约文件 contracts/openapi/m6-gateway.v0.2.yaml 里明明写着该端点，
+而契约文件 contracts/openapi/m6-gateway.v0.3.yaml 里明明写着该端点，
 接入规约 MODULE-ONBOARDING.md 也拿它当示范路径——契约与实现就此静默漂移。
 所以本测试做三件事：
   1) 路由自洽：每条路由用它自己的具体 URL 去匹配，第一个命中的必须是它自己；
@@ -39,7 +39,7 @@ from starlette.routing import Match
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_PATH = ROOT / "modules" / "M6-api" / "app.py"
-CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.2.yaml"
+CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.3.yaml"
 
 # M3（rpdao）是 api 的依赖。本测试直接从源码路径加载 app.py，故需手动把
 # modules/M3-rpdao/ 放进 sys.path —— **必须在 import rpdao 之前**（容器里由
@@ -162,6 +162,44 @@ class _FakeLo:
                 "overloaded": 0, "overload_ratio": 0.0, "esal_sum": 14.73, "buckets": []}
 
 
+class _FakeGe:
+    """GE 域仓储的假实现。GE 的方法**一律带 section_id**（按路段取子树）——
+    这个假实现刻意不提供无 section 的平铺查，与真实 GeRepository 保持一致。"""
+
+    SECTION = {"id": 6, "section_name": "毕设", "line_code": "毕设",
+               "start_station_text": "K0+000.000", "end_station_text": "K5+805.421",
+               "station_count": 2, "pi_count": 1, "element_count": 1}
+
+    def sections(self):
+        return [self.SECTION]
+
+    def section(self, section_id):
+        if section_id != 6:
+            raise NotFound(f"路段不存在：section_id={section_id}")
+        return self.SECTION
+
+    def stations(self, section_id, *, from_km=None, to_km=None,
+                 integer_only=False, limit=500):
+        self.section(section_id)        # 不存在 → NotFound
+        return [{"station_seq_no": 1, "station_local_km": 0.0,
+                 "station_text": "K0+000.000", "station_type": "endpoint",
+                 "is_integer_station": True}]
+
+    def alignment(self, section_id):
+        self.section(section_id)
+        return {"section_id": section_id,
+                "pis": [{"pi_seq": 1, "radius_m": 450.0}],
+                "elements": [{"element_seq": 1, "element_type": "line", "pi_id": None}]}
+
+    def completeness(self, section_id):
+        self.section(section_id)
+        return {"section_id": section_id, "geometry_level": "L2",
+                "level_reason": "alignment_pi／alignment_element 有数据",
+                "present": {"station_sequence": 2}, "missing": [],
+                "missing_not_built": ["cross_section"], "missing_no_data": [],
+                "counts": {"station_sequence": 2}}
+
+
 class _FakeDomain:
     def __init__(self, code): self.code = code
 
@@ -172,7 +210,9 @@ class _FakeDomain:
 class _FakeDao:
     """替换 M3 门面。真实 Dao 的接口面就是这些——这正是 M3 契约的可替代性证明。"""
 
-    def __init__(self): self.lo = _FakeLo()
+    def __init__(self):
+        self.lo = _FakeLo()
+        self.ge = _FakeGe()
 
     def domain(self, code): return _FakeDomain(code)
     def ping(self): return True
@@ -225,6 +265,16 @@ def main() -> int:
         ("GET",    "/v1/objects/road_line",             200),
         ("GET",    "/v1/objects/not_registered",        404),
         ("GET",    "/v1/objects/wim_axle/99999",        404),
+        # 几何查询（工单 #4）：按路段取子树
+        ("GET",    "/v1/geometry/sections",                         200),
+        ("GET",    "/v1/geometry/sections/6/stations",              200),
+        ("GET",    "/v1/geometry/sections/6/stations?from_km=0&to_km=1&integer_only=true", 200),
+        ("GET",    "/v1/geometry/sections/6/alignment",             200),
+        ("GET",    "/v1/geometry/sections/6/summary",               200),
+        ("GET",    "/v1/geometry/sections/99999/summary",           404),
+        # 参数校验：非法筛选项应被 FastAPI 挡在门外（422），而不是进到 DAO
+        ("GET",    "/v1/geometry/sections/6/stations?limit=0",      422),
+        ("GET",    "/v1/geometry/sections/6/stations?from_km=-1",   422),
         ("POST",   "/v1/actions/create_maintenance_ticket", 501),
     ]
     for method, url, want in cases:
@@ -242,6 +292,28 @@ def main() -> int:
         print(f"\n  ✗ 回归点：/v1/objects/wim_axle 未命中 list_wim → {resp.status_code} "
               f"{str(resp.json())[:120]}")
         fails.append("wim_axle 路由遮蔽回归")
+
+    # 几何查询的内容回归：不只看状态码，还看**取到的是不是那个路段的子树**
+    print("\n  ── 几何查询内容回归 ──")
+    r = client.get("/v1/geometry/sections/6/alignment").json()
+    if r.get("pis") and r.get("elements") and all("pi_id" in e for e in r["elements"]):
+        print(f"  ✓ alignment 返回交点链({len(r['pis'])}) + 线元链({len(r['elements'])})")
+    else:
+        print(f"  ✗ alignment 结构不对 → {str(r)[:120]}")
+        fails.append("alignment 返回结构不符")
+    r = client.get("/v1/geometry/sections/6/summary").json()
+    if r.get("section", {}).get("section_name") and r.get("completeness", {}).get("geometry_level"):
+        print(f"  ✓ summary 同时给出 section（{r['section']['section_name']}）"
+              f"与 completeness（{r['completeness']['geometry_level']}）")
+    else:
+        print(f"  ✗ summary 结构不对 → {str(r)[:120]}")
+        fails.append("summary 返回结构不符")
+    # 元测试：GE 假实现也不提供无 section 的平铺查 —— 若哪天有人加了，这里会红
+    if not any(hasattr(_FakeGe, m) for m in ("all_pis", "list_objects")):
+        print("  ✓ GE 端点无「无 section 的平铺查」（路段一多就会静默串台）")
+    else:
+        print("  ✗ GE 端点出现了平铺查")
+        fails.append("GE 端点出现平铺查")
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
