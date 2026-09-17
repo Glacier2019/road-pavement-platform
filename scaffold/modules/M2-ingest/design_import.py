@@ -88,16 +88,32 @@ def station_type(station_m: float, *, first: float, last: float) -> str:
 
 
 # ----------------------------------------------------------------- IR → 待写行
-def _plan_stations(ir: Mapping[str, Any], section_id: int) -> list[dict[str, Any]]:
+def _plan_stations(ir: Mapping[str, Any], section_id: int, *,
+                   section_start_km: float | None = None) -> list[dict[str, Any]]:
+    """桩号序列行。
+
+    ``section_start_km`` 是**该路段起点的绝对桩号**（= ``road_section.start_station_km``）。
+    给了就把 ``station_absolute_km`` 填上：``绝对 = 路段起点 + 局部``。
+
+    为什么必须能填：`.STA` 里的桩号是**相对该路段起点**的（毕设是 0→5805.421）。
+    而平台其余数据（WIM / 病害 / 试验）用的是**绝对桩号**（如 K4635+000）。
+    绝对桩号空着，GE 的几何就永远 JOIN 不上那些数据 —— 而 GE 域的全部价值
+    就是当桩号锚定基准。所以这不是可选项，是这一步的意义所在。
+
+    ``station_text`` 保持**局部**写法：它镜像的是 `.STA` 文件里的原文，
+    不是派生量。绝对桩号另有 ``station_absolute_km`` 一列，别把两者混起来。
+    """
     pts = ir["segments"].get("station_sequence") or []
     if not pts:
         return []
     first, last = pts[0]["station_m"], pts[-1]["station_m"]
+    base = section_start_km
     return [{
         "section_id": section_id,
         "station_seq_no": p["seq_no"],
         "station_local_km": round(p["station_m"] / 1000.0, 6),
-        "station_absolute_km": None,        # 需路网基准，IR 里没有（见 station_text 注释）
+        "station_absolute_km": (None if base is None
+                                else round(base + p["station_m"] / 1000.0, 6)),
         "station_text": station_text(p["station_m"]),
         "station_type": station_type(p["station_m"], first=first, last=last),
         "is_integer_station": is_integer_station(p["station_m"]),
@@ -205,8 +221,11 @@ def _plan_pi_from_file(ir: Mapping[str, Any], section_id: int) -> list[dict[str,
     return out
 
 
-def plan(ir: Mapping[str, Any], *, section_id: int) -> dict[str, Any]:
+def plan(ir: Mapping[str, Any], *, section_id: int,
+         section_start_km: float | None = None) -> dict[str, Any]:
     """IR → 待写行。**纯函数，不碰数据库**（故可离线测）。
+
+    ``section_start_km`` 见 :func:`_plan_stations`。
 
     返回 ``{"tables": {表名: [行…]}, "pi_source": "derived"|"file"|None}``。
     """
@@ -215,7 +234,8 @@ def plan(ir: Mapping[str, Any], *, section_id: int) -> dict[str, Any]:
     pi_rows, pi_source = (pi_derived, "derived") if pi_derived else \
                          ((pi_file, "file") if pi_file else ([], None))
     tables = {
-        "station_sequence": _plan_stations(ir, section_id),
+        "station_sequence": _plan_stations(ir, section_id,
+                                           section_start_km=section_start_km),
         "alignment_pi": pi_rows,
         "alignment_element": _plan_elements(ir, section_id),
     }
@@ -337,6 +357,7 @@ def verify(ir: Mapping[str, Any], planned: Mapping[str, Any],
 def load(ir: Mapping[str, Any], dao: Any, *,
          section_id: int, batch_no: str,
          source_desc: str | None = None,
+         section_start_km: float | None = None,
          writer: str = "M2",
          dry_run: bool = False,
          strict: bool = True) -> dict[str, Any]:
@@ -347,7 +368,16 @@ def load(ir: Mapping[str, Any], dao: Any, *,
 
     写权由 ``WriteDao`` 守卫逐表核对（``catalog.TABLE_OWNER``），本模块无从绕过。
     """
-    planned = plan(ir, section_id=section_id)
+    # 没显式给路段起点就从库里读 —— 它决定绝对桩号，属路段自身的属性，
+    # 不该要求每个调用方自己记着传（忘了传就是一批 NULL，且不会报错）。
+    if section_start_km is None and not dry_run:
+        row = dao.query_one(
+            "SELECT start_station_km FROM road_section WHERE id = %(s)s",
+            {"s": section_id})
+        if row and row["start_station_km"] is not None:
+            section_start_km = float(row["start_station_km"])
+
+    planned = plan(ir, section_id=section_id, section_start_km=section_start_km)
     verdict = verify(ir, planned)
     if verdict["errors"] and strict:
         raise LoadError("落库前检查未通过：\n  - " + "\n  - ".join(verdict["errors"]))
@@ -358,6 +388,7 @@ def load(ir: Mapping[str, Any], dao: Any, *,
         "batch_no": batch_no,
         "section_id": section_id,
         "geometry_level": ir.get("geometry_level"),
+        "section_start_km": section_start_km,
         "pi_source": planned["pi_source"],
         "pi_from_file_ignored": planned["pi_from_file_ignored"],
         "planned": counts,
@@ -442,5 +473,257 @@ def _batch_remark(ir: Mapping[str, Any], planned: Mapping[str, Any],
     return "｜".join(parts)[:2000]
 
 
-__all__ = ["LOADABLE_TABLES", "LoadError", "plan", "verify", "load",
+# ============================================================ 档案与路段（第一段）
+# `.PRJ` 走这里，不走 `plan()`/`load()` —— 见 adapters/weidi/prj.py 的说明：
+# 它是**项目档案**（design_project / section_design_attr / design_file + road_line /
+# road_section），不是 `road_geometry_ir` 的 geometry segment。
+#
+# 两段式的理由不只是"schema 塞不下"：**档案必须先于几何存在**。
+# 几何表用 FK 锚在 `road_section.id` 上，路段没建出来就没有 section_id 可用。
+# 所以顺序是天生的：档案 → 路段 → 几何。
+ARCHIVE_TABLES = ("design_project", "road_line", "road_section",
+                  "section_design_attr", "design_file")
+
+#: 已实现适配器的后缀 → 该文件可解析。用于 design_file.parse_status。
+_IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
+                       ".pm": "alignment_element", ".prj": "design_project"}
+
+
+def _basename(rel_path: str | None) -> str | None:
+    if not rel_path:
+        return None
+    # `.PRJ` 里是 Windows 风格 `.\毕设.pm` / `..\052201341…HDM`，两种分隔符都要切
+    return rel_path.replace("\\", "/").rsplit("/", 1)[-1] or None
+
+
+def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str, Any]:
+    """`.PRJ` 解析结果 → 档案五表的待写行。**纯函数，不碰数据库。**
+
+    ``project_dir`` 给了就去目录里找同名后缀的实际文件，写进 ``design_file.remark``
+    —— 因为实测发现 **`.PRJ` 声明的文件名与磁盘上的并不一样**
+    （声明 ``.\\毕设.pm``，磁盘是 ``052201341刘其立道路毕设平面线形文件.pm``）。
+    导出时被改过名。这个差异必须记下来，否则以后按台账找文件会找不到。
+    """
+    pj = prj["project"]
+    segs = prj["segments"]
+    # 分段数 > 1 时路段名要带序号，否则两个路段同名、没法分辨
+    multi = len(segs) > 1
+
+    proj_row = {
+        "project_uid": pj.get("project_uid"),
+        "project_name": pj["project_name"],
+        "project_type": pj.get("project_type"),
+        "station_interval_m": pj.get("station_interval_m"),
+        "earthwork_method": pj.get("earthwork_method"),
+        "designer": pj.get("designer"),
+        "design_org": pj.get("design_org"),
+        "design_stage": pj.get("design_stage"),
+        "source_file": prj.get("source_file"),
+        "remark": _project_remark(prj),
+    }
+
+    # ★ `road_line.line_code` 是 NOT NULL UNIQUE，而 `.PRJ` **没有路线代码**。
+    #   不用 UUID 前缀之类的假码，直接把项目名当线码，并在 remark 里写明这是代用 ——
+    #   编一个看起来像代码的东西，比写清楚"这里没有代码"危险得多。
+    seg0 = segs[0]
+    line_row = {
+        "line_code": pj["project_name"],
+        "line_name": pj["project_name"],
+        "admin_region": seg0.get("road_region"),
+        "road_class": seg0.get("road_grade"),
+        "design_speed": int(seg0["design_speed_kmh"]) if seg0.get("design_speed_kmh") else None,
+        "design_load": None,                    # `.PRJ` 无此字段，不猜
+        "lane_count": seg0.get("lane_count"),
+        # ⚠ `lane_width_m` 是**单车道宽**，而 `.PRJ` 的 `307路幅宽度 = 10.000` 是
+        #   路幅总宽 —— 不是一回事。所以这里**不填**，总宽进 section_design_attr。
+        #   把 10.000 填进单车道宽是典型的静默错标：值本身没错，含义错了。
+        "lane_width_m": None,
+        "manage_org": None,
+        "remark": (f"来源：纬地工程 {prj.get('source_file') or ''}"
+                   f"｜项目ID {pj.get('project_uid') or '（缺）'}"
+                   f"｜line_code 以项目名代（.PRJ 无路线代码）"),
+    }
+
+    sections, attrs = [], []
+    for seg in segs:
+        name = (f"{pj['project_name']} 分段{seg['seq']}" if multi else pj["project_name"])
+        sections.append({
+            "section_name": name,
+            "start_station_text": station_text(seg["start_station_m"]),
+            "end_station_text": station_text(seg["end_station_m"]),
+            "start_station_km": round(seg["start_station_m"] / 1000.0, 6),
+            "end_station_km": round(seg["end_station_m"] / 1000.0, 6),
+            "length_m": round(seg["length_m"], 1),
+            "direction": None,
+            "pavement_type": None,              # `.PRJ` 无路面类型，不猜
+            "climate_zone": None,
+            "_seg_seq": seg["seq"],
+            "remark": f"来源 .PRJ 分段 {seg['seq']}",
+        })
+        attrs.append({
+            "_seg_seq": seg["seq"],
+            "road_grade": seg.get("road_grade"),
+            "design_speed_kmh": (int(seg["design_speed_kmh"])
+                                 if seg.get("design_speed_kmh") else None),
+            "cross_section_form": seg.get("cross_section_form"),
+            "roadway_width_m": seg.get("roadway_width_m"),
+            "carriageway_crossfall_pct": seg.get("carriageway_crossfall_pct"),
+            "shoulder_crossfall_pct": seg.get("shoulder_crossfall_pct"),
+            "median_width_m": seg.get("median_width_m"),
+            "max_superelev_pct": seg.get("max_superelev_pct"),
+            "superelev_rotate_mode": seg.get("superelev_rotate_mode"),
+            "superelev_gradient_mode": seg.get("superelev_gradient_mode"),
+            "widening_mode": seg.get("widening_mode"),
+            "widening_gradient_mode": seg.get("widening_gradient_mode"),
+            "source_file": prj.get("source_file"),
+        })
+
+    files, skipped = _plan_design_files(prj, project_dir=project_dir)
+    return {
+        "tables": {"design_project": [proj_row], "road_line": [line_row],
+                   "road_section": sections, "section_design_attr": attrs,
+                   "design_file": files},
+        "skipped_files": skipped,
+    }
+
+
+def _plan_design_files(prj: Mapping[str, Any],
+                       *, project_dir: Any = None) -> tuple[list[dict], list[str]]:
+    """``[文件名]`` → ``design_file`` 行。返回值第二项是被跳过的（附原因）。"""
+    on_disk: dict[str, str] = {}
+    if project_dir is not None:
+        import pathlib
+        d = pathlib.Path(project_dir)
+        if d.is_dir():
+            for p in d.iterdir():
+                if p.is_file():
+                    on_disk.setdefault(p.suffix.lower(), p.name)
+
+    rows, skipped = [], []
+    for f in prj.get("files") or []:
+        code, rel = f.get("kind_code"), f.get("rel_path")
+        if not rel:
+            continue                        # 工程声明了槽位但没用（实测 30 条里有 12 条）
+        if not code:
+            # `design_file.file_kind_code` 是 NOT NULL，而实测 .PRJ 里
+            # 「涵洞数据文件(*.hda)」「涵洞系统参数文件(*.cys)」两行**没有键号**。
+            # 编一个码就是造假，故跳过并上报。
+            skipped.append(f"{f['kind_name']}（.PRJ 未给字段号，无法满足 NOT NULL）")
+            continue
+        declared = _basename(rel)
+        suffix = ("." + declared.rsplit(".", 1)[-1].lower()) if declared and "." in declared else ""
+        actual = on_disk.get(suffix)
+        note = None
+        if suffix in _IMPLEMENTED_SUFFIX:
+            status, note = "ok", f"适配器已实现（{_IMPLEMENTED_SUFFIX[suffix]}）"
+        else:
+            status, note = "pending", "适配器尚未实现该段解析"
+        if actual is None:
+            note = (note or "") + "｜目录内未找到该后缀的文件"
+        elif actual != declared:
+            note = (note or "") + f"｜实际磁盘文件名 {actual}（工程声明的是 {declared}，导出时改过名）"
+        rows.append({
+            "file_kind_code": code,
+            "file_kind_name": f["kind_name"],
+            "file_name": declared or rel,
+            "rel_path": rel,
+            "coverage_from_station_km": None,   # 单文件覆盖范围需逐文件解析，此处不猜
+            "coverage_to_station_km": None,
+            "parse_status": status,
+            "parse_note": note,
+            "remark": None,
+        })
+    return rows, skipped
+
+
+def _project_remark(prj: Mapping[str, Any]) -> str:
+    bits = []
+    if prj.get("save_time"):
+        bits.append(f"工程存盘 {prj['save_time']}")
+    ib = prj.get("ignored_blobs") or {}
+    if ib:
+        bits.append("未解析的二进制块 " + "／".join(f"{k}×{v}" for k, v in sorted(ib.items())))
+    um = prj.get("unmapped") or {}
+    if um:
+        bits.append(f"未映射字段 {len(um)} 个（图表字体/路堤宽度等，无对应列）")
+    return "｜".join(bits)[:2000] or None
+
+
+def ensure_project(prj: Mapping[str, Any], dao: Any, *,
+                   project_dir: Any = None, writer: str = "M2",
+                   dry_run: bool = False) -> dict[str, Any]:
+    """落档案与路段，返回 ids。**幂等**：按 ``project_uid`` / ``line_code`` 复用已有行。
+
+    这一步必须在几何之前跑 —— 几何表用 FK 锚在 ``road_section.id`` 上。
+    """
+    planned = plan_project(prj, project_dir=project_dir)
+    t = planned["tables"]
+    report: dict[str, Any] = {
+        "planned": {k: len(v) for k, v in t.items()},
+        "skipped_files": planned["skipped_files"],
+        "project_id": None, "line_id": None, "section_ids": [], "dry_run": dry_run,
+    }
+    if dry_run:
+        return report
+
+    # ★ 事务**之前**先预读已有路段。
+    #
+    # 为什么不在事务里查：`road_section` **没有任何 UNIQUE 约束**可用作冲突键
+    # （`design_project_id` 与 `section_name` 都是普通列），所以 `on_conflict`
+    # 这条路走不通，只能"先查后插"。而 `TxnWriter` 只有写接口（没有公开的读），
+    # 混用 `dao.query*` 又是**另一条连接**、读不到本事务未提交的行 ——
+    # 真放到事务里查，第一次调用查不到（对），重放也查不到（**错**，于是插重复路段，
+    # 而 `insert_returning` 会返回那个新 id，下一轮几何就挂到重复路段上）。
+    # 挪到事务外、靠 `project_uid` 先定位项目，两种情况就都对了。
+    #
+    # 残留竞态：两个进程同时首次导入同一项目，可能各插一条同名路段。
+    # 导入是单进程批处理，此处不处理；要严格就得给 road_section 加
+    # UNIQUE (design_project_id, section_name) —— 那是契约变更（②表结构）。
+    uid = t["design_project"][0].get("project_uid")
+    existing_sections: dict[str, Any] = {}
+    if uid:
+        pre = dao.query_one("SELECT id FROM design_project WHERE project_uid = %(u)s",
+                            {"u": uid})
+        if pre:
+            for r in dao.query("SELECT id, section_name FROM road_section "
+                               "WHERE design_project_id = %(p)s", {"p": pre["id"]}):
+                existing_sections[r["section_name"]] = r["id"]
+
+    with dao.write_txn(writer=writer) as tx:
+        # 四处都用 on_conflict 走幂等 —— 包括 road_line：它的 line_code 本身就是
+        # UNIQUE，天然是业务键。
+        # ⚠ 绝对不要在 `tx` 里改用 `dao.execute_write(...)` 去补写同一行：
+        #   那是**另一条连接上的另一个事务**，会撞在本事务未提交的行锁上直接挂住。
+        #   同一个逻辑写操作必须始终留在同一个 tx 里。
+        pid = tx.insert_returning("design_project", t["design_project"][0],
+                                  on_conflict=("project_uid",))
+        report["project_id"] = pid
+
+        line_row = dict(t["road_line"][0])
+        line_row["line_code"] = line_row["line_code"] or f"PRJ-{pid}"
+        lid = tx.insert_returning("road_line", line_row, on_conflict=("line_code",))
+        report["line_id"] = lid
+
+        for sec, attr in zip(t["road_section"], t["section_design_attr"]):
+            sec_row = {k: v for k, v in sec.items() if not k.startswith("_")}
+            attr_row = {k: v for k, v in attr.items() if not k.startswith("_")}
+            sec_row["line_id"] = lid
+            sec_row["design_project_id"] = pid
+            sid = existing_sections.get(sec_row["section_name"])
+            if sid is None:
+                sid = tx.insert_returning("road_section", sec_row)
+            report["section_ids"].append({"seq": sec["_seg_seq"], "section_id": sid})
+            attr_row["section_id"] = sid
+            tx.insert("section_design_attr", [attr_row], on_conflict=("section_id",))
+
+        for row in t["design_file"]:
+            tx.insert("design_file", [dict(row, design_project_id=pid)],
+                      on_conflict=("design_project_id", "file_kind_code"))
+
+    return report
+
+
+__all__ = ["LOADABLE_TABLES", "ARCHIVE_TABLES", "LoadError", "plan", "verify", "load",
+           "plan_project", "ensure_project",
            "station_text", "is_integer_station", "station_type"]
+

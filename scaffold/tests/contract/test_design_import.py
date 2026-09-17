@@ -40,8 +40,9 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import jd, pm, sta                       # noqa: E402
+from adapters.weidi import jd, pm, prj as prj_mod, sta       # noqa: E402
 
+PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.1.schema.json"
 DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
 
@@ -115,6 +116,36 @@ def pg_dsn() -> str | None:
         return None
     return (f"postgresql://{vals.get('PG_USER', 'rp')}:{vals['PG_PASSWORD']}"
             f"@localhost:{vals.get('PG_PORT', '55432')}/{vals.get('PG_DB', 'road_pavement')}")
+
+
+def _raises_wg(fn) -> bool:
+    """调用 fn，抛 WriteGuardError 则回 True（写只经 M2 的验证用）。
+
+    `rpdao` 依赖 psycopg，所以这个导入**必须懒着做**：放在模块层会让整个
+    测试文件在没装 psycopg 的环境里直接 ImportError，连离线组都跑不了。
+    """
+    try:
+        from rpdao.errors import WriteGuardError        # noqa: PLC0415
+    except Exception:                                  # noqa: BLE001
+        return False
+    try:
+        fn()
+    except WriteGuardError:
+        return True
+    except Exception:                                  # noqa: BLE001
+        return False
+    return False
+
+
+def _raises(fn) -> bool:
+    """调用 fn，抛 SourceInvalid 则回 True（用于把"必须抛错"塞进 check 里）。"""
+    try:
+        fn()
+    except SourceInvalid:
+        return True
+    except Exception:                                  # noqa: BLE001
+        return False
+    return False
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -809,7 +840,7 @@ def main() -> int:
             # 清理：按 FK 反序删掉本组造的一切（不留痕，种子数据不受影响）
             def _del(table: str, sql: str, params: dict) -> None:
                 try:
-                    dao_e2e.execute_write(table, sql, params, writer="M2")
+                    d14.execute_write(table, sql, params, writer="M2")
                 except Exception:                  # noqa: BLE001
                     pass
             if sec_id:
@@ -824,6 +855,268 @@ def main() -> int:
             dao_e2e.close()
             print(f"  （已清理：路段 {sec_id} / 批次 {batch}）")
 
+    # ── 第 13 组：纬地 .PRJ 总项目文件（项目档案，不是几何段）──────────────
+    print("\n第 13 组  纬地 .PRJ 总项目文件：项目档案 + 分段属性 + 文件台账")
+    prj_raw = PRJ_FIXTURE.read_bytes()
+    prj_text = prj_mod.decode(prj_raw)
+    check("魔数探测认得它", prj_mod.detect(prj_text))
+    check("版本 = 6.00（与 .STA 的 5.84、.JD/.pm 的 5.83 都不同）",
+          prj_mod.parse(prj_text, file="x.PRJ")["vendor_version"] == "6.00")
+
+    # ★ 元测试：GBK 这个说法必须**可证伪**。如果 fixture 恰好也能按 UTF-8 读，
+    #   那"必须用 GBK"就只是一句注释，而不是一个事实。
+    try:
+        prj_raw.decode("utf-8")
+        utf8_ok = True
+    except UnicodeDecodeError:
+        utf8_ok = False
+    check("元测试：fixture 按 UTF-8 读**确实失败**（GBK 不是装饰）", not utf8_ok)
+    check("元测试：非 GBK 字节 → SourceInvalid 而不是静默乱码",
+          _raises(lambda: prj_mod.decode(b"\xff\xfe\x00\x01\x02")))
+
+    po = prj_mod.parse(prj_text, file=PRJ_FIXTURE.name)
+    pj = po["project"]
+    check("项目名 = 毕设", pj["project_name"] == "毕设")
+    check("项目类型 = 公路主线（枚举码 101 已剥掉）", pj["project_type"] == "公路主线")
+    check("项目 ID = .PRJ 里的 UUID",
+          pj["project_uid"] == "981cee03-2194-43e4-b367-e93950212eb0")
+    check("桩号间隔 = 20 m（与桩号整桩判据的 20 一致）", pj["station_interval_m"] == 20.0)
+    check("土方计算方式 = 平均断面法（一般推荐采用）",
+          pj["earthwork_method"] == "平均断面法（一般推荐采用）")
+    check("设计人 = lql730@outlook.com", pj["designer"] == "lql730@outlook.com")
+    check("空值字段留 None（工程未填，不当成空串或 0）",
+          pj["station_decimals"] is None and pj["design_org"] is None
+          and pj["design_stage"] is None)
+
+    seg = po["segments"][0]
+    check("分段起点/终点/长度 = 0 / 5805.421 / 5805.421",
+          (seg["start_station_m"], seg["end_station_m"], seg["length_m"])
+          == (0.0, 5805.421, 5805.421))
+    check("公路等级 = 二级公路", seg["road_grade"] == "二级公路")
+    check("计算车速 = 60", seg["design_speed_kmh"] == 60.0)
+    check("路幅宽度 = 10.0 / 行车道横坡 = 2.0 / 土路肩横坡 = 3.0",
+          (seg["roadway_width_m"], seg["carriageway_crossfall_pct"],
+           seg["shoulder_crossfall_pct"]) == (10.0, 2.0, 3.0))
+    check("最大超高从「最大超高8%」里取出 8.0", seg["max_superelev_pct"] == 8.0)
+    check("超高/加宽方式剥掉枚举码",
+          seg["superelev_rotate_mode"] == "绕曲线内侧行车道边缘旋转"
+          and seg["superelev_gradient_mode"] == "线性"
+          and seg["widening_mode"] == "不设置加宽")
+    check("车道数由「2车道」派生 = 2", seg["lane_count"] == 2)
+    # ★ 派生量不许瞎猜：认不出就留 None（车道数是下游分析的分母，猜错一路错到底）
+    check("元测试：认不出的横断面形式 → None，不回默认值",
+          prj_mod.derive_lane_count("双向四车道") is None
+          and prj_mod.derive_lane_count("") is None
+          and prj_mod.derive_lane_count(None) is None)
+    check("元测试：中文白名单认得「双车道」= 2", prj_mod.derive_lane_count("双车道") == 2)
+    check("元测试：数字字段解析失败 → None，不返回 0",
+          prj_mod._convert("num", "abc") is None and prj_mod._convert("num", "") is None)
+    check("元测试：百分数字段 → 数值", prj_mod._convert("pct", "2.0%") == 2.0)
+
+    check("文件台账 30 条", len(po["files"]) == 30, f"实为 {len(po['files'])}")
+    check("首条 = 101 平面线形文件(*.PM) → .\\毕设.pm",
+          po["files"][0] == {"kind_code": "101", "kind_name": "平面线形文件(*.PM)",
+                             "rel_path": ".\\毕设.pm"}, str(po["files"][0]))
+    check("2 条没有字段号（实测：涵洞的两个文件）",
+          sum(1 for f in po["files"] if not f["kind_code"]) == 2)
+    check("12 条路径为空（工程声明了槽位但没用）",
+          sum(1 for f in po["files"] if not f["rel_path"]) == 12)
+    check("文件台账里含纵断面两个文件（.ZDM/.DMX）—— 即 L3 的原料已声明",
+          any("*.ZDM" in f["kind_name"] for f in po["files"])
+          and any("*.DMX" in f["kind_name"] for f in po["files"]))
+
+    # ★★ 核心元测试：`[LONG]/[DOUBLE]/[STRING]` 是二进制块，其键是内存地址。
+    #    必须证明它们**一个都没漏进**解析结果 —— 否则会写出一批"看起来像字段"的垃圾。
+    check("元测试：4 个二进制块都被识别并跳过", set(po["ignored_blobs"])
+          == {"相关项目", "LONG", "DOUBLE", "STRING"}, str(po["ignored_blobs"]))
+    check("元测试：声明条数被记下来（让「我没解析这块」可见）",
+          po["ignored_blobs"]["LONG"] == 101 and po["ignored_blobs"]["DOUBLE"] == 102)
+    # 直接按"这 5 个真实内存地址键"断言，不搞模糊的启发式：模糊断言本身也会失效。
+    BLOB_KEYS = ("9240611", "9240577", "2147418221", "2147418238", "9240860", "9240700")
+    blob_seen = [k for k in list(pj) + list(seg)
+                 if any(bk in str(k) for bk in BLOB_KEYS)]
+    blob_vals = [k for k, v in po["unmapped"].items()
+                 if any(str(v) == bk for bk in BLOB_KEYS)]
+    check("元测试：内存地址式的键与值一个都没漏进来",
+          not blob_seen and not blob_vals, f"{blob_seen[:3]} {blob_vals[:3]}")
+    check("元测试：未映射字段的键名都是「组.字段号中文名」的形状（不是裸数字）",
+          all(k.split(".")[-1][:1].isdigit() and any("\u4e00" <= c <= "\u9fff" for c in k)
+              for k in po["unmapped"]), str(list(po["unmapped"])[:2]))
+    check("未映射字段被单独收集（不是报成告警）",
+          len(po["unmapped"]) == 13 and po["warnings"] == [],
+          f"unmapped={len(po['unmapped'])} warnings={po['warnings']}")
+
+    # 真文件在场时：fixture 必须与它逐字段相同（fixture 是截取，不能截歪）
+    real_prj = REAL_DIR / "052201341刘其立道路毕设总项目.PRJ"
+    if real_prj.exists():
+        ro = prj_mod.parse(prj_mod.decode(real_prj.read_bytes()), file=real_prj.name)
+        check("fixture 与真实 .PRJ 逐字段相同（项目/分段/台账/未映射四项）",
+              ro["project"] == pj and ro["segments"] == po["segments"]
+              and ro["files"] == po["files"] and ro["unmapped"] == po["unmapped"])
+    else:
+        print("  ⊘ 跳过：真实 .PRJ 不在（docpipe/ 是 gitignored）")
+
+    # ---- 应拒绝侧 ----
+    def prj_rejects(name: str, bad: str, expect: str) -> None:
+        global PASS, FAIL
+        try:
+            prj_mod.parse(bad, file="bad.PRJ")
+        except SourceInvalid as exc:
+            ok = expect in str(exc)
+            check(name, ok, "" if ok else f"抛了但信息不含「{expect}」：{exc}")
+        except Exception as exc:                       # noqa: BLE001
+            check(name, False, f"抛了 {type(exc).__name__} 而不是 SourceInvalid：{exc}")
+        else:
+            check(name, False, "**没抛错**（畸形文件被静默接受了）")
+
+    prj_rejects("缺魔数 → 拒绝",
+                prj_text.replace("HINTCAD6.00_PRJ_SHUJU", ""), "魔数")
+    prj_rejects("魔数是 .STA 的（认错文件类型）→ 拒绝",
+                prj_text.replace("HINTCAD6.00_PRJ_SHUJU", "HINTCAD5.84_STA_SHUJU"), "魔数")
+    prj_rejects("没有 [项目设置] 组 → 拒绝",
+                "\r\n".join(l for l in prj_text.split("\r\n")
+                             if not l.startswith("[项目设置]") and not l.startswith("201")), "项目设置")
+    prj_rejects("缺 201项目名 → 拒绝",
+                prj_text.replace("201项目名 = 毕设\r\n", ""), "项目名")
+    prj_rejects("没有 [项目分段N] 组 → 拒绝",
+                prj_text.split("[项目分段1]")[0], "分段")
+    prj_rejects("分段缺起点桩号 → 拒绝",
+                prj_text.replace("301起点桩号 = 0.000\r\n", ""), "起点或终点")
+    prj_rejects("分段终点桩号不大于起点 → 拒绝",
+                prj_text.replace("302终点桩号 = 5805.421", "302终点桩号 = 0.000"), "不大于")
+
+    # ── 第 14 组：.PRJ → 档案与路段（两段式导入的第一段）──────────────────
+    print("\n第 14 组  .PRJ → design_project / road_line / road_section / "
+          "section_design_attr / design_file")
+    planned = di.plan_project(po, project_dir=None)
+    cnt = {k: len(v) for k, v in planned["tables"].items()}
+    check("五张表各 1/1/1/1 行 + design_file 16 行",
+          cnt == {"design_project": 1, "road_line": 1, "road_section": 1,
+                  "section_design_attr": 1, "design_file": 16}, str(cnt))
+    check("★ 元测试：路幅总宽 10.000 **不许**进 road_line.lane_width_m（那是单车道宽）",
+          planned["tables"]["road_line"][0]["lane_width_m"] is None)
+    check("★ 路幅总宽进 section_design_attr.roadway_width_m",
+          planned["tables"]["section_design_attr"][0]["roadway_width_m"] == 10.0)
+    check("road_section 起终点文本 = K0+000.000 / K5+805.421",
+          (planned["tables"]["road_section"][0]["start_station_text"],
+           planned["tables"]["road_section"][0]["end_station_text"])
+          == ("K0+000.000", "K5+805.421"))
+    check("line_code 以项目名代，且 remark 写明这是代用（.PRJ 无路线代码）",
+          planned["tables"]["road_line"][0]["line_code"] == "毕设"
+          and "无路线代码" in planned["tables"]["road_line"][0]["remark"])
+    check("12 条空路径的槽位不进 design_file",
+          all(f["rel_path"] for f in planned["tables"]["design_file"]))
+    check("2 条无字段号的文件被跳过并给出原因（NOT NULL 无法满足）",
+          len(planned["skipped_files"]) == 2
+          and all("未给字段号" in x for x in planned["skipped_files"]))
+    check("★ 元测试：design_file 每行都有 file_kind_code（满足 NOT NULL）",
+          all(f["file_kind_code"] for f in planned["tables"]["design_file"]))
+    check("parse_status 只对已实现适配器的后缀给 ok（实测 3 个）",
+          sorted(f["file_kind_code"] for f in planned["tables"]["design_file"]
+                 if f["parse_status"] == "ok") == ["101", "102", "109"],
+          str([f["file_kind_code"] for f in planned["tables"]["design_file"]
+               if f["parse_status"] == "ok"]))
+    attr = planned["tables"]["section_design_attr"][0]
+    check("section_design_attr 的 12 个属性都来自 .PRJ（不是猜的）",
+          attr["road_grade"] == "二级公路" and attr["design_speed_kmh"] == 60
+          and attr["cross_section_form"] == "2车道" and attr["roadway_width_m"] == 10.0
+          and attr["carriageway_crossfall_pct"] == 2.0
+          and attr["shoulder_crossfall_pct"] == 3.0 and attr["median_width_m"] == 0.0
+          and attr["max_superelev_pct"] == 8.0
+          and attr["superelev_rotate_mode"] == "绕曲线内侧行车道边缘旋转"
+          and attr["superelev_gradient_mode"] == "线性"
+          and attr["widening_mode"] == "不设置加宽"
+          and attr["widening_gradient_mode"] == "线性加宽(W = kb)")
+    check("路面类型/气候区/方向留空（.PRJ 没有这些字段，不猜）",
+          planned["tables"]["road_section"][0]["pavement_type"] is None
+          and planned["tables"]["road_section"][0]["climate_zone"] is None
+          and planned["tables"]["road_section"][0]["direction"] is None)
+    # ★ 纯函数元测试：调两次必须完全相同 —— 若内部改了入参，第二次就不同了
+    again = di.plan_project(po, project_dir=None)
+    check("★ 元测试：plan_project 是纯函数（调两次结果完全相同，未改动入参）",
+          again == planned)
+    check("元测试：_seg_seq 之外没有任何非 DDL 列漏出",
+          all(k.startswith("_") or k in ddl_columns(t)
+              for t, rows in planned["tables"].items() for r in rows for k in r),
+          str([k for t, rows in planned["tables"].items() for r in rows for k in r
+               if not k.startswith("_") and k not in ddl_columns(t)][:5]))
+
+    # ---- 真库：ensure_project（自造一份 .PRJ，避免动到已导入的毕设数据）----
+    uniq = f"TEST-PRJ-{os.getpid()}"
+    synth = ("HINTCAD6.00_PRJ_SHUJU\r\n[项目设置]2\r\n"
+             f"201项目名 = {uniq}\r\n202项目类型 = 101|公路主线\r\n"
+             "205桩号间隔 = 20\r\n"
+             f"214项目ID = {uniq}-uid\r\n[项目分段1]1\r\n"
+             "301起点桩号 = 100.000\r\n302终点桩号 = 500.000\r\n"
+             "304计算车速 = 40\r\n305公路等级 = 三级公路\r\n"
+             "306横断面形式 = 2车道\r\n307路幅宽度 = 7.500\r\n"
+             "[文件名]1\r\n101平面线形文件(*.PM) = .\\x.pm\r\n"
+             "[LONG]1\r\n9240611 = 1\r\n[SaveTimes]\r\n1 = 2026/01/01 00:00\r\n")
+    sp = prj_mod.parse(synth, file="synth.PRJ")
+    sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
+    d14 = None
+    try:
+        from rpdao.write import WriteDao as _WD14             # noqa: PLC0415
+        d14 = _WD14(pg_dsn() or "", app_name="contract-test-14",
+                    min_size=1, max_size=2, timeout=10)
+        d14.open()
+        if not d14.ping():
+            d14 = None
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"  ⊘ 跳过 ensure_project 的真库用例：{type(exc).__name__}: {str(exc)[:80]}")
+    if d14 is None:
+        pass
+    else:
+        sp_plan = di.plan_project(sp)
+        check("自造 .PRJ（起点 100 m ≠ 0）→ 路段起点桩号 K0+100.000",
+              sp_plan["tables"]["road_section"][0]["start_station_text"] == "K0+100.000")
+        d = di.ensure_project(sp, d14, dry_run=True)
+        check("dry_run 不写库", d["project_id"] is None
+              and d14.scalar("SELECT count(*) FROM design_project WHERE project_uid=%s",
+                                 (f"{uniq}-uid",)) == 0)
+        try:
+            r1 = di.ensure_project(sp, d14)
+            check("ensure_project 建出 5 张表：project/line/section 各 1，attr 1，file 1",
+                  r1["project_id"] and r1["line_id"] and len(r1["section_ids"]) == 1)
+            sid = r1["section_ids"][0]["section_id"]
+            check("section_design_attr 已挂上该 section",
+                  d14.scalar("SELECT count(*) FROM section_design_attr WHERE section_id=%s",
+                                 (sid,)) == 1)
+            check("design_file 已挂上该 project",
+                  d14.scalar("SELECT count(*) FROM design_file WHERE design_project_id=%s",
+                                 (r1["project_id"],)) == 1)
+            r2 = di.ensure_project(sp, d14)
+            check("★ 幂等：重跑得到同一批 id，且不产生重复行",
+                  (r2["project_id"], r2["line_id"], r2["section_ids"]) ==
+                  (r1["project_id"], r1["line_id"], r1["section_ids"])
+                  and d14.scalar("SELECT count(*) FROM design_project WHERE project_uid=%s",
+                                     (f"{uniq}-uid",)) == 1)
+            check("★ 以 M5 身份建档案 → WriteGuardError（写只经 M2）",
+                  _raises_wg(lambda: di.ensure_project(sp, d14, writer="M5")))
+        finally:
+            # 按 FK 反序清干净
+            uid = f"{uniq}-uid"
+            with d14.write_txn(writer="M2") as tx:      # FK 反序，同成同败
+                tx.execute("design_project",
+                           "DELETE FROM design_file WHERE design_project_id IN "
+                           "(SELECT id FROM design_project WHERE project_uid=%(u)s)", {"u": uid})
+                tx.execute("design_project",
+                           "DELETE FROM section_design_attr WHERE section_id IN "
+                           "(SELECT s.id FROM road_section s JOIN design_project p "
+                           " ON s.design_project_id = p.id WHERE p.project_uid=%(u)s)", {"u": uid})
+                tx.execute("design_project",
+                           "DELETE FROM road_section WHERE design_project_id IN "
+                           "(SELECT id FROM design_project WHERE project_uid=%(u)s)", {"u": uid})
+                tx.execute("road_line", "DELETE FROM road_line WHERE line_code=%(c)s",
+                           {"c": uniq})
+                tx.execute("design_project", "DELETE FROM design_project WHERE project_uid=%(u)s",
+                           {"u": uid})
+        left = (d14.scalar("SELECT count(*) FROM design_project WHERE project_uid=%s",
+                           (f"{uniq}-uid",))
+                + d14.scalar("SELECT count(*) FROM road_line WHERE line_code=%s", (uniq,)))
+        check("元测试：清理后残留为 0（否则测试会污染真库）", left == 0, f"残留 {left}")
+        d14.close()
+
     print("\n" + "=" * 74)
     print(f"通过 {PASS} ｜ 失败 {FAIL}")
     print("=" * 74)
@@ -834,6 +1127,10 @@ def main() -> int:
         print("      .JD 用了 6 条（含发现 DDL 把 A 当切线长、把 Ls 当转角）；")
         print("      .pm 用了 3 条（链连续 / 圆心距离 ≡ R / 弦长 = 2R·sin(L/2R)）。")
         print("      两者还能互相印证：.pm 的转向符号与 .JD 由坐标算出的转角符号一致。")
+        print("      .PRJ（第 13 组）另成一路：它不是几何段而是项目档案，映射到 "
+              "design_project/")
+        print("      section_design_attr/design_file 三表，故不进 IR segments —— "
+              "塞进去会破坏 schema。")
         print('      落库器（第 11/12 组）把"映射"与"事务"分开测：前者是纯函数、完全离线，')
         print("      后者打真库、只验多表同事务、幂等、以及**以 M5 身份落库会被 WriteGuard 拒绝**")
         print("      —— 即「写只经 M2」是跑出来的，不是写文档里的。")

@@ -117,13 +117,80 @@ WIM / 病害 / 试验数据**全部错位且没有任何报错**。
 
 | 来源 | 适配器 | `origin` | 现状 |
 |---|---|---|---|
-| 纬地 HintCAD | `weidi/` | `file` | ✅ `.STA` 已实现（→ L1）；`.JD`/`.pm`/`.ZDM`/`.DMX` 待做 |
+| 纬地 HintCAD | `weidi/` | `file` | ✅ `.STA`/`.JD`/`.pm` 已实现（→ **L2**）；✅ `.PRJ` 项目档案另成一路（见下节）；`.ZDM`/`.DMX` 待做（→ L3） |
 | 鸿业 | `hongye/` | `file` | 待建 |
 | 只有图纸 | `manual/` | `manual` | 待建：人工读图 → 表格模板（桩号、X、Y、R、切线长、转角…） |
 | 无文件、只有监测数据 | `inferred/` | `inferred` | 待建：由监测断面实测坐标反推骨架（**只建 `road_line`/`road_section`/`station_sequence`**） |
 
 **没有设计文件不等于不能用平台**：GE 域的角色是**桩号锚定基准**，不是"必须有设计文件"。
 L1 骨架就足以支撑逐桩数据的挂靠与定位。
+
+---
+
+## `.PRJ` 总项目文件：它是**档案**，不是几何段 —— 所以不进 `segments`
+
+`.STA`/`.JD`/`.pm` 是几何段，各占 `segments` 的一个键。`.PRJ` **不是**：
+它描述的是"这是哪个工程、它有哪些分段属性、它声明用了哪些文件"。
+
+映射关系是**三张表 + 两个路网实体**：
+
+| `.PRJ` 里的东西 | 落到哪 |
+|---|---|
+| `[项目设置]`（项目名/项目ID/桩号间隔/设计人…） | `design_project`（1 行） |
+| `[项目分段N]`（起终点桩号/等级/车速/路幅/横坡/超高/加宽…） | `section_design_attr`（每分段 1 行）+ `road_line` + `road_section` |
+| `[文件名]`（声明的文件清单） | `design_file`（每个声明 1 行） |
+
+**为什么不塞进 `segments`**：`segments` 是 `additionalProperties: false` 的 8 个几何段，
+而且它的每一项都是"几何点数组"。硬塞一个项目对象进去，schema 就废了。
+所以 `.PRJ` 走**独立解析器 + 独立调用**，契约⑤ 的 IR 结构**未作任何改动**。
+
+### 两段式调用
+
+顺序不是设计选择，是**天生的**：几何表用 FK 锚在 `road_section.id` 上，
+路段没建出来就没有 `section_id` 可用。
+
+```python
+from adapters.weidi import prj
+import design_import as di
+
+out = prj.parse(prj.decode(path.read_bytes()), file=path.name)   # ← 注意 GBK
+arch = di.ensure_project(out, dao, project_dir=proj_dir)          # 第一段：档案与路段
+sid  = arch["section_ids"][0]["section_id"]
+ir   = weidi.build_ir(proj_dir)                                   # 第二段：几何
+di.load(ir, dao, section_id=sid, batch_no=...)                    #   （section_start_km 自动从 road_section 读）
+```
+
+两段都**幂等**：`ensure_project` 按 `project_uid`/`line_code` 复用，
+`load` 按各表的业务键 `on_conflict`。重放不会产生重复行。
+
+### 两个实测踩到的坑
+
+1. **编码是 GBK，不是 UTF-8。** `.PRJ` 是这批文件里**唯一**的 GBK 文件
+   （`.STA`/`.JD`/`.pm` 全 ASCII）。按 UTF-8 读会抛 `UnicodeDecodeError`，
+   而调用方惯常把它解释成"二进制、不可解析"——**这个结论是错的**，
+   它是纯文本。区别"编码不对"与"根本不可解析"很重要：前者换个编码就行。
+   适配器用 `ENCODING = "gbk"` 声明，测试里有一条元测试**证明 fixture 按 UTF-8 读确实失败**
+   （否则"必须用 GBK"就只是一句注释，不是一个事实）。
+2. **`[LONG]/[DOUBLE]/[STRING]` 是二进制块，不是字段。** 它们的键是内存地址
+   （`9240611`、`2147418221`），逐行取值毫无意义；组头声明的条数（101/102/103）
+   与实际行数也**不相等**，所以"按条数切块"同样不通。解析器显式跳过，
+   并把声明条数记进 `ignored_blobs` —— 让"我没解析这块"**可见**，而不是悄悄丢掉。
+
+### 实测（052201341 毕设工程）
+
+`项目名=毕设`（**不是** G228——两条完全不同的路：二级公路/60 km/h/2 车道/5.805 km
+vs 一级公路/80 km/h/4 车道/19.701 km）。所以它是**新建一条独立路线**，
+而不是挂到既有试验段上。这也正是"宁可拒绝，不要猜"的用处：
+挂错了不会有任何报错，只会得到一批归属错误的正常数据。
+
+`.PRJ` 里**没有路线代码**，而 `road_line.line_code` 是 `NOT NULL UNIQUE`——
+解析器直接把项目名当代用码，并在 `remark` 里写明这是代用。
+编一个看起来像代码的东西，比写清楚"这里没有代码"危险得多。
+
+另有两处**不许猜**的字段：`307路幅宽度 = 10.000` 是**路幅总宽**，
+不是单车道宽，所以 `road_line.lane_width_m` 留空、总宽进 `section_design_attr`；
+`[文件名]` 里有 12 条空路径槽位、2 条**没有字段号**（涵洞的两个文件），
+后者无法满足 `file_kind_code NOT NULL`，故跳过并上报原因。
 
 ---
 
