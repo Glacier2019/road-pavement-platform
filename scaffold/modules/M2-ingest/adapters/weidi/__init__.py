@@ -22,6 +22,7 @@ from typing import Any
 
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
+from .. import base
 from . import dmx, jd, pm, sta, zdm
 
 VENDOR = "weidi-hintcad"
