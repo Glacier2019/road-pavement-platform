@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>平台管理台 · M9</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --ink:#1c1f23; --muted:#6b7280;
+    --accent:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --bad:#b42318; --chip:#eef2f7;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",
+    "Source Han Sans SC","Microsoft YaHei",sans-serif}
+  header{padding:18px 24px 14px;background:var(--card);border-bottom:1px solid var(--line)}
+  h1{margin:0 0 4px;font-size:18px;font-weight:650}
+  .path{color:var(--muted);font-size:12.5px}
+  .path code{font-family:var(--mono);background:var(--chip);padding:1px 5px;border-radius:4px}
+  nav{display:flex;gap:4px;padding:0 24px;background:var(--card);
+    border-bottom:1px solid var(--line)}
+  nav a{display:block;padding:9px 13px;color:var(--muted);text-decoration:none;font-size:13.5px;
+    border-bottom:2px solid transparent}
+  nav a:hover{color:var(--ink)}
+  nav a.here{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+  main{padding:18px 24px 48px;max-width:1400px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:16px 18px;margin-bottom:16px}
+  h2{margin:0 0 12px;font-size:15px;font-weight:620;display:flex;align-items:center;gap:8px}
+  h2 .n{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    background:var(--chip);padding:2px 7px;border-radius:20px;font-weight:500}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:5px 9px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  th{color:var(--muted);font-weight:600;background:#fafbfc}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;
+    background:var(--chip);color:var(--muted)}
+  .badge.ok{background:#e6f4ea;color:var(--ok)}
+  .badge.warn{background:#fff4e0;color:var(--warn)}
+  .badge.bad{background:#fde8e6;color:var(--bad)}
+  .muted{color:var(--muted)}
+  .mono{font-family:var(--mono)}
+  .empty{padding:22px 8px;color:var(--muted);text-align:center}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+  .card{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fff}
+  .card a{color:var(--accent);text-decoration:none;font-weight:600;font-size:14.5px}
+  .card a:hover{text-decoration:underline}
+  .card p{margin:6px 0 0;color:var(--muted);font-size:12.8px}
+  .card.off{background:#fafbfc;border-style:dashed}
+  .card.off a{color:var(--muted);pointer-events:none}
+  #err{display:none;background:#fde8e6;border:1px solid #f5c2bd;color:var(--bad);
+    border-radius:10px;padding:14px 18px;margin-bottom:16px}
+  #err code{font-family:var(--mono);background:#fff;padding:1px 5px;border-radius:4px}
+  footer{color:var(--muted);font-size:12.5px;padding:0 24px 40px;max-width:1400px}
+</style>
+</head>
+<body>
+<header>
+  <h1>平台管理台 · M9</h1>
+  <div class="path">
+    数据来源：本页 → M9 自身接口（<code>/v1/modules/status</code>）；
+    几何数据另有 <code>/geometry</code> 一页，它经 <code>/gw/</code> → M6 → M3 rpdao 取数。
+    <strong>本页不接触数据库</strong>——M9 容器里既没有 SQL，也没有 PG_DSN。
+  </div>
+</header>
+<nav>
+  <a href="/" class="here">首页</a>
+  <a href="/geometry">GE 道路几何</a>
+  <a href="/docs">接口文档</a>
+</nav>
+<main>
+  <div id="err"></div>
+
+  <section>
+    <h2>入口 <span class="n">已做 / 未做，如实分开</span></h2>
+    <div class="cards">
+      <div class="card">
+        <a href="/geometry">GE 道路几何</a>
+        <p>按路段看桩号序列、交点链、线元链、纵断面，以及几何完整度等级 L0–L4。
+           缺口分成「表还没建」与「建好了但没数据」两类。</p>
+      </div>
+      <div class="card off">
+        <a>设计数据导入</a>
+        <p>未做。导入要往库里写，而写只能经 M2；M2 目前还没有
+           <span class="mono">POST /v1/design/import</span>，所以这一页先不建。</p>
+      </div>
+      <div class="card off">
+        <a>指标看板</a>
+        <p>未做。指标由 M8 出，M8 还是骨架。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>模块登记与实测 <span class="n">GET /v1/modules/status</span></h2>
+    <p class="muted" style="margin:0 0 10px;font-size:12.8px">
+      <strong>登记状态</strong>是各模块在 <span class="mono">config/modules.yaml</span> 里自报的；
+      <strong>实测</strong>是这一刻真的去连它的 <span class="mono">/healthz</span>（或对 TCP 端口探活）。
+      两列并排，是为了让<strong>登记与实测不符时一眼可见</strong>——只看登记表会得到一张永远漂亮的表。
+    </p>
+    <div id="mods"><div class="empty">正在实测各模块…</div></div>
+  </section>
+</main>
+<footer>
+  口径说明：<span class="mono">status</span> 取值 已交付 / 部分交付 / 骨架 / 规划中 / 待指派，
+  与架构图 D/E 一致。M1 是基础设施（PG / MinIO / 编排），没有 HTTP <span class="mono">/healthz</span>，
+  故按 TCP 探活——拿 HTTP 去测数据库会得到「连接被对端关闭」，那是协议不匹配，不是不健康。
+</footer>
+
+<script>
+const GW = "";                      // 本页只打 M9 自己的接口，不经 /gw 转发
+const $ = (id) => document.getElementById(id);
+
+function showErr(msg, hint) {
+  $("err").style.display = "block";
+  $("err").innerHTML = "<strong>取数失败</strong>：" + msg +
+    (hint ? "<br><span class='muted'>" + hint + "</span>" : "");
+}
+async function api(path) {
+  const r = await fetch(GW + path);
+  if (!r.ok) throw new Error(path + " → HTTP " + r.status);
+  return r.json();
+}
+
+// 登记状态 → 徽章配色。刻意只对"已交付"给绿：其余都不是坏，是还没到。
+const IMPL_CLASS = { "已交付": "ok", "部分交付": "warn", "骨架": "warn",
+                     "规划中": "", "待指派": "bad" };
+
+// 探测回包里 body/error 是**别的服务**吐出来的字符串，要塞进 innerHTML 必须先转义。
+// 不转义就是一个注入口子：任何一个模块的 /healthz 都能往这张表里塞标签。
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// probe 的真实字段是 {reachable, status_code, body} 或 {reachable, status_code, error}
+// —— 没有 latency_ms（我第一版凭空写了这个字段，那格会永远是空的）。
+// 而且**三种情况必须分开**，这是 probe_one 刻意做的区分，别压成两种：
+//   · status_code === null  → TCP 探活（基础设施模块没有 HTTP /healthz）
+//   · status_code === 200   → 健康
+//   · 其它                   → 可达但降级（模块自己报 503，依赖不健康）
+function probeCell(p) {
+  if (!p.reachable) {
+    return '<span class="badge bad">不通</span> <span class="muted">' +
+      esc(p.error || "未说明原因") + "</span>";
+  }
+  if (p.status_code == null) {
+    return '<span class="badge ok">通</span> <span class="muted">' +
+      esc(typeof p.body === "string" ? p.body : "tcp 可连通") + "</span>";
+  }
+  if (p.status_code === 200) {
+    const st = (p.body && typeof p.body === "object") ? (p.body.status || "ok") : "";
+    return '<span class="badge ok">通</span> <span class="mono muted">200' +
+      (st ? " " + esc(st) : "") + "</span>";
+  }
+  return '<span class="badge warn">可达但降级</span> <span class="mono">HTTP ' +
+    esc(p.status_code) + "</span>";
+}
+
+function render(items) {
+  const box = $("mods");
+  if (!items.length) { box.innerHTML = '<div class="empty">登记表为空</div>'; return; }
+  const rows = items.map((m) => {
+    const p = m.probe || {};
+    return "<tr>" +
+      '<td class="mono">' + esc(m.module) + "</td>" +
+      "<td>" + esc(m.name) + "</td>" +
+      "<td>" + esc(m.owner) + "</td>" +
+      '<td class="mono">' + esc(m.phase) + "</td>" +
+      '<td><span class="badge ' + (IMPL_CLASS[m.impl_status] || "") + '">' +
+        esc(m.impl_status) + "</span></td>" +
+      "<td>" + probeCell(p) + "</td>" +
+      "</tr>";
+  }).join("");
+  box.innerHTML = '<table><thead><tr><th>模块</th><th>名称</th><th>责任组</th>' +
+    "<th>阶段</th><th>登记状态</th><th>实测</th></tr></thead><tbody>" +
+    rows + "</tbody></table>";
+}
+
+async function load() {
+  try {
+    const d = await api("/v1/modules/status");
+    render(d.items || []);
+  } catch (e) {
+    $("mods").innerHTML = '<div class="empty">未能取到模块状态</div>';
+    showErr(e.message, "M9 自己的 /v1/modules/status 不可达，说明本页所在的服务本身有问题。");
+  }
+}
+load();
+</script>
+</body>
+</html>

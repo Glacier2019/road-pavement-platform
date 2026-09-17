@@ -55,6 +55,7 @@ GATEWAY_TIMEOUT_S = float(os.getenv("GATEWAY_TIMEOUT_S", "10"))
 #: 目的是让页面与 M9 同源（不必给 M6 放开 CORS），而不是把 M9 变成任意转发器。
 GATEWAY_ALLOWED_PREFIXES = ("v1/",)
 GEOMETRY_PAGE = pathlib.Path(__file__).with_name("geometry.html")
+INDEX_PAGE = pathlib.Path(__file__).with_name("index.html")
 
 MODULE_CONTRACTS = {
     "consumes": ["各模块 GET /healthz（五件套第 2 件）"],
@@ -211,6 +212,19 @@ def modules_status() -> dict[str, Any]:
         })
     ok_n = sum(1 for r in out if r["probe"].get("reachable"))
     return {"total": len(out), "reachable": ok_n, "unreachable": len(out) - ok_n, "items": out}
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def index_page() -> HTMLResponse:
+    """管理台首页（自包含 HTML：内联 JS + CSS，无构建步骤、无新依赖）。
+
+    与 ``/geometry`` 不同，本页只打 **M9 自己的**接口（``/v1/modules/status``），
+    不经 ``/gw/`` 转发 —— 它要显示的就是"哪些模块真的通了"，而这件事由 M9 实测，
+    没有第二个数据源。同样**不接触数据库**。
+    """
+    if not INDEX_PAGE.exists():
+        raise HTTPException(500, f"页面文件缺失：{INDEX_PAGE.name}")
+    return HTMLResponse(INDEX_PAGE.read_text(encoding="utf-8"))
 
 
 @app.get("/geometry", response_class=HTMLResponse, include_in_schema=False)

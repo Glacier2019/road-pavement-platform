@@ -139,17 +139,33 @@ def main() -> int:
        "8001" in os.getenv("GATEWAY_BASE", "http://localhost:8001"))
 
     # ------------------------------------------------- 3) 页面不自带上游地址
-    print("\n=== 3) 页面只经 /gw 取数，不写死上游地址 ===")
-    html = GEOMETRY_HTML.read_text(encoding="utf-8")
-    ok("页面存在且是自包含 HTML（含内联脚本）", "<script>" in html and "<style>" in html)
-    ok("页面里没有写死端口（8001/localhost:8xxx/api:8000）",
-       not re.search(r"localhost:\d+|127\.0\.0\.1:\d+|api:8000", html))
-    ok("页面取数一律走 /gw", 'const GW = "/gw"' in html)
-    ok("页面没有构建产物依赖（无外部 script/link 引入）",
-       not re.search(r"<(script|link)[^>]+(src|href)=[\"']https?://", html))
+    print("\n=== 3) 每一页都自包含、都不写死上游地址 ===")
+    # 遍历**所有**页面，而不是逐个点名写死在测试里：加第三页时不会漏掉检查。
+    # 每页各自声明"取数入口在哪里"——geometry 要 M6 的数据，故经 /gw 转发；
+    # 首页只打 M9 自己的接口，出现 /gw 反而说明它绕了不该绕的路。
+    PAGES = {
+        "geometry.html": 'const GW = "/gw"',
+        "index.html": 'const GW = ""',
+    }
+    have = sorted(p.name for p in M9_DIR.glob("*.html"))
+    ok("页面清单与实际文件一致（新增页面而不登记，这条会红）",
+       have == sorted(PAGES), f"目录里 {have}，测试里 {sorted(PAGES)}")
+    for _name, _gw in PAGES.items():
+        html = (M9_DIR / _name).read_text(encoding="utf-8")
+        ok(f"{_name} 是自包含 HTML（含内联脚本与样式）",
+           "<script>" in html and "<style>" in html)
+        ok(f"{_name} 里没有写死端口（8001/localhost:8xxx/api:8000）",
+           not re.search(r"localhost:\d+|127\.0\.0\.1:\d+|api:8000", html),
+           str(re.findall(r"localhost:\d+|127\.0\.0\.1:\d+|api:8000", html)[:3]))
+        ok(f"{_name} 的取数入口声明正确（{_gw}）", _gw in html)
+        ok(f"{_name} 没有构建产物依赖（无外部 script/link 引入）",
+           not re.search(r"<(script|link)[^>]+(src|href)=[\"']https?://", html))
     # 元测试：写死地址时必须能被认出来
     ok("元测试：检测规则确实能认出写死的地址（不是摆设）",
        bool(re.search(r"localhost:\d+", "fetch('http://localhost:8001/x')")))
+    # 元测试：页面清单检查必须真的会红（藏一个没登记的页面，它认不认得出来）
+    ok("元测试：未登记的页面会被认出来（清单检查非摆设）",
+       sorted(["geometry.html", "index.html", "sneaky.html"]) != sorted(PAGES))
 
     # ------------------------------------------------- 4) 真请求
     print("\n=== 4) 真请求（TestClient + 本地 stub 上游）===")
@@ -157,10 +173,18 @@ def main() -> int:
     APP.GATEWAY_BASE = base                       # 端点函数调用时取模块全局
     client = TestClient(APP.app)
 
+    r = client.get("/")
+    ok("/ → 200 且是 HTML（首页不再是 404）",
+       r.status_code == 200 and "<title>" in r.text, f"{r.status_code}")
+    ok("/ 的内容确实是首页", "平台管理台 · M9" in r.text)
+
     r = client.get("/geometry")
     ok("/geometry → 200 且是 HTML", r.status_code == 200 and "<title>" in r.text,
        f"{r.status_code}")
     ok("/geometry 的内容确实是那个页面", "GE 道路几何" in r.text)
+    # 两个页面互相可达：点得到才算"导航"，不然只是一句口号
+    ok("首页链到 /geometry（导航真的连上了）", 'href="/geometry"' in client.get("/").text)
+    ok("几何页链回首页", 'href="/"' in client.get("/geometry").text)
 
     r = client.get("/gw/v1/geometry/sections")
     ok("/gw 转发成功并原样带回上游 JSON",

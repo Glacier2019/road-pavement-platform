@@ -55,6 +55,12 @@
   #err code{font-family:var(--mono);background:#fff;padding:1px 5px;border-radius:4px}
   .links a{color:var(--accent);text-decoration:none;font-family:var(--mono);font-size:12.5px}
   .links a:hover{text-decoration:underline}
+  nav{display:flex;gap:4px;padding:0 24px;background:var(--card);
+    border-bottom:1px solid var(--line)}
+  nav a{display:block;padding:9px 13px;color:var(--muted);text-decoration:none;font-size:13.5px;
+    border-bottom:2px solid transparent}
+  nav a:hover{color:var(--ink)}
+  nav a.here{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
   footer{color:var(--muted);font-size:12.5px;padding:0 24px 40px;max-width:1400px}
 </style>
 </head>
@@ -66,6 +72,11 @@
     <b>本页不接触数据库</b>，全部经 M6 契约取数。
   </div>
 </header>
+<nav>
+  <a href="/">首页</a>
+  <a href="/geometry" class="here">GE 道路几何</a>
+  <a href="/docs">接口文档</a>
+</nav>
 
 <main>
   <div id="err"></div>
