@@ -76,7 +76,7 @@
         {
           "refId": "A",
           "format": "table",
-          "rawSql": "SELECT r.pass_time AS \"过车时刻\", m.stake_text AS \"断面\", r.lane_no AS \"车道\", r.axle_type_code AS \"轴型\", r.axle_num AS \"轴数\", round(r.gross_weight_kg / 1000.0, 1) AS \"总重(t)\", r.speed_kmh AS \"车速\", r.overload_flag AS \"超载\", r.esal AS \"ESAL\", r.quality_code AS \"质量码\" FROM wim_axle_record r LEFT JOIN monitor_cross_section m ON m.id = r.cross_section_id ORDER BY r.pass_time DESC LIMIT 20",
+          "rawSql": "SELECT r.pass_time AS \"过车时刻\", m.station_text AS \"断面\", r.lane_no AS \"车道\", r.axle_type_code AS \"轴型\", r.axle_num AS \"轴数\", round(r.gross_weight_kg / 1000.0, 1) AS \"总重(t)\", r.speed_kmh AS \"车速\", r.overload_flag AS \"超载\", r.esal AS \"ESAL\", r.quality_code AS \"质量码\" FROM wim_axle_record r LEFT JOIN monitor_cross_section m ON m.id = r.cross_section_id ORDER BY r.pass_time DESC LIMIT 20",
           "rawQuery": true
         }
       ],

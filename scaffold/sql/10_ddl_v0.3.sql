@@ -1,5 +1,5 @@
 -- ============================================================================
--- 路面性能数据库（Road Pavement Performance Database）— DDL v0.2
+-- 路面性能数据库（Road Pavement Performance Database）— DDL v0.3
 -- ============================================================================
 -- 项目：福建省交通运输科技计划项目 2025Y095《智慧公路路面结构断面监测与
 --       数据融合养护管理技术研究》研究内容（3）路面性能数据库科学架构
@@ -17,16 +17,111 @@
 -- 版本变更记录
 --   v0.1（初稿）  30 表：A 空间档案 6 ＋ B 字典 5 ＋ C 轴载交通 3 ＋ D 表观病害影像 4
 --                       ＋ E 试验 3 ＋ F 模型诊断决策 5 ＋ G 质量反馈 4
---   v0.2（本版）  32 表：v0.1 全部保留（未改一列）＋ 新增
+--   v0.2          32 表：v0.1 全部保留（未改一列）＋ 新增
 --                       G5 quality_rule  数据质量规则库（M4 真数据门的规则定义与标定状态）
 --                       H1 mapping_set    语义映射集（M7 语义中枢的产出落点）
 --                 依据：契约变更工单 #1（M4/M7 从机械层进入业务层的前置条件）
 --                 兼容：纯新增，无破坏性变更；回滚 = DROP TABLE quality_rule, mapping_set;
+--   v0.3（本版）  42 表：v0.2 全部保留 ＋ 第一批 10 张新表（GE 域完整化）
+--                       A0  design_project                          设计项目
+--                       A7  design_file                             设计文件台账（含桩号覆盖区间）
+--                       A8  section_design_attr                     路段设计属性（.PRJ 分段）
+--                       A9  station_sequence    ★全线桩号基准（一等实体，.STA）
+--                       A10 station_equation    ★断链（长链/短链）
+--                       A11 alignment_pi / A12 alignment_element    平面线形（.JD/.PM）
+--                       A13 profile_grade_point / A14 profile_ground_point  纵断面（.ZDM/.DMX）
+--                       A15 geometry_point      ★逐桩号 κ/G/E 函数库（七文件融合）
+--                 改名：stake_* → station_*（9 列 + 2 索引）；road_section 加 design_project_id
+--                 依据：契约变更工单 #2（导师指示：stake 是"物理标桩"，station 才是"桩号值"）
+--                 兼容：⚠️ 本次为破坏性改名。v02_compat_* 视图保留旧列名一版（只读）
+--                 回滚：ALTER TABLE ... RENAME COLUMN 反向执行；或 git revert 工单 #2 提交
+--                 待办：第二批 11 张（L6–L9：横断面/超高路幅/路基土方/构造物）随 v0.4
+--                 修订：桩号列精度 numeric(10,3)/numeric(12,3) → numeric(12,6)（14 列）
+--                       原因：.STA 实测 332 个桩号中 81 个非 20 m 等距点（66 种间距），
+--                             最短间距仅 0.083 m —— 1659.917 与 1660.000 在 km 3 位小数下
+--                             同为 1.660，直接撞 UNIQUE(section_id, station_local_km)。
+--                             km 6 位小数 = 毫米级，足以区分源文件（米制 3 位小数）的全部取值。
+--                       说明：DDL 早已预留加桩概念（station_type='jiazi'、is_integer_station），
+--                             但原精度表达不了它——预留了字段，没预留分辨率。
+--                       不变：station_interval_m numeric(8,2)（间距用米，语义不同，保持不动）
+--                 修订：A11/A12 平面几何两表改为「单元链为真源、交点为派生」（工单 #3）
+--                       起因：审阅发现 A11 的列注释把**缓和曲线参数 A** 标成"切线长"、
+--                             把**缓和曲线长 Ls** 标成"转角"。追问后确认问题不在注释，
+--                             而在**这两列本来就不该这么存**——A = √(R·Ls) 是纯导出量，
+--                             冗余值可以被贴错标签而无人察觉（因为它"本来就有个合理的数"）。
+--                       实测（G228 滨海大道试验段，33 单元 → 8 交点）：
+--                         · A11 的全部字段可由 A12 的单元链推出，交点坐标偏差 3×10⁻⁸ m，
+--                           转角/切线长/交点桩号/A 逐位相同 → A11 改判为**派生表**，
+--                           导入器只从单元链推导，.JD 文件降为**验算**（独立来源的第二意见）
+--                         · A12 缺失原始量、且有一列表达不了自己的对象：
+--                           新增 center_x/center_y（圆心）、radius_start_m/radius_end_m、
+--                           end_azimuth_deg、section_id、length_m(生成列)；
+--                           **删除 curvature_1pm** —— 缓和曲线单元内 κ 由 0 连续变到 1/R，
+--                           不是常数，单列必然失真（逐桩的 A15.curvature_1pm 则正确，不动）
+--                         · A11.spiral_a1/a2 由手填列改为 GENERATED（sqrt(R·Ls)），
+--                           写出去了（可查）、但结构上不可能与 R、Ls 不一致
+--                         · A11 新增 spiral_ls1_m/spiral_ls2_m（原始量，原先只存了导出的 A）、
+--                           tangent_len2_m、arc_len_m、prev_tangent_len_m、external_m
+--                       外距算法：**不用**教科书的 (R+ΔR)/cos(α/2)−R（级数近似，
+--                         实测对 PI8 差 1.24 mm），改用圆心＋角平分线的精确几何距离（差 6×10⁻⁹ m）
+--                       兼容：⚠️ 破坏性。curvature_1pm 删除、spiral_a1/a2 变生成列、
+--                             A12 加 NOT NULL/UNIQUE(section_id, element_seq)。
+--                             库尚无真实数据（GE 域为空表运行），重建即可；无需迁移脚本。
+--                       回滚：git revert 工单 #3；live 库删卷重建
+--                       未做（留给 v0.4 定）：x_coord/y_coord 与 start_x/start_y 的命名统一
 -- ============================================================================
 
 BEGIN;
 
+-- PostGIS 扩展。★ 本版 DDL 自身**不用** PostGIS 类型（坐标一律 numeric，便于跨库移植），
+--   但实库（rp-pg）里它是装着的、而全新构建没有——两者因此不一致。
+--   这里显式声明，使「全新构建 ≡ 实库」成立，也为后续空间功能留好接口。
+--   若将来确定不做空间分析，可换成 postgres:16 镜像并删掉本行。
+CREATE EXTENSION IF NOT EXISTS postgis;
+
 -- ######################## A. 空间与档案（静态基础数据） ########################
+
+-- ---- A0 / A7. 设计项目与设计文件台账（GE 域完整化 · 纬地文件接入）—— v0.3 新增 ----
+-- 注意：本段物理位置在 A1 之前 —— 因 road_section 需 FK 引用 design_project，
+--       建表顺序必须先于路段表（编号顺序≠文件顺序，此处以 FK 依赖为准）。
+-- 来源：纬地(HintCAD)设计工程 .PRJ 总项目文件〔项目设置〕/〔文件名〕两段
+-- 依据：契约变更工单 #2
+
+-- A0. 设计项目 design_project
+CREATE TABLE IF NOT EXISTS design_project (
+    id                 bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    project_uid        varchar(64) UNIQUE,                -- .PRJ 项目ID（UUID）
+    project_name       varchar(128) NOT NULL,             -- 项目名（含设计人/院校）
+    project_type       varchar(64),                       -- 公路主线 / 互通式立体交叉 …
+    station_interval_m numeric(8,2),                       -- 桩号间隔 m（毕设工程＝20）
+    earthwork_method   varchar(64),                       -- 土方计算方式（平均断面法…）
+    designer           varchar(128),                      -- 设计人
+    design_org         varchar(128),                      -- 设计单位
+    design_stage       varchar(64),                       -- 设计阶段（初步设计/施工图…）
+    source_file        varchar(255),                      -- 来源 .PRJ 文件名
+    remark             text
+);
+COMMENT ON TABLE design_project IS '设计项目台账（设计期数据血缘起点）；一个项目对应一套纬地工程文件';
+COMMENT ON COLUMN design_project.station_interval_m IS '桩号间隔，决定逐桩数据的默认密度';
+
+-- A7. 设计文件台账 design_file
+CREATE TABLE IF NOT EXISTS design_file (
+    id                       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    design_project_id        bigint NOT NULL REFERENCES design_project(id),
+    file_kind_code           varchar(16) NOT NULL,        -- .PRJ〔文件名〕键号（101/102/…）
+    file_kind_name           varchar(64) NOT NULL,        -- 文件类型名（平面线形文件(*.PM)…）
+    file_name                varchar(255) NOT NULL,       -- 实际文件名
+    rel_path                 varchar(512),                -- 相对工程目录的路径
+    coverage_from_station_km numeric(12,6),               -- ★该文件覆盖起点桩号
+    coverage_to_station_km   numeric(12,6),               -- ★该文件覆盖终点桩号
+    parse_status             varchar(16) DEFAULT 'pending', -- ok 明文可解析/blocked 二进制或专有/pending 未验
+    parse_note               text,                        -- 不可解析原因（zlib 二进制结构体 / 无已知压缩魔数 …）
+    remark                   text,
+    UNIQUE (design_project_id, file_kind_code)
+);
+COMMENT ON TABLE design_file IS '设计文件台账（.PRJ〔文件名〕段）；★coverage_* 使"某文件覆盖哪一段桩号"成为可查询事实——实测 .WID 只到 5701.461 而全线 5805.421，末段 104m 无路幅数据';
+COMMENT ON COLUMN design_file.parse_status IS 'ok=明文可解析(14个) / blocked=二进制或专有(5个) / pending；Access(.TSF) 需 mdbtools';
+
 
 -- A1. 路线表（如 G228 国道福清滨海大通道）
 CREATE TABLE IF NOT EXISTS road_line (
@@ -49,11 +144,12 @@ COMMENT ON COLUMN road_line.design_load IS '设计荷载等级';
 CREATE TABLE IF NOT EXISTS road_section (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     line_id       bigint NOT NULL REFERENCES road_line(id),
+    design_project_id bigint REFERENCES design_project(id),  -- v0.3 新增：设计项目血缘
     section_name  varchar(128) NOT NULL,                 -- 路段名称（滨海大通道试验段）
-    start_stake   varchar(32),                           -- 起点桩号（K4635+000）
-    end_stake     varchar(32),                           -- 终点桩号（K4654+701）
-    start_km      numeric(10,3),                         -- 起点数值桩号 4635.000
-    end_km        numeric(10,3),                         -- 终点数值桩号
+    start_station_text   varchar(32),                           -- 起点桩号（K4635+000）
+    end_station_text     varchar(32),                           -- 终点桩号（K4654+701）
+    start_station_km      numeric(12,6),                         -- 起点数值桩号 4635.000
+    end_station_km        numeric(12,6),                         -- 终点数值桩号
     length_m      numeric(10,1),                         -- 路段长度 m
     direction     varchar(16),                           -- 方向（上行/下行）
     pavement_type varchar(64),                           -- 路面结构类型（沥青混凝土）
@@ -61,7 +157,7 @@ CREATE TABLE IF NOT EXISTS road_section (
     remark        text
 );
 COMMENT ON TABLE  road_section IS '路段档案（路线→路段）';
-COMMENT ON COLUMN road_section.start_km IS '数值桩号便于区间排序检索';
+COMMENT ON COLUMN road_section.start_station_km IS '数值桩号便于区间排序检索';
 CREATE INDEX IF NOT EXISTS idx_section_line ON road_section(line_id);
 
 -- A3. 路面结构层表（断面分层结构，支撑数字孪生分层可视化）
@@ -83,8 +179,8 @@ CREATE INDEX IF NOT EXISTS idx_layer_section ON structure_layer(section_id);
 CREATE TABLE IF NOT EXISTS monitor_cross_section (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     section_id    bigint NOT NULL REFERENCES road_section(id),
-    stake_text    varchar(32) NOT NULL,                  -- 桩号 K4635+710
-    stake_km      numeric(10,3) NOT NULL,                -- 4635.710
+    station_text    varchar(32) NOT NULL,                  -- 桩号 K4635+710
+    station_km      numeric(12,6) NOT NULL,                -- 4635.710
     lane_no       smallint,                              -- 车道序号（1=最外侧…）
     lon           numeric(10,7),                         -- 经度（CGCS2000/WGS84）
     lat           numeric(10,7),                         -- 纬度
@@ -94,7 +190,7 @@ CREATE TABLE IF NOT EXISTS monitor_cross_section (
     remark        text
 );
 COMMENT ON TABLE monitor_cross_section IS '监测断面（内观+表面监测的空间锚点）';
-CREATE INDEX IF NOT EXISTS idx_cs_section_stake ON monitor_cross_section(section_id, stake_km);
+CREATE INDEX IF NOT EXISTS idx_cs_section_station ON monitor_cross_section(section_id, station_km);
 
 -- A5. 传感器布点表（物理安装 → 内观：埋入式应变/土压/加速度/光纤；表面：相机/扫描）
 CREATE TABLE IF NOT EXISTS sensor_install (
@@ -135,6 +231,190 @@ CREATE TABLE IF NOT EXISTS sensor_channel (
 );
 COMMENT ON TABLE sensor_channel IS '监测通道=逻辑测点；storage_policy 对应二期 PHM「数据稀释规则自定义，优化存储结构」';
 CREATE INDEX IF NOT EXISTS idx_channel_install ON sensor_channel(install_id);
+
+
+-- ---- A8–A15. 道路几何设计数据（GE 域完整化 · 纬地文件接入）—— v0.3 新增 ----
+-- 来源：纬地(HintCAD)设计工程明文文件（.STA/.PM/.JD/.ZDM/.DMX/.PRJ/.SUP/.WID/.LJ/.TF）
+-- 依据：契约变更工单 #2 ／ 设计：output/GE域完整化设计-基于纬地设计文件.md
+-- 说明：桩号（station）为一等实体 —— station_sequence 是全线基准，
+--       逐桩数据表以 FK 锚定其上，锚定关系成为数据库约束而非文档约定。
+
+-- A8. 路段设计属性（来自 .PRJ〔项目分段〕：公路等级/计算车速/路幅/横坡/超高/加宽）
+CREATE TABLE IF NOT EXISTS section_design_attr (
+    id                       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id               bigint NOT NULL UNIQUE REFERENCES road_section(id),
+    road_grade               varchar(32),                 -- 公路等级（二级公路）
+    design_speed_kmh         smallint,                    -- 计算车速 km/h（60）
+    cross_section_form       varchar(64),                 -- 横断面形式（2车道）
+    roadway_width_m          numeric(6,2),                -- 路幅宽度 m（10.000）
+    carriageway_crossfall_pct numeric(4,2),               -- 行车道横坡 %（2.0）
+    shoulder_crossfall_pct   numeric(4,2),                -- 土路肩横坡 %（3.0）
+    median_width_m           numeric(6,2),                -- 中间带宽度 m（0.00）
+    max_superelev_pct        numeric(4,2),                -- 最大超高 %（8.0）
+    superelev_rotate_mode    varchar(64),                 -- 超高旋转方式（绕曲线内侧行车道边缘旋转）
+    superelev_gradient_mode  varchar(64),                 -- 超高渐变方式（线性）
+    widening_mode            varchar(64),                 -- 加宽类型（不设置加宽）
+    widening_gradient_mode   varchar(64),                 -- 加宽渐变方式
+    source_file              varchar(255),
+    remark                   text
+);
+COMMENT ON TABLE section_design_attr IS '路段设计属性（.PRJ〔项目分段〕）；一改线形即新增冗余列，故独立成表而非并入 road_section';
+
+-- A9. 桩号序列 ★全线桩号基准（一等实体）
+CREATE TABLE IF NOT EXISTS station_sequence (
+    id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id          bigint NOT NULL REFERENCES road_section(id),
+    station_seq_no      integer NOT NULL,                 -- .STA 原始编号
+    station_local_km    numeric(12,6) NOT NULL,           -- 相对桩号（0 起，设计口径）
+    station_absolute_km numeric(12,6),                    -- 绝对桩号（路网统一口径，如 4635.710）
+    station_text        varchar(32) NOT NULL,             -- K 格式文本（K4+635.000 / K4635+710）
+    station_type        varchar(16) DEFAULT 'integer',    -- integer 整桩/jiazi 加桩/equation 断链点/endpoint 起终点
+    is_integer_station  boolean DEFAULT true,             -- 是否整桩（20m 整桩 vs 加桩）
+    remark              text,
+    UNIQUE (section_id, station_local_km)
+);
+COMMENT ON TABLE station_sequence IS '桩号序列＝全线桩号基准（一等实体）；来源 .STA 逐桩号序列。其余逐桩数据表以 station_id FK 锚定本表';
+COMMENT ON COLUMN station_sequence.station_local_km IS '相对桩号：设计口径，0 起（纬地工程 0.000→5805.421）';
+COMMENT ON COLUMN station_sequence.station_absolute_km IS '绝对桩号：路网统一口径（G228 试验段 K4635+000 系）。★相对/绝对双列显式物化，不存单个 offset 由读时计算——有断链时线性假设不成立';
+CREATE INDEX IF NOT EXISTS idx_station_section_local ON station_sequence(section_id, station_local_km);
+CREATE INDEX IF NOT EXISTS idx_station_absolute      ON station_sequence(station_absolute_km);
+
+-- A10. 断链（长链/短链）★一等实体的必要配套
+CREATE TABLE IF NOT EXISTS station_equation (
+    id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id          bigint NOT NULL REFERENCES road_section(id),
+    equation_station_km numeric(12,6) NOT NULL,           -- 断链点（相对桩号）
+    station_before_km   numeric(12,6) NOT NULL,           -- 断链前桩号（绝对）
+    station_after_km    numeric(12,6) NOT NULL,           -- 断链后桩号（绝对）
+    equation_type       varchar(16) NOT NULL,             -- long 长链 / short 短链
+    equation_len_m      numeric(10,3),                    -- 链长 m
+    station_text        varchar(32),                      -- 断链标注（K10+000=K10+050）
+    remark              text
+);
+COMMENT ON TABLE station_equation IS '断链（长链/短链）：同一物理位置有两套合法桩号。★缺此表则里程统计静默多算/少算、新旧数据按桩号 join 在断链处错位，且不报错。本毕设工程无断链（空表运行），G228 复测修正必用';
+
+-- A11. 平面交点（来自 .JD）★**派生表**：全部字段可由 A12 的单元链推出（实测偏差 3×10⁻⁸ m）
+--      折点是线的摘要 —— 两条相邻切线求交即得。故 .JD 只作**验算**（独立来源的第二意见），
+--      不作数据入口：一个"看起来也有值"的入口，只会多一处能悄悄写歪的地方。
+CREATE TABLE IF NOT EXISTS alignment_pi (
+    id                 bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id         bigint NOT NULL REFERENCES road_section(id),
+    pi_seq             smallint NOT NULL,                 -- 交点序号（.JD 交点个数=10）
+    pi_type            varchar(16) NOT NULL,              -- QD 起点 / ZD 终点 / JD 交点
+                                                          --   沿用源文件写法（.JD 里就写 QD/ZD）。
+                                                          --   同域 element_type 用英文，此处例外是**故意的**
+    x_coord            numeric(16,6),                     -- 交点大地坐标 X（两切线求交，派生）
+    y_coord            numeric(16,6),                     -- 交点大地坐标 Y
+    radius_m           numeric(12,4),                     -- 圆曲线半径（450）；派生自 A12 的 circular 单元
+    spiral_ls1_m       numeric(12,4),                     -- 入口缓和曲线长 Ls1（60）　★原始量
+    spiral_ls2_m       numeric(12,4),                     -- 出口缓和曲线长 Ls2（60）　★原始量
+    spiral_a1          numeric(14,8) GENERATED ALWAYS AS (sqrt(radius_m * spiral_ls1_m)) STORED,
+                                                          -- 缓和曲线参数 A1 = √(R·Ls1)，**导出量**：
+                                                          --   原为手填列，可被写成任何值（注释就曾把它
+                                                          --   误标成"切线长(164.31676725)"）。改成生成列后
+                                                          --   结构上不可能与 R、Ls 不一致。
+    spiral_a2          numeric(14,8) GENERATED ALWAYS AS (sqrt(radius_m * spiral_ls2_m)) STORED,
+    prev_tangent_len_m numeric(12,4),                     -- 前段直线长（PI2 = 674.493）。⚠ 源文件把它与
+                                                          --   特征点桩号放在同一列，极易误读为桩号
+    tangent_len_m      numeric(12,4),                     -- 切线长 = 交点桩号 − ZH 桩号（117.54242652）
+                                                          --   ⚠ 原注释误标为 164.31676725（那是 A）
+    tangent_len2_m     numeric(12,4),                     -- 出口切线长
+    arc_len_m          numeric(12,4),                     -- 圆曲线弧长（112.80867934）
+    curve_len_m        numeric(12,4),                     -- 曲线总长 = 2·Ls + 弧长（232.80867934）
+    deflection_deg     numeric(10,6),                     -- 转角（+22.002684）
+                                                          --   ⚠ 原注释误标为 -60.0（那是 Ls）
+    external_m         numeric(12,6),                     -- 外距（8.76412020）。★必须用**精确几何**：
+                                                          --   圆心+角平分线量距离。教科书的
+                                                          --   (R+ΔR)/cos(α/2)−R 是级数近似，实测差 1.24 mm
+    remark             text,
+    UNIQUE (section_id, pi_seq)
+);
+COMMENT ON TABLE alignment_pi IS '平面交点（.JD）★派生表：全部字段可由 alignment_element 的单元链推出（实测偏差 3×10⁻⁸ m），**不得手工填写**，.JD 文件只作验算。切线长与转角两条列注释原先把缓和曲线参数 A 和缓和曲线长 Ls 张冠李戴，已修正';
+
+-- A12. 平面线形单元（来自 .PM：逐段方位角/曲率）★平面几何的**真源表**
+--      A11 的交点、A15 的 κ(s) 都由本表推出；本表不是任何东西的摘要。
+CREATE TABLE IF NOT EXISTS alignment_element (
+    id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id       bigint NOT NULL REFERENCES road_section(id),
+                                                          -- 新增：末端直线不属于任何交点，
+                                                          --   原先只能靠 pi_id 反推路段，会够不着
+    pi_id            bigint REFERENCES alignment_pi(id),  -- 可空：引道/末端直线没有对应交点
+    element_seq      smallint NOT NULL,                   -- 线形单元序号（.PM 共 33 段）
+    element_type     varchar(24) NOT NULL,                -- line 直线 / circular 圆曲线 / transition 缓和曲线
+    start_station_km numeric(12,6) NOT NULL,              -- 单元起点桩号
+    end_station_km   numeric(12,6) NOT NULL,              -- 单元终点桩号
+    length_m         numeric(12,6) GENERATED ALWAYS AS
+                     ((end_station_km - start_station_km) * 1000) STORED,
+                                                          -- 单元长 ≡ 桩号差，**导出量**，不许手填
+    start_x          numeric(16,6),
+    start_y          numeric(16,6),
+    end_x            numeric(16,6),
+    end_y            numeric(16,6),
+    center_x         numeric(16,6),                       -- 圆心（新增）。直线/切线端为 NULL
+    center_y         numeric(16,6),
+    azimuth_deg      numeric(10,6),                       -- 起点方位角
+    end_azimuth_deg  numeric(10,6),                       -- 终点方位角（新增；直线单元 = 起点方位角）
+    radius_start_m   numeric(12,4),                       -- 起点曲率半径（新增）。NULL = ∞，即直线端
+    radius_end_m     numeric(12,4),                       -- 终点曲率半径（新增）
+    remark           text,
+    UNIQUE (section_id, element_seq)
+);
+COMMENT ON TABLE alignment_element IS '平面线形单元（.PM）★平面几何真源表。原 curvature_1pm 单列已删：缓和曲线单元内 κ 从 0 连续变到 1/R，**非常数**，一列必然失真；改由 radius_start_m/radius_end_m 表达。A11 交点与 A15 κ(s) 皆由本表推出';
+CREATE INDEX IF NOT EXISTS idx_alignment_elem_station ON alignment_element(start_station_km, end_station_km);
+CREATE INDEX IF NOT EXISTS idx_alignment_elem_pi ON alignment_element(pi_id);
+
+-- A13. 纵断面变坡点（来自 .ZDM：桩号/高程/竖曲线半径/坡度）
+CREATE TABLE IF NOT EXISTS profile_grade_point (
+    id                      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id              bigint NOT NULL REFERENCES road_section(id),
+    vpi_seq                 smallint NOT NULL,            -- 变坡点序号（.ZDM 共 12 个）
+    station_km              numeric(12,6) NOT NULL,       -- 变坡点桩号（300.000）
+    elevation_m             numeric(10,4),                -- 变坡点高程（58.822）
+    vertical_curve_radius_m numeric(12,4),                -- 竖曲线半径（6000）
+    grade_in_pct            numeric(6,3),                 -- 前坡坡度 %
+    grade_out_pct           numeric(6,3),                 -- 后坡坡度 %
+    grade_len_m             numeric(10,3),                -- 坡长 m
+    remark                  text,
+    UNIQUE (section_id, vpi_seq)
+);
+COMMENT ON TABLE profile_grade_point IS '纵断面变坡点（.ZDM）；G(s) 纵坡函数由此表竖曲线推导';
+CREATE INDEX IF NOT EXISTS idx_grade_point_station ON profile_grade_point(section_id, station_km);
+
+-- A14. 纵断面地面线（来自 .DMX：逐桩地面高程）
+CREATE TABLE IF NOT EXISTS profile_ground_point (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    station_id    bigint NOT NULL UNIQUE REFERENCES station_sequence(id),
+    ground_elev_m numeric(10,4) NOT NULL,                 -- 地面高程 m
+    remark        text
+);
+COMMENT ON TABLE profile_ground_point IS '纵断面地面线（.DMX 逐桩地面高程）；与 design 高程对比得填挖深度';
+CREATE INDEX IF NOT EXISTS idx_profile_ground_station ON profile_ground_point(station_id);
+
+-- A15. 逐桩号线形 ★核心：κ(s)/G(s)/E(s) 函数库（课题甲/乙共同消费接口）
+--      ★**派生缓存**：全部由 A12（κ/坐标/方位角）＋ A13/A14（高程）逐桩算出。
+--      之所以"存"而不是"每次算"：缓和曲线要数值积分，逐桩重算代价高——这是合理的缓存，
+--      不是冗余。但有两条要求：① 必须**可重建**（导入器要能一键重算，并断言重算结果一致）；
+--      ② 必须与 A12 同批次生成，不允许只改 A12 不改本表。
+--      ⚠ 注意与 A12 的差别：本表的 curvature_1pm 是**逐桩**单值，正确；
+--        A12 原先那个 curvature_1pm 是**逐单元**单值，对缓和曲线是错的，故已删。
+CREATE TABLE IF NOT EXISTS geometry_point (
+    id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    station_id     bigint NOT NULL UNIQUE REFERENCES station_sequence(id),  -- ★锚在桩号基准上
+    x_coord        numeric(16,6),                         -- 平面坐标 X（.PM）
+    y_coord        numeric(16,6),                         -- 平面坐标 Y（.PM）
+    azimuth_deg    numeric(10,6),                         -- 方位角（.PM）
+    curvature_1pm  numeric(14,10),                        -- ★曲率 κ 1/m（.PM＋.JD 推导）
+    design_elev_m  numeric(10,4),                         -- 设计高程（.ZDM 竖曲线）
+    ground_elev_m  numeric(10,4),                         -- 地面高程（.DMX）
+    grade_pct      numeric(6,3),                          -- ★纵坡 G %（.ZDM 推导）
+    h_radius_m     numeric(12,4),                         -- 平曲线半径（.JD）
+    v_radius_m     numeric(12,4),                         -- 竖曲线半径（.ZDM）
+    superelev_pct  numeric(5,2),                          -- ★超高 E %（.SUP）
+    crossfall_pct  numeric(5,2),                          -- 横坡 %（.WID）
+    remark         text
+);
+COMMENT ON TABLE geometry_point IS '逐桩号线形＝κ(s)/G(s)/E(s) 函数库（课题甲/乙共同消费接口）；κ 来自 .PM+.JD，G 来自 .ZDM，E 来自 .SUP，三者对齐到 station_sequence 同一基准。对应 ASAM OpenDRIVE 的 s = station_absolute_km × 1000（米）';
+CREATE INDEX IF NOT EXISTS idx_geometry_curvature ON geometry_point(curvature_1pm);
 
 -- ######################## B. 字典表 ########################
 
@@ -264,8 +544,8 @@ CREATE TABLE IF NOT EXISTS disease_record (
     id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     task_id        bigint REFERENCES inspect_task(id),   -- 来源任务（可空=历史导入）
     section_id     bigint NOT NULL REFERENCES road_section(id),
-    stake_text     varchar(32),                          -- 桩号
-    stake_km       numeric(10,3),
+    station_text     varchar(32),                          -- 桩号
+    station_km       numeric(12,6),
     lane_no        smallint,
     disease_code   varchar(32) REFERENCES dict_disease_type(code), -- 病害类型
     severity       varchar(8),                           -- light/moderate/severe
@@ -280,7 +560,7 @@ CREATE TABLE IF NOT EXISTS disease_record (
     remark         text
 );
 COMMENT ON TABLE disease_record IS '路面病害记录（表观/表面监测轨；支持病害演变观测=同一病害多期影像对比）';
-CREATE INDEX IF NOT EXISTS idx_disease_sec_stake ON disease_record(section_id, stake_km);
+CREATE INDEX IF NOT EXISTS idx_disease_sec_station ON disease_record(section_id, station_km);
 CREATE INDEX IF NOT EXISTS idx_disease_code ON disease_record(disease_code);
 
 -- D3. 三维扫描模型（路段普检：高精扫描+快速建模）
@@ -312,7 +592,7 @@ CREATE TABLE IF NOT EXISTS media_file (
     height_px    integer,
     duration_s   numeric(10,2),                          -- 视频时长
     taken_time   timestamptz,                            -- 拍摄时间
-    stake_text   varchar(32),                            -- 拍摄桩号
+    station_text   varchar(32),                            -- 拍摄桩号
     md5          char(32),                               -- 校验
     remark       text
 );
@@ -602,6 +882,49 @@ COMMENT ON COLUMN mapping_set.source_hash IS '源结构指纹（表头名+顺序
 COMMENT ON COLUMN mapping_set.entries IS '映射条目数组 [{raw 原始写法, normalized 归一化, target_field 库内字段, unit, transform}]';
 CREATE INDEX IF NOT EXISTS idx_ms_status ON mapping_set(status, source_kind);
 CREATE INDEX IF NOT EXISTS idx_ms_hash ON mapping_set(source_hash);
+
+
+-- ######################## 兼容视图（契约② v0.2 旧列名）########################
+-- 目的：v0.2 时代按旧列名（stake_*）写的**只读查询**在一个版本内不中断。
+-- 用法：把查询里的表名换成对应视图名即可，列名保持 v0.2 原样。
+-- 范围：仅覆盖本次改名的 4 张表（road_section / monitor_cross_section /
+--       disease_record / media_file）；**不含写路径**，写入必须走新列名。
+-- 退役：v0.4 发布时随工单 #2 一并删除。
+
+CREATE OR REPLACE VIEW v02_compat_road_section AS
+  SELECT id, line_id, design_project_id, section_name,
+         start_station_text AS start_stake,
+         end_station_text   AS end_stake,
+         start_station_km   AS start_km,
+         end_station_km     AS end_km,
+         length_m, direction, pavement_type, climate_zone, remark
+    FROM road_section;
+COMMENT ON VIEW v02_compat_road_section IS 'v0.2 兼容视图（只读）：旧列名 start_stake/end_stake/start_km/end_km';
+
+CREATE OR REPLACE VIEW v02_compat_monitor_cross_section AS
+  SELECT id, section_id,
+         station_text AS stake_text,
+         station_km   AS stake_km,
+         lane_no, lon, lat, purpose, install_date, status, remark
+    FROM monitor_cross_section;
+COMMENT ON VIEW v02_compat_monitor_cross_section IS 'v0.2 兼容视图（只读）：旧列名 stake_text/stake_km';
+
+CREATE OR REPLACE VIEW v02_compat_disease_record AS
+  SELECT id, task_id, section_id,
+         station_text AS stake_text,
+         station_km   AS stake_km,
+         lane_no, disease_code, severity, length_m, width_m, area_m2,
+         image_media_ids, source, status, first_seen, handle_time, remark
+    FROM disease_record;
+COMMENT ON VIEW v02_compat_disease_record IS 'v0.2 兼容视图（只读）：旧列名 stake_text/stake_km';
+
+CREATE OR REPLACE VIEW v02_compat_media_file AS
+  SELECT id, biz_table, biz_id, media_type, file_path, file_name, size_bytes,
+         width_px, height_px, duration_s, taken_time,
+         station_text AS stake_text,
+         md5, remark
+    FROM media_file;
+COMMENT ON VIEW v02_compat_media_file IS 'v0.2 兼容视图（只读）：旧列名 stake_text';
 
 COMMIT;
 

@@ -90,19 +90,19 @@ class LoRepository(DomainRepository):
     PASSAGES_SQL = """
     SELECT r.id, r.pass_time, r.lane_no, r.direction, r.axle_type_code, r.axle_num,
            r.speed_kmh, r.gross_weight_kg, r.overload_flag, r.overload_rate, r.esal,
-           r.plate_no, r.quality_code, m.stake_text
+           r.plate_no, r.quality_code, m.station_text
     FROM wim_axle_record r
     LEFT JOIN monitor_cross_section m ON m.id = r.cross_section_id
     WHERE (%(from_ts)s::timestamptz IS NULL OR r.pass_time >= %(from_ts)s::timestamptz)
       AND (%(to_ts)s::timestamptz   IS NULL OR r.pass_time <  %(to_ts)s::timestamptz)
-      AND (%(stake)s::text          IS NULL OR m.stake_text = %(stake)s::text)
+      AND (%(station)s::text          IS NULL OR m.station_text = %(station)s::text)
       AND (%(overload_only)s::boolean = false OR r.overload_flag = true)
     ORDER BY r.pass_time DESC
     LIMIT %(limit)s::int
     """
 
     PASSAGE_ONE_SQL = """
-    SELECT r.*, m.stake_text FROM wim_axle_record r
+    SELECT r.*, m.station_text FROM wim_axle_record r
     LEFT JOIN monitor_cross_section m ON m.id = r.cross_section_id
     WHERE r.id = %(rid)s::bigint
     """
@@ -121,8 +121,8 @@ class LoRepository(DomainRepository):
            round(max(gross_weight_kg)::numeric, 0) AS max_gross_kg
     FROM wim_axle_record
     WHERE pass_time >= %(from_ts)s::timestamptz AND pass_time < %(to_ts)s::timestamptz
-      AND (%(stake)s::text IS NULL OR cross_section_id IN (
-            SELECT id FROM monitor_cross_section WHERE stake_text = %(stake)s::text))
+      AND (%(station)s::text IS NULL OR cross_section_id IN (
+            SELECT id FROM monitor_cross_section WHERE station_text = %(station)s::text))
     GROUP BY 1 ORDER BY 1
     """
 
@@ -131,13 +131,13 @@ class LoRepository(DomainRepository):
         *,
         from_ts: datetime | None = None,
         to_ts: datetime | None = None,
-        stake: str | None = None,
+        station: str | None = None,
         overload_only: bool = False,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         """按时间/桩号/超载筛过车记录，时间倒序。"""
         return self._dao.query(self.PASSAGES_SQL, {
-            "from_ts": from_ts, "to_ts": to_ts, "stake": stake,
+            "from_ts": from_ts, "to_ts": to_ts, "station": station,
             "overload_only": overload_only, "limit": limit,
         })
 
@@ -152,26 +152,26 @@ class LoRepository(DomainRepository):
     def axles(self, record_id: int) -> list[dict[str, Any]]:
         return self._dao.query(self.PASSAGE_AXLES_SQL, {"rid": record_id})
 
-    def hourly_buckets(self, day: date, *, stake: str | None = None) -> list[dict[str, Any]]:
+    def hourly_buckets(self, day: date, *, station: str | None = None) -> list[dict[str, Any]]:
         """某天按小时聚合的过车量/超载数/ESAL/均速/最大总重。"""
         return self._dao.query(self.HOURLY_SQL, {
             "from_ts": datetime.combine(day, datetime.min.time()),
             "to_ts": datetime.combine(day, datetime.max.time()),
-            "stake": stake,
+            "station": station,
         })
 
-    def daily_summary(self, day: date, *, stake: str | None = None) -> dict[str, Any]:
+    def daily_summary(self, day: date, *, station: str | None = None) -> dict[str, Any]:
         """小时桶的汇总——M6 的 /v1/metrics/wim_hourly 直接返回它。
 
         把"求和"放在 DAO 而不是 M6：这是**指标语义**的一部分，
         换域/换口径时不应改出口服务。故 M6 拿到的是已经算好的结论。
         """
-        rows = self.hourly_buckets(day, stake=stake)
+        rows = self.hourly_buckets(day, station=station)
         total = sum(r["passages"] for r in rows)
         overloaded = sum(r["overloaded"] for r in rows)
         return {
             "date": day.isoformat(),
-            "stake": stake,
+            "station": station,
             "passages": total,
             "overloaded": overloaded,
             "overload_ratio": round(overloaded / total, 4) if total else None,

@@ -18,7 +18,7 @@ Starlette/FastAPI **按注册顺序取第一个完全匹配的路由**。若把�
   · 报文契约测试（test_wim_contract.py）查不出来；
   · 只有"真的发一次 HTTP 请求"才暴露。
 
-而契约文件 contracts/openapi/m6-gateway.v0.1.yaml 里明明写着该端点，
+而契约文件 contracts/openapi/m6-gateway.v0.2.yaml 里明明写着该端点，
 接入规约 MODULE-ONBOARDING.md 也拿它当示范路径——契约与实现就此静默漂移。
 所以本测试做三件事：
   1) 路由自洽：每条路由用它自己的具体 URL 去匹配，第一个命中的必须是它自己；
@@ -39,7 +39,7 @@ from starlette.routing import Match
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_PATH = ROOT / "modules" / "M6-api" / "app.py"
-CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.1.yaml"
+CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.2.yaml"
 
 # M3（rpdao）是 api 的依赖。本测试直接从源码路径加载 app.py，故需手动把
 # modules/M3-rpdao/ 放进 sys.path —— **必须在 import rpdao 之前**（容器里由
@@ -146,7 +146,7 @@ class _FakeLo:
     ROW = {"id": 1, "pass_time": "2026-09-14T13:45:02+08:00", "lane_no": 2,
            "axle_type_code": "T5", "axle_num": 5, "speed_kmh": 68.4,
            "gross_weight_kg": 51200.0, "overload_flag": False, "esal": 14.73,
-           "plate_no": None, "quality_code": "OK", "stake_text": "K4640+000"}
+           "plate_no": None, "quality_code": "OK", "station_text": "K4640+000"}
 
     def passages(self, **kw):
         return [self.ROW]
@@ -157,8 +157,8 @@ class _FakeLo:
             raise NotFound(f"过车记录不存在：{record_id}")
         return {**self.ROW, "axles": [{"axle_seq": 1, "axle_weight_kg": 6400.0}]}
 
-    def daily_summary(self, day, stake=None):
-        return {"date": day.isoformat(), "stake": stake, "passages": 1,
+    def daily_summary(self, day, station=None):
+        return {"date": day.isoformat(), "station": station, "passages": 1,
                 "overloaded": 0, "overload_ratio": 0.0, "esal_sum": 14.73, "buckets": []}
 
 

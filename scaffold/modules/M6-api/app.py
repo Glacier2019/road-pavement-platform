@@ -4,7 +4,7 @@
   · 对象查询：GET /v1/objects/{object_type}            ← 对应本体对象类型
   · 指标查询：GET /v1/metrics/...
   · 动作提交：POST /v1/actions/{action_name}           ← 受治理事务（P3 落地，先占位 501）
-契约真源：本服务的 /openapi.json（contracts/openapi/m6-gateway.v0.1.yaml 是它的手写摘要）
+契约真源：本服务的 /openapi.json（contracts/openapi/m6-gateway.v0.2.yaml 是它的手写摘要）
 
 ==================== M3 落地后的变化（2026-09-15）====================
 本服务**不再 import psycopg、不再持有连接池、不再内联 SQL**，全部改为调用 M3（rpdao）。
@@ -103,17 +103,17 @@ def catalog() -> dict[str, Any]:
 # ⚠ 注册顺序 = 匹配顺序（Starlette 取第一个 FULL match）。静态路径必须排在参数化路径
 #   /v1/objects/{object_type} 之前，否则 /v1/objects/wim_axle 会被它吃掉、永远返回 404。
 #   新增对象查询端点时，一律加在下面这一段（list_objects 之前）。
-#   契约：contracts/openapi/m6-gateway.v0.1.yaml；回归保护：tests/contract/test_api_routes.py
+#   契约：contracts/openapi/m6-gateway.v0.2.yaml；回归保护：tests/contract/test_api_routes.py
 @app.get("/v1/objects/wim_axle", tags=["对象查询"],
          summary="WIM 过车记录（按时间/桩号/超载筛选）")
 def list_wim(
     from_ts: datetime | None = None,
     to_ts: datetime | None = None,
-    stake: str | None = Query(None, description="如 K4640+000"),
+    station: str | None = Query(None, description="如 K4640+000"),
     overload_only: bool = False,
     limit: int = Query(200, ge=1, le=2000),
 ) -> dict[str, Any]:
-    rows = dao.lo.passages(from_ts=from_ts, to_ts=to_ts, stake=stake,
+    rows = dao.lo.passages(from_ts=from_ts, to_ts=to_ts, station=station,
                            overload_only=overload_only, limit=limit)
     return {"object_type": "wim_axle_record", "count": len(rows), "items": rows}
 
@@ -144,9 +144,9 @@ def list_objects(object_type: str, limit: int = Query(100, ge=1, le=1000)) -> di
 # ----------------------------------------------------------------- 指标查询
 @app.get("/v1/metrics/wim_hourly", tags=["指标查询"],
          summary="小时级过车量/超载数/ESAL/均速")
-def wim_hourly(day: date | None = None, stake: str | None = None) -> dict[str, Any]:
+def wim_hourly(day: date | None = None, station: str | None = None) -> dict[str, Any]:
     try:
-        return dao.lo.daily_summary(day or date.today(), stake=stake)
+        return dao.lo.daily_summary(day or date.today(), station=station)
     except DaoError as exc:
         raise _http(exc) from exc
 

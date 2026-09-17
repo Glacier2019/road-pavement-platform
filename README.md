@@ -73,7 +73,7 @@ docker compose -f docker-compose.skeleton.yml up -d
 | `modules/M4-governance/` | M4 数据治理·真数据门 ← **P1 关键路径** |
 | `modules/{M5-fusion,M7-semantic,M8-apps,M9-console,M10-agent}/` | M5/M7/M8/M9/M10 骨架 |
 | `contracts/` | 四份契约：报文 / 表结构 / DAO / 服务接口 |
-| `sql/` | **契约② 真源**：`10_ddl_v0.2.sql`（32 表，compose 挂载它建库）＋ 数据字典 ＋ 分区 / 种子脚本 |
+| `sql/` | **契约② 真源**：`10_ddl_v0.3.sql`（42 表，compose 挂载它建库）＋ 数据字典 ＋ 分区 / 种子脚本 |
 | `tests/contract/` | **九个契约测试**，改动后必跑 |
 | `simulator/` | WIM 造数器（真设备到场前驱动整条链路） |
 | `ops/grafana/` | 数据源与面板以代码提供，不靠手工点选 |

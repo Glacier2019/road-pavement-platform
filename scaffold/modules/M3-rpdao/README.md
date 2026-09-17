@@ -41,7 +41,7 @@ dao.ping()                       # 健康探针，不抛异常
 dao.pool_stats()                 # 连接池水位
 
 # 7 个域仓储（大小写皆可）
-dao.lo.passages(stake="K4640+000", limit=200)   # LO 交通荷载
+dao.lo.passages(station="K4640+000", limit=200)   # LO 交通荷载
 dao.lo.passage(12345)                           # 单条＋轴明细
 dao.lo.daily_summary(date(2026, 9, 15))         # 小时桶＋汇总
 dao.ge.list_objects("road_section", limit=100)  # GE 道路几何
@@ -63,11 +63,11 @@ dao.close()
 
 | 域 | 方法 | 说明 |
 |---|---|---|
-| LO | `passages(from_ts, to_ts, stake, overload_only, limit)` | 过车记录，时间倒序 |
+| LO | `passages(from_ts, to_ts, station, overload_only, limit)` | 过车记录，时间倒序 |
 | LO | `passage(record_id)` | 单条＋轴明细（对象-链接展开） |
 | LO | `axles(record_id)` | 只要轴明细 |
-| LO | `hourly_buckets(day, stake)` | 小时聚合桶 |
-| LO | `daily_summary(day, stake)` | 桶＋汇总（**含超载率与 ESAL 合计口径**） |
+| LO | `hourly_buckets(day, station)` | 小时聚合桶 |
+| LO | `daily_summary(day, station)` | 桶＋汇总（**含超载率与 ESAL 合计口径**） |
 
 > 指标口径（求和、超载占比）刻意放在 DAO 而不是出口服务：它属于**指标语义**，
 > 换口径不应改 M6。
@@ -95,7 +95,7 @@ DAO 抛**语义化异常**，绝不把 psycopg 的类型泄漏给上层（泄漏
 
 | 域 | 中文名 | 已建物理表 | 逻辑视图合计 | 落库 |
 |---|---|---|---|---|
-| GE | 道路几何 | 4 | 5 | 关系库 |
+| GE | 道路几何 | 14 | 14 | 关系库 |
 | SU | 路面表面 | 4 | 4 | 关系库＋对象存储 |
 | RE | 结构响应 | 2 | 3 | 时序库（数据）＋关系库（测点元数据） |
 | LO | 交通荷载 | 3 | 5 | 关系库（按月分区）＋时序 |
@@ -103,15 +103,16 @@ DAO 抛**语义化异常**，绝不把 psycopg 的类型泄漏给上层（泄漏
 | TE | 试验检测 | 3 | 3 | 关系库＋对象存储 |
 | DE | 决策输出 | 5 | 5 | 关系库 |
 
-**21 张域内物理表 ＋ 9 张跨域支撑表（字典 5 ＋ 治理/闭环 4）＝ 30**，
-与 DDL v0.2 的 32 张基表**逐张对齐**（`test_dao_contract.py` 第 1、2 项断言；
+**31 张域内物理表 ＋ 11 张跨域支撑表（字典 5 ＋ 治理/闭环 6）＝ 42**，
+与 DDL v0.3 的 42 张基表**逐张对齐**（`test_dao_contract.py` 第 1、2 项断言；
 三处真源一致性另有 `test_ddl_dict_catalog.py` 逐表比对）。
 
 ### 两张口径不要混
 
-- **逻辑视图 25 表**：报告第五章的**对象域视图**，含尚未建物理表的实体
-  （`geometry_point`、WE 时序、LO 的交通量 v85 与轮迹分布、RE 时序）。
-- **物理 DDL 32 表**（v0.2）：已在 PostgreSQL 实测建的**基表**，含字典与治理支撑表。
+- **7 域逻辑视图 35 表**：各域**实体合计**＝已建物理表 ＋ 逻辑占位（`logical` 字段）。
+  v0.3 前为 25 表（域内物理 21 ＋ 逻辑 4）；GE 域新增 10 张物理表 → **35**。
+  ⚠ `geometry_point` 原为逻辑占位，**已随 v0.3 落地为物理表**，故不再列于 `logical`。
+- **物理 DDL 42 表**（v0.3）：已在 PostgreSQL 实测建的**基表**，含字典与治理支撑表。
 
 差异是真实存在的，故 `Domain` 用具名字段 `tables` / `logical` 分开承载，
 **不把"逻辑视图里有"当成"物理表已建"**。查 `logical` 里的实体会得到 `UnknownTable`。

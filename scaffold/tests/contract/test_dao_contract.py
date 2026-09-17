@@ -56,7 +56,11 @@ from rpdao import (  # noqa: E402
 from rpdao.pool import quote_ident  # noqa: E402
 from rpdao import repo as repo_mod  # noqa: E402
 
-DDL_PATH = ROOT.parent / "output" / "路面性能数据库-DDL-v0.2.sql"
+# 契约② 真源就在本仓库内（scaffold/sql/），不依赖 output/——
+# output/ 是交付物目录、已被 .gitignore 排除，读它会让本测试在干净检出上静默跳过。
+# 历史：本行原为 ROOT.parent/"output"/"路面性能数据库-DDL-v0.2.sql"（重构前的旧位置），
+#       v0.3 修正为真源路径（契约变更工单 #2）。
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
 API_APP = ROOT / "modules" / "M6-api" / "app.py"
 
 

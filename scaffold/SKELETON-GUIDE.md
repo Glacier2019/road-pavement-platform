@@ -86,7 +86,7 @@ docker exec rp-governance python3 -c \
 | # | 契约 | 真源 | 维护人 |
 |---|---|---|---|
 | ① | 报文格式 | `contracts/topics.yaml`、`contracts/messages/*.schema.json` | B 组 |
-| ② | 表结构 | `scaffold/sql/10_ddl_v0.2.sql` | A 组 |
+| ② | 表结构 | `scaffold/sql/10_ddl_v0.3.sql` | A 组 |
 | ③ | DAO 接口 | `scaffold/modules/M3-rpdao/` | A 组 |
 | ④ | 服务接口 | `contracts/openapi/*.yaml` | D 组 |
 
@@ -207,8 +207,9 @@ with dao.write_txn(writer="M2") as tx:
 dao.execute_write("data_import_batch", UPSERT_BATCH, {...}, writer="M2")
 ```
 
-写权对照表在 `modules/M3-rpdao/catalog.py` 的 `TABLE_OWNER`（21 张可写 / 11 张只读）。
+写权对照表在 `modules/M3-rpdao/catalog.py` 的 `TABLE_OWNER`（37 张可写 / 5 张只读）。
 **不在表里的表一律拒写**——这是刻意的：默认允许会让每张新表都自动多一个无人看守的写入口。
+（本行的数字由 `tests/contract/test_write_guard.py` 断言，改了 `TABLE_OWNER` 不改这里，测试会红。）
 
 ### 8.3 三条纪律
 

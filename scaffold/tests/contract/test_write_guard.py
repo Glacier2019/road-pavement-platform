@@ -58,7 +58,7 @@ except ImportError:
 from rpdao.catalog import ALL_TABLES, TABLE_OWNER          # noqa: E402
 
 # 契约② 真源：2026-09-15 由 output/ 搬入 scaffold/sql/（随代码走，因为本测试要读它）
-DDL_PATH = ROOT / "sql" / "10_ddl_v0.2.sql"
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
 
 
 def ddl_unique_keys(table: str) -> list[frozenset[str]]:
@@ -180,6 +180,23 @@ def main() -> int:
     for table in readonly[:6]:
         expect_raise(f"任意模块写只读表 {table}", WriteGuardError,
                      assert_writer, table, "M2")
+
+    # 文档里的写权数字不得漂移。
+    # 起因：SKELETON-GUIDE.md 长期写着「21 张可写 / 11 张只读」——那是 v0.2（32 表）时代的
+    # 旧值，之后加了 10 张 GE 表却没人回头改它。**文档里的硬编码数字就是下一个漂移源**，
+    # 所以把它钉成断言：改了 TABLE_OWNER 不改这句，本测试立刻红。
+    guide = ROOT / "SKELETON-GUIDE.md"
+    if guide.exists():
+        m = re.search(r"（(\d+) 张可写 / (\d+) 张只读）", guide.read_text(encoding="utf-8"))
+        ok = bool(m) and int(m.group(1)) == len(TABLE_OWNER) and int(m.group(2)) == len(readonly)
+        check("SKELETON-GUIDE.md 的写权数字与 catalog 一致", ok,
+              f"文档 {m.group(0) if m else '未找到'} ／ 实际 {len(TABLE_OWNER)} 可写 {len(readonly)} 只读")
+
+    # GE 域骨架四表必须可写 —— 否则「导入一条新道路」在结构上就不可能
+    # （road_line / road_section 原先是只读，只能靠 seed 种入）
+    for t in ("road_line", "road_section", "structure_layer", "monitor_cross_section"):
+        check(f"GE 骨架表 {t} 已登记写权（否则新道路导不进来）",
+              TABLE_OWNER.get(t) == "M2", f"实为 {TABLE_OWNER.get(t)}")
 
     # ---------------------------------------------------------------- 4) 应拒绝：未登记表
     print("\n=== 4) 应拒绝：表不在白名单（表名写错 / 新表没登记进 catalog）===")

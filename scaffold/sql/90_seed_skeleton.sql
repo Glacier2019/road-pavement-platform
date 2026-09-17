@@ -50,7 +50,7 @@ VALUES ('G228', '国道 228 线滨海大通道（福清段）', '福建省福州
         'BZZ-100', 4, 3.75, '福清公路中心', '2025Y095 试验段所在路线')
 ON CONFLICT (line_code) DO NOTHING;
 
-INSERT INTO road_section (line_id, section_name, start_stake, end_stake, start_km, end_km,
+INSERT INTO road_section (line_id, section_name, start_station_text, end_station_text, start_station_km, end_station_km,
                           length_m, direction, pavement_type, climate_zone)
 SELECT l.id, '滨海大通道试验段', 'K4635+000', 'K4654+701', 4635.000, 4654.701,
        19701.0, '双向', '沥青混凝土', '南方湿热滨海'
@@ -72,15 +72,15 @@ WHERE s.section_name = '滨海大通道试验段'
 ON CONFLICT (section_id, layer_no) DO NOTHING;
 
 -- ---------------------------------------------------------------- 监测断面（空间锚点）
-INSERT INTO monitor_cross_section (section_id, stake_text, stake_km, lane_no, purpose, install_date, status, remark)
-SELECT s.id, v.stake_text, v.stake_km, v.lane_no, v.purpose, v.install_date::date, 'active', v.remark
+INSERT INTO monitor_cross_section (section_id, station_text, station_km, lane_no, purpose, install_date, status, remark)
+SELECT s.id, v.station_text, v.station_km, v.lane_no, v.purpose, v.install_date::date, 'active', v.remark
 FROM road_section s
 CROSS JOIN (VALUES
   ('K4640+000', 4640.000, 2::smallint, '轴载调查（WIM）', '2025-06-01', 'mdsite=wim01'),
   ('K4635+710', 4635.710, 2::smallint, '结构响应监测（应变断面）', '2025-06-01', 'mdsite=cs4635_710')
-) AS v(stake_text, stake_km, lane_no, purpose, install_date, remark)
+) AS v(station_text, station_km, lane_no, purpose, install_date, remark)
 WHERE s.section_name = '滨海大通道试验段'
-  AND NOT EXISTS (SELECT 1 FROM monitor_cross_section m WHERE m.stake_km = v.stake_km);
+  AND NOT EXISTS (SELECT 1 FROM monitor_cross_section m WHERE m.station_km = v.station_km);
 
 -- ---------------------------------------------------------------- 设备（sensor_install：MQTT device_code 的注册处）
 INSERT INTO sensor_install (cross_section_id, sensor_type_code, sensor_model, manufacturer,
@@ -91,9 +91,9 @@ FROM monitor_cross_section m
 JOIN (VALUES
   (4640.000, 'WIM_QUARTZ',     'ZDG-40-SY-2', '万集/同类', 'WIM01',     '表面式', NULL::numeric, 'K4640+000 行车道 2 轮迹带', '2025-06-01', 'site_id=wim01'),
   (4635.710, 'STRAIN_ASPHALT', 'KM-100HAS',   '京都先端/同类', 'STRAIN01', '埋入式', 4.0,      'K4635+710 行车道 2 底面', '2025-06-01', 'site_id=cs4635_710')
-) AS v(stake_km, sensor_type_code, sensor_model, manufacturer, serial_no, install_mode,
+) AS v(station_km, sensor_type_code, sensor_model, manufacturer, serial_no, install_mode,
        install_depth_cm, position_desc, install_date, remark)
-  ON v.stake_km = m.stake_km
+  ON v.station_km = m.station_km
 WHERE NOT EXISTS (SELECT 1 FROM sensor_install si WHERE si.serial_no = v.serial_no);
 
 -- ---------------------------------------------------------------- 通道（逻辑测点：质量日志与高频时序都挂在 channel 上）

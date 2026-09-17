@@ -8,7 +8,7 @@
 #       「契约变更工单」（见 MODULE-ONBOARDING.md §4）。
 # 责任人：B（LO/RE 域，主笔）｜ A（设备侧、心跳与设备自管）｜ 导师评审冻结
 # ============================================================================
-version: v0.1
+version: v0.2
 frozen: false
 updated: "2026-09-14"
 
@@ -73,7 +73,7 @@ topics:
     rate: "连续高频 1k–128kHz（按 channel.storage_policy 稀释）"
     qos: 1
     schema: "待定（P2）"
-    sink: "IoTDB：root.road.g228.{stake}.{install_id}.{quantity}"
+    sink: "IoTDB：root.road.g228.{station}.{install_id}.{quantity}"
     owner: B
     status: "P2 实现（骨架栈不覆盖，避免提前引入时序库）"
 

@@ -57,10 +57,10 @@ scaffold/
 ├─ contracts/                      # ★ 模块接入的唯一依据（四份契约 + 模块产出契约）
 │   ├─ topics.yaml                 #   契约一：MQTT 主题 + 载荷信封规范
 │   ├─ messages/wim_axle.v1.schema.json   # 契约一细则：报文 JSON Schema
-│   ├─ openapi/m6-gateway.v0.1.yaml       # 契约四：服务接口（真源为 /openapi.json）
+│   ├─ openapi/m6-gateway.v0.2.yaml       # 契约四：服务接口（真源为 /openapi.json）
 │   ├─ governance/ fusion/ semantic/ apps/ console/ agent/
 │   │                              #   M4/M5/M7/M8/M9/M10 的**产出契约**（草案，待各组定稿）
-│   └─ （契约二：表结构 = scaffold/sql/10_ddl_v0.2.sql，挂载给 PG 初始化）
+│   └─ （契约二：表结构 = scaffold/sql/10_ddl_v0.3.sql，挂载给 PG 初始化）
 ├─ sql/
 │   ├─ 20_partitions.sql           # 分区维护函数 + 建到 2027-12 + 兜底分区
 │   └─ 90_seed_skeleton.sql        # 种子：路线/路段/结构层/断面/设备/通道/字典

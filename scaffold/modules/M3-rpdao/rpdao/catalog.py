@@ -3,15 +3,16 @@
 ============================ 口径与依据 ============================
 1) **7 域的口径**来自报告第五章（原文）：GE 5 表 / SU 4 表 / RE 2 表 / LO 5 表 /
    WE 1 表 / TE 3 表 / DE 5 表，共 **25 表**核心逻辑视图。
-2) **物理表名**逐个取自 scaffold/sql/10_ddl_v0.2.sql 的 A–G 分组，
-   已在本机 PostgreSQL 实测确认为 30 张基表。
+2) **物理表名**逐个取自 scaffold/sql/10_ddl_v0.3.sql 的 A–H 分组，
+   已在本机 PostgreSQL 实测确认为 42 张基表。
 3) 两边**不是一一对应**，差异是真实存在的，故本文件分成两个字段，
    绝不把"逻辑视图里有"当成"物理表已建"：
 
    · ``tables``     —— 已在物理 DDL 里存在的表（可直接查询）
    · ``logical``    —— 报告逻辑视图里有、但物理 DDL 尚未建的表（查询会报 UnknownTable）
 
-4) 21 张域内物理表 ＋ 9 张跨域支撑表 = **30**，与 DDL 实测数吻合，可作为自检。
+4) 31 张域内物理表 ＋ 11 张跨域支撑表 = **42**，与 DDL 实测数吻合，可作为自检。
+   历史：v0.2 = 21 域内 ＋ 11 跨域 = 32。
    自检见 ``tests/contract/test_dao_contract.py``。
 ===================================================================
 """
@@ -31,9 +32,14 @@ class Domain(NamedTuple):
 DOMAINS: dict[str, Domain] = {
     "GE": Domain(
         "GE", "道路几何",
-        ("road_line", "road_section", "structure_layer", "monitor_cross_section"),
-        # 逐桩号线形由设计参数解析/竣工复测得到，DDL v0.1 未单独建表（v0.2 待补）
-        ("geometry_point（逐桩号平/竖曲线·纵坡·超高·横坡，待 v0.2）",),
+        ("road_line", "road_section", "structure_layer", "monitor_cross_section",
+         # ↓ v0.3 新增 10 张：纬地 HintCAD 设计工程文件接入（契约变更工单 #2）
+         "design_project", "design_file", "section_design_attr",
+         "station_sequence", "station_equation",
+         "alignment_pi", "alignment_element",
+         "profile_grade_point", "profile_ground_point", "geometry_point"),
+        # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
+        (),
         "关系库",
     ),
     "SU": Domain(
@@ -52,7 +58,9 @@ DOMAINS: dict[str, Domain] = {
     "LO": Domain(
         "LO", "交通荷载",
         ("wim_axle_record", "wim_axle_detail", "traffic_daily_stat"),
-        ("交通量 v85 统计表（待 v0.2）", "轮迹分布表（待 v0.2）"),
+        # 不绑版本号：曾写"待 v0.2"，v0.2 已发布而这两张仍未建 —— 版本号写进注释
+        # 就会在图件上变成过期标注。是否落地由工单决定，不由注释预告。
+        ("交通量 v85 统计表（逻辑视图，物理未建）", "轮迹分布表（逻辑视图，物理未建）"),
         "关系库（按月分区）＋时序",
     ),
     "WE": Domain(
@@ -84,10 +92,12 @@ CROSS_TABLES: tuple[str, ...] = (
     "quality_rule", "mapping_set",
 )
 
-# DDL v0.2 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
+# DDL v0.3 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
 # 由 tests/contract/test_ddl_dict_catalog.py 强制核对——不允许各自漂移。
-# 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）。
-EXPECTED_PHYSICAL_TABLES = 32
+# 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）；
+#       v0.3 = 42 表（+GE 域 10 张，契约变更工单 #2）。
+#       第二批 11 张（横断面/超高路幅/路基土方/构造物）随 v0.4 落地 → 53 表。
+EXPECTED_PHYSICAL_TABLES = 42
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -103,6 +113,19 @@ TABLE_OWNER: dict[str, str] = {
     "test_project": "M2", "test_sample": "M2", "test_result": "M2",
     # M2 的职责是「数据接入与**设备自管**」，故测点/通道元数据也归它写
     "sensor_install": "M2", "sensor_channel": "M2",
+    # GE 域设计数据（v0.3）：来源＝纬地设计工程文件，写入口同样是 M2 数据接入。
+    # 注意：不登记于此的表是**只读表**（写权守卫默认拒绝），故导入目标表必须显式登记。
+    "design_project": "M2", "design_file": "M2", "section_design_attr": "M2",
+    "station_sequence": "M2", "station_equation": "M2",
+    "alignment_pi": "M2", "alignment_element": "M2",
+    "profile_grade_point": "M2", "profile_ground_point": "M2", "geometry_point": "M2",
+    # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
+    # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
+    # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，
+    # 与「以后有新的道路文件可以同样导入」直接冲突。
+    # 写入口仍是 M2 数据接入（与上面 10 张同源：都来自设计文件）。
+    "road_line": "M2", "road_section": "M2",
+    "structure_layer": "M2", "monitor_cross_section": "M2",
 }
 
 # 全部物理表的白名单（域内 ＋ 跨域）。任何查询都必须命中这张表，否则拒绝。

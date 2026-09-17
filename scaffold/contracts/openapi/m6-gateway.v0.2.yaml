@@ -8,7 +8,7 @@
 openapi: 3.1.0
 info:
   title: M6 统一数据出口（骨架版）
-  version: 0.1.0
+  version: 0.2.0
   description: 对象查询 / 指标查询 / 动作提交三类接口。
 servers:
   - url: http://localhost:8001        # 骨架栈映射端口（容器内 8000）
@@ -70,7 +70,7 @@ paths:
           schema:
             type: string
             format: date-time
-        - name: stake
+        - name: station
           in: query
           schema:
             type: string
@@ -113,7 +113,7 @@ paths:
           schema:
             type: string
             format: date
-        - name: stake
+        - name: station
           in: query
           schema:
             type: string

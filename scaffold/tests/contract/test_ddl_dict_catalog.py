@@ -8,8 +8,8 @@
 ------------------------------------------------------------------------------
 同一件事（"库里有哪几张表"）写在**三个地方**：
 
-    1. ``scaffold/sql/10_ddl_v0.2.sql``   ← 建表的真源（契约②）
-    2. ``scaffold/sql/数据字典-v0.2.md``   ← 给人看的真源
+    1. ``scaffold/sql/10_ddl_v0.3.sql``   ← 建表的真源（契约②）
+    2. ``scaffold/sql/数据字典-v0.3.md``   ← 给人看的真源
 
     ⚠ 这两份 2026-09-15 从 ``output/`` 搬来 ``scaffold/sql/``：它们**不是交付物
       而是契约**——compose 要挂载 DDL 建库、本测试要读它比对，必须随代码走。
@@ -36,8 +36,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT / "modules" / "M3-rpdao") not in sys.path:
     sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
 
-DDL_PATH = ROOT / "sql" / "10_ddl_v0.2.sql"
-DICT_PATH = ROOT / "sql" / "数据字典-v0.2.md"
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
+DICT_PATH = ROOT / "sql" / "数据字典-v0.3.md"
 
 PASS = 0
 FAIL = 0
