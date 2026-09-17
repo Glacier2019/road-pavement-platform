@@ -44,7 +44,8 @@ dao.pool_stats()                 # 连接池水位
 dao.lo.passages(station="K4640+000", limit=200)   # LO 交通荷载
 dao.lo.passage(12345)                           # 单条＋轴明细
 dao.lo.daily_summary(date(2026, 9, 15))         # 小时桶＋汇总
-dao.ge.list_objects("road_section", limit=100)  # GE 道路几何
+dao.ge.sections()                              # GE 道路几何：全部路段
+dao.ge.completeness(6)                          #   为什么只有 L2
 dao.domain("DE").get("alarm_rule", 1)           # 显式取域
 dao.close()
 ```
@@ -68,9 +69,44 @@ dao.close()
 | LO | `axles(record_id)` | 只要轴明细 |
 | LO | `hourly_buckets(day, station)` | 小时聚合桶 |
 | LO | `daily_summary(day, station)` | 桶＋汇总（**含超载率与 ESAL 合计口径**） |
+| GE | `sections()` | 全部路段（含所属路线/项目/分段属性 + 三类几何计数） |
+| GE | `section(section_id)` | 单条路段；不存在抛 `NotFound` |
+| GE | `stations(section_id, from_km, to_km, integer_only, limit)` | 桩号序列，可按区间/整桩筛 |
+| GE | `alignment(section_id)` | 平面线形：交点链 + 线元链（**一次取回**） |
+| GE | `completeness(section_id)` | 几何完整度报告（等级 + 依据 + 缺口） |
 
 > 指标口径（求和、超载占比）刻意放在 DAO 而不是出口服务：它属于**指标语义**，
 > 换口径不应改 M6。
+
+### GE 为什么不能照搬 `list_objects`
+
+GE 的数据不是"一堆并列对象"，而是**以 `road_section` 为根的一棵树**：
+`station_sequence` / `alignment_pi` / `alignment_element` 全部锚在路段上。
+平铺查「所有交点」在只有一个路段时看着没问题，**路段一多就静默串台** ——
+把 A 路的交点混进 B 路的线形，而两条路的桩号都从 0 开始，混了也看不出来。
+所以 GE 的方法一律**按路段取子树**，不提供无 section 的平铺查。
+
+两个**实测出来的**坑，写在这里以免下次重踩：
+
+1. **锚定列不统一**。多数表锚在 `section_id`；`profile_ground_point` 与
+   `geometry_point` 锚在 **`station_id`**（它们是逐桩数据，桩号才是它们的父）。
+   所以锚定列声明在 `GeRepository.SEGMENT_ANCHOR` 里、SQL 由 `count_sql()` 生成，
+   **不要手写 SQL** —— 手写就会与声明脱钩，而契约测试正是拿声明去核对 DDL 的。
+2. **可选筛选项一律显式 cast**（同 `LoRepository.PASSAGES_SQL` 那条）：参数传 NULL 时
+   PostgreSQL 无法从 `(%(x)s IS NULL OR ...)` 推断类型，抛 `AmbiguousParameter`，
+   接口恒定 500。语法编译查不出、只有真发一次请求才暴露。
+
+### 几何等级是**现算的派生量**，不是存下来的字段
+
+`completeness()` 返回的等级由"哪些段有数据"当场推出，并把依据（每张表的行数）
+一并返回，让结论**可被核对**。规则 `LEVEL_RULES` 与 M2 的
+`adapters/base._LEVEL_RULES` 必须一致 —— M3 不许 import M2（模块之间只认契约），
+所以规则只能各写一遍，**靠契约测试把两遍钉在一起**（`test_dao_contract.py` 第 6 组）。
+改一边忘了另一边，测试就红。
+
+缺口分两类报，因为含义不同：`missing_not_built`（schema 没到，如 v0.4 的横断面）
+与 `missing_no_data`（表建好了但解析器没做）。混为一谈会让"为什么只有 L2"
+得到**错误答案**。
 
 ---
 

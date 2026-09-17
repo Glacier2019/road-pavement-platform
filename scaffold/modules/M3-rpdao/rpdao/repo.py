@@ -2,7 +2,8 @@
 
 分层约定：
   · ``DomainRepository``：通用能力（按表列/取单条/计数），只允许访问本域的表。
-  · ``LoRepository`` 等：域特有查询（语义化命名，如 ``passages()`` 而不是拼 SQL）。
+  · ``LoRepository`` / ``GeRepository`` 等：域特有查询（语义化命名，如 ``passages()``、
+    ``stations()``，而不是让上层拼 SQL）。
   · 上层（M6）调用的是 ``dao.lo.passages(...)`` 这种**业务语义**方法，
     而不是 SQL 字符串——这样表结构变化时，改动被关在 DAO 内部。
 """
@@ -181,7 +182,215 @@ class LoRepository(DomainRepository):
 
 
 # ---------------------------------------------------------------------- 工厂
-_BUILDERS = {"LO": LoRepository}
+class GeRepository(DomainRepository):
+    """GE 道路几何域。
+
+    为什么这个域不能照搬 `list_objects` 那套平铺查
+    ---------------------------------------------------------------------------
+    GE 的数据不是"一堆并列对象"，而是**以 `road_section` 为根的一棵树**：
+    `station_sequence` / `alignment_pi` / `alignment_element` 全部 FK 锚在 section 上。
+    平铺查「所有交点」在只有一个路段时看着没问题，路段一多就**静默串台**——
+    把 A 路的交点混进 B 路的线形里，而两条路的桩号都从 0 开始，混了也看不出来。
+    所以这里的方法一律**按路段取子树**，不带 section 的取法不提供。
+
+    ⚠ 可选筛选项一律显式 cast（见 `LoRepository.PASSAGES_SQL` 的说明）：
+    参数传 NULL 时 PostgreSQL 无法从 `(%(x)s IS NULL OR ...)` 推断类型，
+    会抛 `AmbiguousParameter`，接口恒定 500。骨架期实跑复现过。
+    """
+
+    #: 路段列表。以 road_section 为根，挂上所属路线、设计项目、分段属性和三类几何计数。
+    #: 等级不在这里算（见 completeness()），避免"列表页"被迫扫全表。
+    SECTIONS_SQL = """
+    SELECT s.id, s.section_name, s.start_station_text, s.end_station_text,
+           s.start_station_km, s.end_station_km, s.length_m,
+           s.pavement_type, s.climate_zone,
+           l.id   AS line_id,   l.line_code, l.line_name, l.road_class,
+           l.design_speed, l.lane_count,
+           p.id   AS project_id, p.project_name, p.project_uid, p.designer,
+           a.road_grade, a.design_speed_kmh, a.cross_section_form, a.roadway_width_m,
+           (SELECT count(*) FROM station_sequence  t WHERE t.section_id = s.id) AS station_count,
+           (SELECT count(*) FROM alignment_pi      t WHERE t.section_id = s.id) AS pi_count,
+           (SELECT count(*) FROM alignment_element t WHERE t.section_id = s.id) AS element_count
+    FROM road_section s
+    JOIN road_line l        ON l.id = s.line_id
+    LEFT JOIN design_project p      ON p.id = s.design_project_id
+    LEFT JOIN section_design_attr a ON a.section_id = s.id
+    ORDER BY l.line_code, s.id
+    """
+
+    ONE_SECTION_SQL = """
+    SELECT s.id, s.section_name, s.start_station_text, s.end_station_text,
+           s.start_station_km, s.end_station_km, s.length_m,
+           s.pavement_type, s.climate_zone, s.direction,
+           l.line_code, l.line_name, l.road_class, l.design_speed, l.lane_count,
+           p.project_name, p.project_uid,
+           a.road_grade, a.cross_section_form, a.roadway_width_m,
+           a.carriageway_crossfall_pct, a.shoulder_crossfall_pct,
+           a.max_superelev_pct, a.superelev_rotate_mode, a.widening_mode
+    FROM road_section s
+    JOIN road_line l        ON l.id = s.line_id
+    LEFT JOIN design_project p      ON p.id = s.design_project_id
+    LEFT JOIN section_design_attr a ON a.section_id = s.id
+    WHERE s.id = %(sid)s::bigint
+    """
+
+    #: 桩号序列。**桩号是 GE 域的一等实体**：其余逐桩数据全部锚在它上面，
+    #: 所以这个查询是几何浏览页的主视图。
+    STATIONS_SQL = """
+    SELECT station_seq_no, station_local_km, station_absolute_km,
+           station_text, station_type, is_integer_station
+    FROM station_sequence
+    WHERE section_id = %(sid)s::bigint
+      AND (%(from_km)s::numeric IS NULL OR station_local_km >= %(from_km)s::numeric)
+      AND (%(to_km)s::numeric   IS NULL OR station_local_km <= %(to_km)s::numeric)
+      AND (%(integer_only)s::boolean = false OR is_integer_station = true)
+    ORDER BY station_seq_no
+    LIMIT %(limit)s::int
+    """
+
+    PIS_SQL = """
+    SELECT pi_seq, pi_type, x_coord, y_coord, radius_m,
+           spiral_ls1_m, spiral_ls2_m, spiral_a1, spiral_a2,
+           prev_tangent_len_m, tangent_len_m, tangent_len2_m,
+           arc_len_m, curve_len_m, deflection_deg, external_m
+    FROM alignment_pi
+    WHERE section_id = %(sid)s::bigint
+    ORDER BY pi_seq
+    """
+
+    #: 线形单元。`pi_id` 为空的是**直线段**——直线不属于任何交点，这是正常的，
+    #: 不是漏挂（实测 33 个单元里 9 条直线、`pi_id` 全空，双向都成立）。
+    ELEMENTS_SQL = """
+    SELECT e.element_seq, e.element_type, e.pi_id,
+           e.start_station_km, e.end_station_km, e.length_m,
+           e.start_x, e.start_y, e.end_x, e.end_y,
+           e.center_x, e.center_y, e.azimuth_deg, e.end_azimuth_deg,
+           e.radius_start_m, e.radius_end_m,
+           p.pi_seq
+    FROM alignment_element e
+    LEFT JOIN alignment_pi p ON p.id = e.pi_id
+    WHERE e.section_id = %(sid)s::bigint
+    ORDER BY e.element_seq
+    """
+
+    #: 几何完整度等级规则。**必须与 M2 `adapters/base._LEVEL_RULES` 一致。**
+    #:
+    #: 为什么要写两遍：M3 不许 import M2（模块之间只认契约，见架构约定），
+    #: 而"哪个段齐了算几级"这条规则两边都要用。既然只能各写一遍，
+    #: 就用测试把两遍钉在一起（tests/contract/test_dao_contract.py 里有交叉核对）。
+    #: 改这里必须同时改那边，否则测试会红。
+    LEVEL_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("L4", ("cross_section",)),
+        ("L3", ("profile_grade_point", "profile_ground_point")),
+        ("L2", ("alignment_pi", "alignment_element")),
+        ("L1", ("station_sequence",)),
+    )
+
+    #: 段 → (表, **定位列**)。
+    #:
+    #: 定位列**不统一**，这是实测出来的，不是推测：
+    #:   · 多数表锚在 `section_id` 上（它们直接属于某个路段）；
+    #:   · `profile_ground_point` / `geometry_point` 锚在 **`station_id`** 上
+    #:     —— 它们是逐桩数据，桩号才是它们的父，故只能先按路段取出桩号再定位。
+    #:
+    #: 之所以把"锚定列"声明成**数据**而不是直接写四条 SQL：这样"锚定列是否真实存在"
+    #: 这条检查就变成对**数据**比对，不必去解析 SQL。第一版写成四条手写 SQL 时，
+    #: 检查器只能拿整条 SQL 里的 `WHERE x =` 去比外层表，结果被**子查询里的
+    #: `WHERE section_id =`（那是 station_sequence 的列）假报了一次 ——
+    #: 检查器自身的假报比漏报更消耗信任，所以改成现在这样。
+    SEGMENT_ANCHOR: dict[str, tuple[str, str]] = {
+        "station_sequence":    ("station_sequence",    "section_id"),
+        "station_equation":    ("station_equation",    "section_id"),
+        "alignment_pi":        ("alignment_pi",        "section_id"),
+        "alignment_element":   ("alignment_element",   "section_id"),
+        "profile_grade_point": ("profile_grade_point", "section_id"),
+        "profile_ground_point": ("profile_ground_point", "station_id"),
+        "geometry_point":      ("geometry_point",      "station_id"),
+    }
+
+    #: 逐桩定位列的名字。值为它时，计数要经 `station_sequence` 中转。
+    STATION_ANCHOR: str = "station_id"
+
+    #: 属 DDL v0.4 第二批、**表还没建**的段。与"表已建但 0 行"含义不同：
+    #: 前者是 schema 没到，后者是解析器没做。混为一谈会让"为什么只有 L2"
+    #: 这个问题得到错误答案。
+    SEGMENTS_NOT_BUILT: tuple[str, ...] = ("cross_section",)
+
+    @classmethod
+    def count_sql(cls, seg: str) -> str:
+        """由 `SEGMENT_ANCHOR` 生成计数 SQL（**不要手写**，手写就会与声明脱钩）。"""
+        table, col = cls.SEGMENT_ANCHOR[seg]
+        if col == cls.STATION_ANCHOR:
+            return (f"SELECT count(*) FROM {table} WHERE {col} IN "
+                    f"(SELECT id FROM station_sequence WHERE section_id = %(sid)s::bigint)")
+        return f"SELECT count(*) FROM {table} WHERE {col} = %(sid)s::bigint"
+
+    def sections(self) -> list[dict[str, Any]]:
+        """所有路段（含所属路线/项目/分段属性/三类几何计数）。"""
+        return self._dao.query(self.SECTIONS_SQL)
+
+    def section(self, section_id: int) -> dict[str, Any]:
+        row = self._dao.query_one(self.ONE_SECTION_SQL, {"sid": section_id})
+        if row is None:
+            raise NotFound(f"路段不存在：section_id={section_id}")
+        return row
+
+    def stations(self, section_id: int, *, from_km: float | None = None,
+                 to_km: float | None = None, integer_only: bool = False,
+                 limit: int = 500) -> list[dict[str, Any]]:
+        """某路段的桩号序列，可按区间/是否整桩筛。"""
+        return self._dao.query(self.STATIONS_SQL, {
+            "sid": section_id, "from_km": from_km, "to_km": to_km,
+            "integer_only": integer_only, "limit": limit,
+        })
+
+    def alignment(self, section_id: int) -> dict[str, Any]:
+        """某路段的平面线形：交点链 + 线形单元链（一次取回，前端不必拼两次）。"""
+        return {
+            "section_id": section_id,
+            "pis": self._dao.query(self.PIS_SQL, {"sid": section_id}),
+            "elements": self._dao.query(self.ELEMENTS_SQL, {"sid": section_id}),
+        }
+
+    def completeness(self, section_id: int) -> dict[str, Any]:
+        """几何完整度报告：**为什么是 L2 而不是 L3**，要能一眼看出来。
+
+        等级本身是派生量（由"哪些段有数据"决定），不是存下来的字段 ——
+        所以这里现算，并把算它的依据（每张表的行数）一并返回，
+        让"等级"这个结论**可被核对**，而不是一个只能相信的字符串。
+        """
+        counts: dict[str, int] = {}
+        for seg in self.SEGMENT_ANCHOR:
+            counts[seg] = int(self._dao.scalar(self.count_sql(seg), {"sid": section_id}) or 0)
+        # 表还没建的段：记为 0 参与判级，但在 missing 里与"表已建但没数据"分开报
+        for seg in self.SEGMENTS_NOT_BUILT:
+            counts[seg] = 0
+
+        level = "L0"
+        reason = "没有任何几何段"
+        for lv, required in self.LEVEL_RULES:
+            hit = [s for s in required if counts.get(s)]
+            if hit:
+                level, reason = lv, f"{'／'.join(hit)} 有数据"
+                break
+
+        present = {s: n for s, n in counts.items() if n}
+        missing = [s for s in counts if not counts.get(s)]
+        return {
+            "section_id": section_id,
+            "geometry_level": level,
+            "level_reason": reason,
+            "present": present,
+            "missing": missing,
+            # 分开报：表还没建（schema 没到）≠ 表已建但没数据（解析器没做）
+            "missing_not_built": [s for s in self.SEGMENTS_NOT_BUILT],
+            "missing_no_data": [s for s in missing
+                                if s not in self.SEGMENTS_NOT_BUILT],
+            "counts": counts,
+        }
+
+
+_BUILDERS = {"LO": LoRepository, "GE": GeRepository}
 
 
 def build_repository(code: str, dao: "Dao") -> DomainRepository:

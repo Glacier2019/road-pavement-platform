@@ -71,6 +71,48 @@ def ddl_tables() -> list[str]:
                       DDL_PATH.read_text(encoding="utf-8"))
 
 
+def ddl_columns(table: str) -> set[str]:
+    """离线从 DDL 里取某张表的列名（不触库，干净检出上也能跑）。"""
+    if not DDL_PATH.exists():
+        return set()
+    body = re.search(
+        r"CREATE TABLE IF NOT EXISTS\s+" + re.escape(table) + r"\s*\((.*?)\n\);",
+        DDL_PATH.read_text(encoding="utf-8"), re.S)
+    if not body:
+        return set()
+    cols: set[str] = set()
+    for line in body.group(1).splitlines():
+        m = re.match(r"\s*([a-z_][a-z0-9_]*)\s+[a-zA-Z]", line)
+        if m and m.group(1).upper() not in (
+                "PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT"):
+            cols.add(m.group(1))
+    return cols
+
+
+def bad_anchor_columns(anchor: dict[str, tuple[str, str]]) -> list[str]:
+    """检查声明的**锚定列**是否真实存在于它声明的那张表里。
+
+    为什么单拎成一个函数：这条检查**真的抓到过 bug**。
+    `profile_ground_point` 与 `geometry_point` 锚在 `station_sequence.id` 上，
+    而不是 `section_id`（它们是逐桩数据，桩号才是它们的父）。按 `section_id` 写会抛
+    UndefinedColumn，一眼可见；可若改成"猜不到就当 0"的写法，表现就是**静默的 0**，
+    也就是几何等级虚低 —— 那才难查。
+
+    比对的是**声明出来的数据**（`SEGMENT_ANCHOR`），不是解析出来的 SQL。
+    第一版比的是手写 SQL，结果被**子查询里的** `WHERE section_id =`（那是
+    `station_sequence` 的列）假报了一次 —— 检查器自身的假报比漏报更消耗信任，
+    所以把锚定列改成声明式，检查也就变成了单纯的数据比对。
+    """
+    bad: list[str] = []
+    for seg, (table, col) in anchor.items():
+        cols = ddl_columns(table)
+        if not cols:
+            bad.append(f"{seg}: DDL 里没有表 {table}")
+        elif col not in cols:
+            bad.append(f"{seg}: 表 {table} 没有列 {col}")
+    return bad
+
+
 def main() -> int:
     fails: list[str] = []
 
@@ -193,6 +235,70 @@ def main() -> int:
         print(f"  ✓ {checked} 处 IS NULL 占位符全部带显式 cast")
     elif not checked:
         print("  ⚠ 未扫到 IS NULL 占位符（SQL 结构可能变了，请复查本检查是否还有效）")
+
+    # ------------------------------------------- 6) GE 域仓储（以路段为根的树）
+    print("\n=== 6) GE 域仓储：几何是按路段组织的树，不是平铺对象 ===")
+
+    def ok(label: str, cond: bool, detail: str = "") -> None:
+        if cond:
+            print(f"  ✓ {label}")
+        else:
+            print(f"  ✗ {label}" + (f"　{detail}" if detail else ""))
+            fails.append(label)
+
+    ok("GeRepository 已注册进 _BUILDERS",
+       repo_mod._BUILDERS.get("GE") is repo_mod.GeRepository)
+    ok("GeRepository 已导出（from rpdao import GeRepository）",
+       getattr(__import__("rpdao"), "GeRepository", None) is repo_mod.GeRepository)
+    ok("dao.ge 解析成 GeRepository（域仓储属性）",
+       isinstance(Dao("postgresql://x/y", app_name="t").ge, repo_mod.GeRepository))
+    ok("dao.GE 与 dao.ge 同源（domain() 大小写不敏感）",
+       type(Dao("postgresql://x/y", app_name="t").domain("GE")) is repo_mod.GeRepository)
+
+    # ★ 等级规则 M3/M2 各写一遍（M3 不许 import M2），用测试把两遍钉在一起
+    sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
+    from adapters import base as m2base                       # noqa: PLC0415
+    ok("★ 交叉核对：GeRepository.LEVEL_RULES == M2 base._LEVEL_RULES",
+       tuple(repo_mod.GeRepository.LEVEL_RULES) == tuple(m2base._LEVEL_RULES),
+       f"M3={repo_mod.GeRepository.LEVEL_RULES} M2={m2base._LEVEL_RULES}")
+    m3_segs = set(repo_mod.GeRepository.SEGMENT_ANCHOR) | set(
+        repo_mod.GeRepository.SEGMENTS_NOT_BUILT)
+    ok("★ 交叉核对：M3 覆盖的段集合 == M2 声明的 SEGMENTS（不多不少）",
+       m3_segs == set(m2base.SEGMENTS),
+       f"M3 独有 {m3_segs - set(m2base.SEGMENTS)}；M2 独有 {set(m2base.SEGMENTS) - m3_segs}")
+
+    # ★★ 抓过 bug 的检查：声明的锚定列必须真实存在于它声明的那张表里
+    anchor = repo_mod.GeRepository.SEGMENT_ANCHOR
+    bad = bad_anchor_columns(anchor)
+    ok("★★ 每个段的锚定列都真实存在于它声明的表里", not bad, str(bad))
+    # 元测试：喂一份故意写错的锚定，检查必须报出来 —— 否则它是个摆设
+    probe = bad_anchor_columns({"probe": ("profile_ground_point", "section_id")})
+    ok("元测试：故意写错锚定列时该检查**确实会报**（不是摆设）",
+       len(probe) == 1 and "没有列 section_id" in probe[0], str(probe))
+    ok("元测试：表名不存在时也会报",
+       len(bad_anchor_columns({"p": ("无此表", "id")})) == 1)
+    ok("元测试：正确的锚定列不会被误报（阈值不过紧）",
+       not bad_anchor_columns({"p": ("profile_ground_point", "station_id")}))
+    ok("锚定列只有两种取值（section_id / station_id），与 STATION_ANCHOR 声明一致",
+       {c for _, c in anchor.values()} == {"section_id", repo_mod.GeRepository.STATION_ANCHOR})
+    ok("SEGMENT_ANCHOR 的表全部属于 GE 域（没有指向别的域的表）",
+       {t for t, _ in anchor.values()} <= set(DOMAINS["GE"].tables))
+    ok("count_sql 由声明生成，且逐桩表走 station_sequence 中转",
+       "IN (SELECT id FROM station_sequence" in repo_mod.GeRepository.count_sql("geometry_point")
+       and "IN (SELECT id" not in repo_mod.GeRepository.count_sql("alignment_pi"))
+    try:
+        repo_mod.GeRepository.count_sql("no_such_segment")
+    except KeyError:
+        print("  ✓ 未声明的段 → KeyError（不会被当成 0 行）")
+    else:
+        print("  ✗ 未声明的段未抛 KeyError")
+        fails.append("未声明的段未抛 KeyError")
+
+    ok("GE 不提供「无 section 的平铺查」（路段一多就会静默串台）",
+       not any(hasattr(repo_mod.GeRepository, m)
+               for m in ("all_pis", "all_elements", "all_stations", "all_sections_flat")))
+    ok("SEGMENTS_NOT_BUILT 只声明了 v0.4 的横断面（与契约② 批次一致）",
+       repo_mod.GeRepository.SEGMENTS_NOT_BUILT == ("cross_section",))
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0

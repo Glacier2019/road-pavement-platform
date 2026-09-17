@@ -26,13 +26,14 @@ from .errors import (
     UnknownTable,
 )
 from .pool import Dao
-from .repo import DomainRepository, LoRepository
+from .repo import DomainRepository, GeRepository, LoRepository
 
 __version__ = "0.2.0"
 
 __all__ = [
     "Dao",
     "DomainRepository",
+    "GeRepository",
     "LoRepository",
     "DOMAINS",
     "CROSS_TABLES",
