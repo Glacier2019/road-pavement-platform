@@ -15,12 +15,19 @@
 --   （实测 84 = 44 普通表 + 39 分区子表 + 1 分区父表），拿 84 去比契约里的
 --   EXPECTED_PHYSICAL_TABLES = 44 会以为对不上。分区是设计使然，不是错。
 -- ─────────────────────────────────────────────────────────────────────────────
--- 契约口径 = relkind='r' 且**非分区子表**（实测 44，与 catalog.py 的
--- EXPECTED_PHYSICAL_TABLES 一致）。注意别再算进 relkind='p' 的分区**父表**
--- （本库是 wim_axle_record），那样会数出 45。
-select count(*) filter (where c.relkind = 'r' and not c.relispartition) as "契约口径(应=44)",
-       count(*) filter (where c.relkind = 'r' and c.relispartition)     as "分区子表",
-       count(*) filter (where c.relkind = 'p')                          as "分区父表(不计入契约)"
+-- ⚠⚠ 这里有个**骗人的巧合**，务必看清：
+--   · 契约目录 catalog.ALL_TABLES 的 44 = **我们的 44 张表**（含分区**父表**
+--     wim_axle_record，不含 PostGIS 自带的 spatial_ref_sys）。
+--   · 而库里 "relkind='r' 且非分区子表" **也是 44** —— 但那是「我们的 43 张
+--     + PostGIS 的 spatial_ref_sys」。**数字对上了，理由却是错的。**
+--   所以别用 relkind='r' 数。正确口径是下面这个：
+--     relkind in ('r','p') 且非分区子表，再排掉 spatial_ref_sys。
+--   更权威的比对是契约测试 —— 它拿 catalog.ALL_TABLES 跟库**逐名**对，不是数个数。
+select count(*) filter (where c.relkind in ('r', 'p') and not c.relispartition
+                          and c.relname <> 'spatial_ref_sys') as "我们的物理表(应=44)",
+       count(*) filter (where c.relkind = 'p')                       as "分区父表(wim_axle_record)",
+       count(*) filter (where c.relkind = 'r' and c.relispartition)  as "分区子表",
+       count(*) filter (where c.relname = 'spatial_ref_sys')         as "PostGIS 自带表"
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
  where n.nspname = 'public';

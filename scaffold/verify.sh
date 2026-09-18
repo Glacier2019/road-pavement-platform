@@ -32,19 +32,27 @@ fi
 
 # ── 2. 数据库 ────────────────────────────────────────────────────────────────
 if [ "$part" = all ] || [ "$part" = db ]; then
-  # ⚠ 数"44 张表"必须用契约目录自己的口径：relkind='r' 且**非分区子表**。
-  #   information_schema 会把分区子表和分区父表也数进去（实测 84 = 44 + 39 + 1），
-  #   拿 84 去比契约里的 EXPECTED_PHYSICAL_TABLES = 44 会以为对不上。
-  head_ "② 数据库（物理表 44 张 = 域内 35 + 跨域 9；另有时序分区子表，属设计使然）"
+  # ⚠ 数表的口径坑（两个"44"是**巧合**，别被对上号骗了）：
+  #   · 契约目录（catalog.ALL_TABLES）的 44 = 我们的 44 张表，含分区**父表**
+  #     wim_axle_record，不含 PostGIS 自带的 spatial_ref_sys。
+  #   · 库里 "relkind='r' 且非分区子表" 也是 44，但那是 **我们的 43 张 +
+  #     PostGIS 的 spatial_ref_sys** —— 数字对上了，理由却是错的。
+  #   正确口径：relkind in ('r','p') 非分区子表，再排掉 spatial_ref_sys。
+  #   权威比对是契约测试（它拿 catalog.ALL_TABLES 跟库逐名对），不是数个数。
+  head_ "② 数据库（我们的物理表 44 张 = 域内 35 + 跨域 9；另有分区子表，属设计使然）"
   psql_ -c "
-    select count(*) filter (where not c.relispartition) as 契约口径_物理表数,
-           count(*) filter (where c.relispartition)     as 分区子表
+    select count(*) filter (where c.relkind in ('r','p') and not c.relispartition
+                              and c.relname <> 'spatial_ref_sys') as 契约口径_我们的表,
+           count(*) filter (where c.relkind = 'p')                       as 分区父表,
+           count(*) filter (where c.relkind = 'r' and c.relispartition)  as 分区子表,
+           count(*) filter (where c.relname = 'spatial_ref_sys')         as PostGIS自带表
       from pg_class c join pg_namespace n on n.oid = c.relnamespace
-     where n.nspname = 'public' and c.relkind = 'r';"
+     where n.nspname = 'public';"
   psql_ -c "
-    select count(*) as 契约目录期望值 from (select 1) x
-     where (select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace
-             where n.nspname='public' and c.relkind='r' and not c.relispartition) = 44;"
+    select '若按 relkind=r 数（含 PostGIS 表，数字也是 44 但理由错）' as 对照,
+           count(*) as n
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname='public' and c.relkind='r' and not c.relispartition;"
 
   head_ "③ 你关心的两张设计输入表"
   psql_ -c "
