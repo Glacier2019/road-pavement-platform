@@ -133,6 +133,10 @@ def build_ir(project_dir: str | pathlib.Path, *,
     segments: dict[str, Any] = {}
     reasons: dict[str, str] = {}
     version: str | None = None
+    # 每个文件自己声明的厂商版本。**不能只留第一个**：实测这套工程里
+    # .STA 是 5.84，而 .JD/.pm/.DMX/.ZDM 都是 5.83 —— 只留第一个的话，
+    # "另外四个文件是另一个版本"这件事会被静默吃掉，而跨版本格式差异无从保证。
+    versions: dict[str, str] = {}
 
     for seg in CAPABILITIES:
         suffix, kind = SEGMENT_FILES[seg]
@@ -159,8 +163,12 @@ def build_ir(project_dir: str | pathlib.Path, *,
                 raise SourceInvalid(f"魔数不匹配，可能不是纬地 {suffix} 文件", file=path.name)
             out = parser.parse(text, file=path.name)
             version = version or out["vendor_version"]
+            versions[seg] = out["vendor_version"]
             segments[seg] = out[parser.PAYLOAD_KEY]
-            files.append({"name": path.name, "kind": kind, "parse_status": "ok", "note": None})
+            # note 是自由文本，正好用来记该文件自报的版本 —— 这样"哪个文件是哪个版本"
+            # 在 source.files 里逐条可见，而不是只留一个汇总值。
+            files.append({"name": path.name, "kind": kind, "parse_status": "ok",
+                          "note": f"厂商版本 {out['vendor_version']}"})
         except SourceInvalid as exc:
             # 解码失败（既不是 UTF-8 也不是 GBK）或魔数不符都在这里。
             # 原来的写法只捕 UnicodeDecodeError，还把原因写成"非 UTF-8/ASCII 文本，
@@ -176,9 +184,25 @@ def build_ir(project_dir: str | pathlib.Path, *,
     # 只有两段都拿到才能做的跨文件动作。单看一份文件做不了这些事。
     warns: list[str] = []
 
+    # ⓪ 混版告警：同一套工程里出现了多个厂商版本。放在最前，因为它是"整批数据的
+    #    来源前提"，后面那些对质结论都建立在"格式一致"这个假设上。
+    #    实测：.STA=5.84，.JD/.pm/.DMX/.ZDM=5.83。
+    if len(set(versions.values())) > 1:
+        detail = "、".join(f"{SEGMENT_FILES[s][0]}（{SEGMENT_FILES[s][1]}）={v}"
+                           for s, v in versions.items())
+        warns.append(
+            f"同一套工程混用了 {len(set(versions.values()))} 个厂商版本：{detail}。"
+            f"source.vendor_version 只取了先读到的那个（{version}），**它不代表全部文件**；"
+            f"跨版本的格式差异无从保证，按需请对具体文件分别核对")
+
     # ① 把线形单元挂到交点，并拿 .JD 由坐标独立算出的转角符号去核对 .pm 的转向符号。
     if segments.get("alignment_element") and segments.get("alignment_pi"):
-        warns = _link_elements_to_pi(segments["alignment_element"], segments["alignment_pi"])
+        # 必须 +=，不能 = —— 它是赋值就会把**排在它前面的告警全部抹掉**。
+        # 原写法是 =（当年它是第一条，后面几条都用了 +=，只有它没有），
+        # 于是本轮新加的"混版告警"算出来了却被静默覆盖，页面上一条都看不到。
+        # 这类"算了但丢掉"不报错，和本会话其它几个坑同一性质。
+        warns += _link_elements_to_pi(segments["alignment_element"],
+                                      segments["alignment_pi"])
 
     # ② 纵断面地面线逐桩对账 .STA。`.DMX` 自己**没有计数行**，行数不可自证；
     #    而它入库时锚的是 station_id —— 对不上就会错位，且错位不报错。

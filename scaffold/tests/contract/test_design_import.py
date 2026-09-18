@@ -436,6 +436,23 @@ def main() -> int:
     check("元测试：计数行自校验非摆设（声明值与实际值不等必须能被构造出来）",
           len(_z["points"]) == 2 and 5 != len(_z["points"]))
 
+    # ── 第 5b 组：IR 里"告警"这个键的位置（专治上面那类假绿）──────────────
+    print("\n第 5b 组  IR 告警键的位置与空值语义")
+    _w_ir = base.make_ir(vendor="weidi", origin="x", files=[], capabilities=(),
+                         segments={}, warnings=["故意放一条告警"])
+    check("★ 告警在 IR **根**键 warnings（不在 source 下）",
+          _w_ir.get("warnings") == ["故意放一条告警"]
+          and "warnings" not in _w_ir["source"],
+          f"根={_w_ir.get('warnings')} source={sorted(_w_ir['source'])}")
+    _n_ir = base.make_ir(vendor="weidi", origin="x", files=[], capabilities=(), segments={})
+    check("★ 无告警时**不输出**该键（保持紧凑）—— 故读取必须用 .get(…, [])",
+          "warnings" not in _n_ir, sorted(_n_ir))
+    # 元测试：把键写错时必须能被抓出来 —— 这正是我犯过的错
+    check("★ 元测试：读错键（source 下）会恒为 []，本条断言能识别这种假绿",
+          _w_ir.get("warnings") == ["故意放一条告警"]
+          and _w_ir["source"].get("warnings", []) == []
+          and _w_ir["source"].get("warnings", []) != _w_ir.get("warnings"))
+
     # ── 第 6 组：真实完整文件（可选，docpipe/ 不入库）──────────────────────
     print("\n第 6 组  真实完整工程文件（可选：docpipe/ 未入库，干净检出会跳过）")
     if d and REAL_DIR.is_dir():
@@ -465,9 +482,30 @@ def main() -> int:
                   f"实为 {gpts[0]['ground_elev_m']}")
             check("地面线终点 65.543 m", abs(gpts[-1]["ground_elev_m"] - 65.543) < 1e-9,
                   f"实为 {gpts[-1]['ground_elev_m']}")
+        # ★ 这里原来写的是 full["source"].get("warnings", []) —— 而 **source 下
+        #   根本没有 warnings 键**（告警在 IR **根**上，见 make_ir）。于是那个表达式
+        #   恒为 []，"无告警"恒成立：**一个永远不会失败的检查**。
+        #   它恰恰是用来证明 .DMX↔.STA 逐桩对账没问题的，所以它假绿最要命。
+        # 直接调对账函数，**不在告警文本里找子串**：混版告警里就含
+        # "纵断面地面线文件" 这几个字，拿 "地面线" 当过滤条件会误伤无关告警
+        # ——修好键名之后这条立刻红了，红的正是这个误伤。
+        _dmx_w = dmx.check_against_stations(full["segments"]["profile_ground_point"],
+                                            full["segments"]["station_sequence"])
         check("地面线与桩号逐条对齐 → 无跨文件告警（.DMX 自己没有计数行，只能对账验）",
-              not any("地面线" in w for w in full["source"].get("warnings", [])),
-              str(full["source"].get("warnings")))
+              _dmx_w == [], str(_dmx_w))
+        # ★ 真实工程里 .STA=5.84、.JD/.pm/.DMX/.ZDM=5.83，混版是**事实**，
+        #   所以这条必须能读到告警。它同时钉住一个真 bug：链路里第一步曾用
+        #   `warns = ...` 而不是 `+=`，把排在它前面的告警全部抹掉（不报错）。
+        _mw = [w for w in full.get("warnings", []) if "厂商版本" in w]
+        check("★ 混版告警确实出现在 IR 根 warnings（不是算了就丢）",
+              len(_mw) == 1 and "5.84" in _mw[0] and "5.83" in _mw[0],
+              str(full.get("warnings")))
+        check("★ 逐文件的厂商版本在 source.files[].note 里逐条可见",
+              sorted(f["note"] for f in full["source"]["files"]
+                     if f["parse_status"] == "ok")
+              == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
+                  "厂商版本 5.83", "厂商版本 5.84"],
+              str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         check("缺口只剩 2 项（平纵都齐了）",
               sorted(x["segment"] for x in full["gaps"])
               == ["cross_section", "geometry_point"],
