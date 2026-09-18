@@ -22,7 +22,8 @@
 --                       H1 mapping_set    语义映射集（M7 语义中枢的产出落点）
 --                 依据：契约变更工单 #1（M4/M7 从机械层进入业务层的前置条件）
 --                 兼容：纯新增，无破坏性变更；回滚 = DROP TABLE quality_rule, mapping_set;
---   v0.3（本版）  42 表：v0.2 全部保留 ＋ 第一批 10 张新表（GE 域完整化）
+--   v0.3（本版）  43 表：v0.2 全部保留 ＋ 第一批 10 张新表（GE 域完整化）
+--                       ＋ A16 superelev_transition 超高过渡（原列在 v0.4 待办，提前落地）
 --                       A0  design_project                          设计项目
 --                       A7  design_file                             设计文件台账（含桩号覆盖区间）
 --                       A8  section_design_attr                     路段设计属性（.PRJ 分段）
@@ -35,7 +36,8 @@
 --                 依据：契约变更工单 #2（导师指示：stake 是"物理标桩"，station 才是"桩号值"）
 --                 兼容：⚠️ 本次为破坏性改名。v02_compat_* 视图保留旧列名一版（只读）
 --                 回滚：ALTER TABLE ... RENAME COLUMN 反向执行；或 git revert 工单 #2 提交
---                 待办：第二批 11 张（L6–L9：横断面/超高路幅/路基土方/构造物）随 v0.4
+--                 待办：第二批 10 张（L6–L9：横断面/路幅宽度/路基土方/构造物）随 v0.4
+--                       说明：原为 11 张，其中"超高"一项已按教程 §13.5 提前落到本版 A16
 --                 修订：桩号列精度 numeric(10,3)/numeric(12,3) → numeric(12,6)（14 列）
 --                       原因：.STA 实测 332 个桩号中 81 个非 20 m 等距点（66 种间距），
 --                             最短间距仅 0.083 m —— 1659.917 与 1660.000 在 km 3 位小数下
@@ -69,6 +71,42 @@
 --                             库尚无真实数据（GE 域为空表运行），重建即可；无需迁移脚本。
 --                       回滚：git revert 工单 #3；live 库删卷重建
 --                       未做（留给 v0.4 定）：x_coord/y_coord 与 start_x/start_y 的命名统一
+--                 修订：按《纬地道路辅助设计系统教程 v5.88》第十三章校正 GE 域超高相关实体
+--                       起因：读教程 13.4/13.5 逐列定义，发现 A15 的两列**与源文件对不上**——
+--                         · 教程 13.4：*.wid 的 7 列是「起终点桩号、中央分隔带宽度、半侧路面宽度、
+--                           有无附加车道标识、硬路肩宽度、土路肩宽度、附加车道项目文件名」
+--                           —— **全是宽度，没有坡度**。而 A15 却把 *.wid 记作 crossfall_pct
+--                           的来源。该列自 v0.3 起就没有真实来源，属**来源注错**。
+--                         · 教程 13.5：*.sup 每行 7 项「前三项与后三项绕第四项呈对称排列」，
+--                           依次为 左侧土路肩横坡、左侧硬路肩横坡、左侧行车道（路面）横坡、
+--                           **桩号**、右侧行车道横坡、右侧硬路肩横坡、右侧土路肩横坡。
+--                           —— 超高是**左右各一个行车道横坡**，A15 用**单列** superelev_pct
+--                           存，左右必有一侧丢失；且六个量在教程里统称"横坡"，
+--                           单列 crossfall_pct 的语义无法确定。
+--                         · 教程 13.5 同时定义 9999 = "可以忽略此数据"，横坡渐变至此位置时
+--                           系统**跳过该列的计算继续过渡** —— 是"此点不约束该列"，
+--                           既不是"沿用上值"也不是 NULL（.SUP 每格非数即 9999，故 NULL 无歧义）。
+--                       改法（经确认选"甲"）：
+--                         · 新增 A16 superelev_transition —— **一行一个超高过渡变化点**，
+--                           忠实保存 .SUP 原始六列与 9999（记 NULL）。实测本工程 76 个变化点，
+--                           而 A9 逐桩是 332 个 —— 两者粒度不同，故分表。
+--                         · A15 的 superelev_pct/crossfall_pct 两列**删除**，改为教程原样的
+--                           六列（左/右 × 土路肩/硬路肩/行车道），存**插值到该桩号**后的结果。
+--                         · A13 profile_grade_point 补两列 offset_station_km/offset_elev_m
+--                           —— 教程 13.3：.ZDM 每行第 4、5 项是「标高错台位置的桩号及错台
+--                           的标高差值（向上为正、向下为负，单位米）」，一般公路主线输 0。
+--                           原表**静默丢弃**了这两列。
+--                       依据：纬地教程 v5.88 §13.3/§13.4/§13.5（本工程实测文件版本 5.83/6.00，
+--                             教程为 5.8 代；*.wid 的 6.00 格式教程未覆盖，适配器另注依据）
+--                       兼容：⚠️ 破坏性（删 2 列、加 6 列、加 1 表）。
+--                             ⚠ **实库已有真实数据**（实测：station_sequence 332 行、
+--                               alignment_element 33、alignment_pi 8、profile_grade_point 12、
+--                               profile_ground_point 332），故**不能删卷重建**——
+--                               要么 ALTER 迁移，要么重跑幂等导入。
+--                             （此处初稿曾写"GE 域尚无真实数据、重建即可"，是凭记忆写的，
+--                               实测推翻了它。删 2 列对已导入的 geometry_point 无影响：
+--                               该表实测 0 行——但 A13/A15 的其余列有数据。）
+--                       回滚：git revert 本次提交；live 库删卷重建
 -- ============================================================================
 
 BEGIN;
@@ -374,10 +412,14 @@ CREATE TABLE IF NOT EXISTS profile_grade_point (
     grade_in_pct            numeric(6,3),                 -- 前坡坡度 %
     grade_out_pct           numeric(6,3),                 -- 后坡坡度 %
     grade_len_m             numeric(10,3),                -- 坡长 m
+    offset_station_km       numeric(12,6),                -- 错台位置桩号（.ZDM 第4项；一般公路主线为 0）
+    offset_elev_m           numeric(8,4),                 -- 错台高差 m（正=向上错开，负=向下；主线为 0）
     remark                  text,
     UNIQUE (section_id, vpi_seq)
 );
 COMMENT ON TABLE profile_grade_point IS '纵断面变坡点（.ZDM）；G(s) 纵坡函数由此表竖曲线推导';
+COMMENT ON COLUMN profile_grade_point.offset_station_km IS '标高错台位置桩号（教程 §13.3：.ZDM 每行第 4 项）。错台是互通立交匝道上出现的标高突变；一般公路主线此列为 0';
+COMMENT ON COLUMN profile_grade_point.offset_elev_m IS '标高错台高差 m（教程 §13.3：.ZDM 每行第 5 项）。向上错开为正、向下为负；一般公路主线此列为 0。本工程（毕设，二级公路主线）12 个变坡点全为 0';
 CREATE INDEX IF NOT EXISTS idx_grade_point_station ON profile_grade_point(section_id, station_km);
 
 -- A14. 纵断面地面线（来自 .DMX：逐桩地面高程）
@@ -409,12 +451,49 @@ CREATE TABLE IF NOT EXISTS geometry_point (
     grade_pct      numeric(6,3),                          -- ★纵坡 G %（.ZDM 推导）
     h_radius_m     numeric(12,4),                         -- 平曲线半径（.JD）
     v_radius_m     numeric(12,4),                         -- 竖曲线半径（.ZDM）
-    superelev_pct  numeric(5,2),                          -- ★超高 E %（.SUP）
-    crossfall_pct  numeric(5,2),                          -- 横坡 %（.WID）
+    -- ★超高横坡六列 —— 教程 §13.5 对 .SUP 的**原样**命名，左右对称，缺一不可。
+    --   原先的 superelev_pct（单列）存不下"左右各一个行车道横坡"，
+    --   crossfall_pct 则把 .WID（只有宽度、没有坡度）错记成来源，两列均已删除。
+    --   本表存的是**插值到该桩号**后的结果；原始过渡变化点见 A16 superelev_transition。
+    earth_shoulder_left_pct  numeric(5,2),                -- 左侧土路肩横坡 %
+    hard_shoulder_left_pct   numeric(5,2),                -- 左侧硬路肩横坡 %
+    lane_left_pct            numeric(5,2),                -- ★左侧行车道（路面）横坡 % = 左超高
+    lane_right_pct           numeric(5,2),                -- ★右侧行车道（路面）横坡 % = 右超高
+    hard_shoulder_right_pct  numeric(5,2),                -- 右侧硬路肩横坡 %
+    earth_shoulder_right_pct numeric(5,2),                -- 右侧土路肩横坡 %
     remark         text
 );
-COMMENT ON TABLE geometry_point IS '逐桩号线形＝κ(s)/G(s)/E(s) 函数库（课题甲/乙共同消费接口）；κ 来自 .PM+.JD，G 来自 .ZDM，E 来自 .SUP，三者对齐到 station_sequence 同一基准。对应 ASAM OpenDRIVE 的 s = station_absolute_km × 1000（米）';
+COMMENT ON TABLE geometry_point IS '逐桩号线形＝κ(s)/G(s)/E(s) 函数库（课题甲/乙共同消费接口）；κ 来自 .PM+.JD，G 来自 .ZDM，E 来自 .SUP（经 A16 过渡变化点插值到逐桩），三者对齐到 station_sequence 同一基准。对应 ASAM OpenDRIVE 的 s = station_absolute_km × 1000（米）';
+COMMENT ON COLUMN geometry_point.lane_left_pct IS '左侧行车道（路面）横坡 %，即左半幅超高。教程 §13.5 定义 .SUP 第 3 项';
+COMMENT ON COLUMN geometry_point.lane_right_pct IS '右侧行车道（路面）横坡 %，即右半幅超高。教程 §13.5 定义 .SUP 第 5 项。上坡路段左右同号，超高段左右异号（单向横坡）';
 CREATE INDEX IF NOT EXISTS idx_geometry_curvature ON geometry_point(curvature_1pm);
+
+-- A16. 超高过渡 ★原始设计输入（来自 .SUP：一行一个过渡变化点）
+--      依据：纬地教程 v5.88 §13.5 ——「每一行前三项数据与后三项数据绕第四项数据呈对称位置
+--      排列。分别为 左侧土路肩的横坡值、左侧硬路肩的横坡值、左侧行车道（路面）的横坡值、
+--      桩号、右侧行车道横坡值、右侧硬路肩的横坡值、右侧土路肩横坡值。其中数据 9999 表示
+--      **可以忽略此数据**，横坡渐变至此位置时，系统**跳过此数据的计算继续进行横坡的超高渐变**。」
+--      ★9999 → NULL：.SUP 每格非数即 9999，故 NULL 与"缺值"无歧义，正是"此点不约束该列"。
+--      ★与 A15 的分工：本表是**设计输入**（变化点，实测 76 行），A15 是**派生结果**（逐桩，332 行）。
+--        粒度不同（76 ≠ 332，且本表桩号只有 34 个落在逐桩上），故必须分表——
+--        合成一张会把"过渡过程"压没，且 9999 的"此处不约束"信息无法保留。
+--      来源文件：纬地 *.sup（本工程实测 magic = HINTCAD5.83_SUP_SHUJU，版本 5.83）
+CREATE TABLE IF NOT EXISTS superelev_transition (
+    id                       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id               bigint NOT NULL REFERENCES road_section(id),
+    transition_seq           smallint NOT NULL,           -- 过渡变化点序号（.SUP 行序，从 1 起）
+    station_km               numeric(12,6) NOT NULL,      -- 桩号（.SUP 第 4 项，本工程 76 个）
+    earth_shoulder_left_pct  numeric(5,2),                -- 左侧土路肩横坡 %（9999 → NULL）
+    hard_shoulder_left_pct   numeric(5,2),                -- 左侧硬路肩横坡 %（9999 → NULL）
+    lane_left_pct            numeric(5,2),                -- 左侧行车道（路面）横坡 %（9999 → NULL）
+    lane_right_pct           numeric(5,2),                -- 右侧行车道（路面）横坡 %（9999 → NULL）
+    hard_shoulder_right_pct  numeric(5,2),                -- 右侧硬路肩横坡 %（9999 → NULL）
+    earth_shoulder_right_pct numeric(5,2),                -- 右侧土路肩横坡 %（9999 → NULL）
+    remark                   text,
+    UNIQUE (section_id, transition_seq)
+);
+COMMENT ON TABLE superelev_transition IS '超高过渡（.SUP）★设计输入，一行一个过渡变化点。六列横坡绕桩号左右对称；NULL 表示源文件写了 9999「可以忽略此数据」，即该列在此位置不参与约束、过渡照常继续（不是缺值、也不是沿用上值）。教程 §13.5';
+CREATE INDEX IF NOT EXISTS idx_superelev_trans_station ON superelev_transition(section_id, station_km);
 
 -- ######################## B. 字典表 ########################
 

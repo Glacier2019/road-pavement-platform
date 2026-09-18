@@ -37,7 +37,11 @@ DOMAINS: dict[str, Domain] = {
          "design_project", "design_file", "section_design_attr",
          "station_sequence", "station_equation",
          "alignment_pi", "alignment_element",
-         "profile_grade_point", "profile_ground_point", "geometry_point"),
+         "profile_grade_point", "profile_ground_point", "geometry_point",
+         # ↓ 第 11 张：超高过渡。原列在 v0.4 待办（"超高路幅"），
+         #   因读纬地教程 §13.5 发现 geometry_point 的 superelev_pct 单列存不下
+         #   "左右各一个行车道横坡"，故提前落地，与 .SUP 变化点一一对应。
+         "superelev_transition"),
         # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
         (),
         "关系库",
@@ -95,9 +99,10 @@ CROSS_TABLES: tuple[str, ...] = (
 # DDL v0.3 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
 # 由 tests/contract/test_ddl_dict_catalog.py 强制核对——不允许各自漂移。
 # 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）；
-#       v0.3 = 42 表（+GE 域 10 张，契约变更工单 #2）。
-#       第二批 11 张（横断面/超高路幅/路基土方/构造物）随 v0.4 落地 → 53 表。
-EXPECTED_PHYSICAL_TABLES = 42
+#       v0.3 = 43 表（+GE 域 11 张，契约变更工单 #2 ＋ 纬地教程 §13.5 校正）。
+#       第二批 10 张（横断面/路幅宽度/路基土方/构造物）随 v0.4 落地 → 53 表。
+#       （原为 11 张，其中"超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition）
+EXPECTED_PHYSICAL_TABLES = 43
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -119,6 +124,7 @@ TABLE_OWNER: dict[str, str] = {
     "station_sequence": "M2", "station_equation": "M2",
     "alignment_pi": "M2", "alignment_element": "M2",
     "profile_grade_point": "M2", "profile_ground_point": "M2", "geometry_point": "M2",
+    "superelev_transition": "M2",
     # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
     # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
     # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，
