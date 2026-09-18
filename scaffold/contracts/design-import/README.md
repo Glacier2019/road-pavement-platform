@@ -36,7 +36,7 @@
 
 ## IR 结构
 
-Schema：`road_geometry_ir.v0.2.schema.json`
+Schema：`road_geometry_ir.v0.3.schema.json`
 
 | 字段 | 含义 |
 |---|---|
@@ -108,7 +108,7 @@ Schema：`road_geometry_ir.v0.2.schema.json`
 4. 跑 `./run_contract_tests.sh design`。
 
 ⚠ **第 4 步"不用改"只对"该段已在 `segments` 里"成立。** 若新段**不在**契约里，
-第 4 步要改成：先给 schema 的 `segments` 加键 + 定义点结构 + 升 `ir_version`，
+第 4 步要改成：先给 schema 的 `segments` 加键 + 定义点结构 + 升 `ir_version`（现为 **v0.3**），
 再动 `LOADABLE_TABLES`/`plan`/`load`。`.SUP`（超高过渡）就是这么走的 ——
 见下节「`.SUP` 与 `.PRJ`：一个进 `segments`、一个不进」。
 
@@ -122,7 +122,7 @@ WIM / 病害 / 试验数据**全部错位且没有任何报错**。
 
 | 来源 | 适配器 | `origin` | 现状 |
 |---|---|---|---|
-| 纬地 HintCAD | `weidi/` | `file` | ✅ 已实现 6 段：`.STA`/`.JD`/`.pm`/`.DMX`/`.ZDM`/`.SUP`（→ **L3**）；✅ `.PRJ` 项目档案另成一路（见下节）；`geometry_point`/`cross_section` 待做（需 DDL v0.4） |
+| 纬地 HintCAD | `weidi/` | `file` | ✅ 已实现 7 段：`.STA`/`.JD`/`.pm`/`.DMX`/`.ZDM`/`.SUP`/`.WID`（→ **L3**）；✅ `.PRJ` 项目档案另成一路（见下节）；`geometry_point`/`cross_section` 待做（需 DDL v0.4） |
 | 鸿业 | `hongye/` | `file` | 待建 |
 | 只有图纸 | `manual/` | `manual` | 待建：人工读图 → 表格模板（桩号、X、Y、R、切线长、转角…） |
 | 无文件、只有监测数据 | `inferred/` | `inferred` | 待建：由监测断面实测坐标反推骨架（**只建 `road_line`/`road_section`/`station_sequence`**） |
@@ -145,7 +145,7 @@ L1 骨架就足以支撑逐桩数据的挂靠与定位。
 | `[项目分段N]`（起终点桩号/等级/车速/路幅/横坡/超高/加宽…） | `section_design_attr`（每分段 1 行）+ `road_line` + `road_section` |
 | `[文件名]`（声明的文件清单） | `design_file`（每个声明 1 行） |
 
-**为什么不塞进 `segments`**：`segments` 是 `additionalProperties: false` 的 9 个几何段，
+**为什么不塞进 `segments`**：`segments` 是 `additionalProperties: false` 的 10 个几何段，
 而且它的每一项都是"几何点数组"。硬塞一个项目对象进去，schema 就废了。
 所以 `.PRJ` 走**独立解析器 + 独立调用**，契约⑤ 的 IR 结构**未作任何改动**。
 
@@ -157,8 +157,10 @@ L1 骨架就足以支撑逐桩数据的挂靠与定位。
 |---|---|---|---|
 | `.PRJ` | **档案**：工程是谁、有哪些分段属性、声明了哪些文件 | ❌ 不进 | 它不是点数组，是**元数据**。硬塞进去 schema 就废了 → 走独立解析器 + 独立调用 |
 | `.SUP` | **逐桩点数组**：每个过渡变化点上 7 个数 | ✅ 进（v0.2 起第 9 段） | 与 `station_sequence`/`profile_ground_point` **同类**；与 `alignment_element` 一样是某个派生量的**真源**（它给 E(s)，`alignment_element` 给 κ(s)） |
+| `.WID` | **逐桩号区间数组**：每个区间是「一侧 + 起终点桩号 + 6 个宽度」 | ✅ 进（v0.3 起第 10 段） | 同上**同类**。⚠ 它与前几段有一处不同：**不是逐桩点，是逐区间**（教程 §13.4「每两行为一组，说明路基一侧某个桩号区间内的路幅宽度变化情况」）。判据不变 —— 仍是「沿桩号排列的数组」，故仍进 `segments`；只是落库时把每组的起终点收成 `start`/`end` 两列 |
 
-`.SUP` 因此**改了契约**（v0.1 → v0.2：加段 + 加 `superelev_point` 定义 + 升 `ir_version`）。
+`.SUP` 因此**改了契约**（v0.1 → v0.2：加段 + 加 `superelev_point` 定义 + 升 `ir_version`）；
+`.WID` 同样改了契约（v0.2 → v0.3：加 `roadbed_width` 段 + 加 `roadbed_interval` 定义）。
 这与"新增适配器不用改 IR"并不矛盾 —— 那句话的前提是**该段已在契约里**。
 
 **为什么值得单列一段**：`.SUP` 是**过渡转折点**（本工程 76 个），而 `station_sequence`
@@ -244,10 +246,11 @@ vs 一级公路/80 km/h/4 车道/19.701 km）。所以它是**新建一条独立
 那等于"只能导别人已经种好的路"，与「以后有新的道路文件可以同样导入」直接冲突。
 
 **修法**：四表写权登记为 **M2**（与其余 10 张 GE 表同源：都来自设计文件）。
-写权现为 **38 张可写 / 5 张只读**（剩下 5 张是 `dict_*` 字典，种子数据，服务不应写）。
+写权现为 **39 张可写 / 5 张只读**（剩下 5 张是 `dict_*` 字典，种子数据，服务不应写）。
 `test_write_guard.py` 已加断言：① 四表必须有 M2 写权；② `SKELETON-GUIDE.md` 里那句
-「38 张可写 / 5 张只读」必须与 catalog 一致（**文档硬编码数字是下一个漂移源**，此前那句
-长期写着 v0.2 时代的 21/11；后来又因新增 `superelev_transition` 漂了一次 37→38）。
+「39 张可写 / 5 张只读」必须与 catalog 一致（**文档硬编码数字是下一个漂移源**，此前那句
+长期写着 v0.2 时代的 21/11；后来又因新增 `superelev_transition` 漂了一次 37→38，
+再因新增 `roadbed_width` 漂了一次 38→39）。
 
 ### 3. `alignment_pi` 的 DDL 列注释标错了值 ✅ **已修正（工单 #3）** —— 但问题比注释更深
 

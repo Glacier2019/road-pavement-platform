@@ -1,5 +1,5 @@
 -- ============================================================================
--- 迁移：v0.3 GE 域超高相关实体校正（按纬地教程 v5.88 §13.3/§13.4/§13.5）
+-- 迁移：v0.3 GE 域实体校正（按纬地教程 v5.88 §13.3/§13.4/§13.5）
 -- ============================================================================
 -- 用途：把**已存在的库**从"旧的 A13/A15 形态"改到"10_ddl_v0.3.sql 的目标形态"。
 --
@@ -23,6 +23,12 @@
 --   §13.5 .sup 每行六列横坡「绕桩号左右对称」，行车道横坡才是超高
 --         → A15 的 superelev_pct 单列存不下左右，删除；改六列
 --         → 新增 A16 superelev_transition 存原始过渡变化点（9999 → NULL）
+--   §13.4 .wid 7 列描述**分段**路幅宽度（「每两行为一组，说明路基一侧某个桩号
+--         区间内的路幅宽度变化情况」）→ 新增 A17 roadbed_width
+--         为什么必须提前落地：section_design_attr.roadway_width_m 是**标量**，
+--         而路幅宽度本来就随桩号变（加宽/匝道/交叉口/变速车道），标量装不下
+--         分段变化。按「存设计输入、导出派生量」：.WID 是输入（A17），
+--         roadway_width_m 是导出的派生标量。
 -- ============================================================================
 
 BEGIN;
@@ -71,5 +77,31 @@ CREATE TABLE IF NOT EXISTS superelev_transition (
 );
 COMMENT ON TABLE superelev_transition IS '超高过渡（.SUP）★设计输入，一行一个过渡变化点。六列横坡绕桩号左右对称；NULL 表示源文件写了 9999「可以忽略此数据」，即该列在此位置不参与约束、过渡照常继续（不是缺值、也不是沿用上值）。教程 §13.5';
 CREATE INDEX IF NOT EXISTS idx_superelev_trans_station ON superelev_transition(section_id, station_km);
+
+-- ── ⑤ 新增 A17 roadbed_width：路幅宽度的原始设计输入（教程 §13.4）──────────
+-- 一行 = **一侧**的一个桩号区间。教程的「两行一组」（起、终点）收成 start/end 两列。
+-- ⚠ 教程 §13.4 用一行 Z/Y 引出左右侧数据；实测 6.00 版用 [LEFT]/[RIGHT] 段标题行，
+--   **教程未覆盖这一写法**（全文无 [LEFT]），故 side 列两种来源都归一到 left/right。
+CREATE TABLE IF NOT EXISTS roadbed_width (
+    id                       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id               bigint NOT NULL REFERENCES road_section(id),
+    side                     varchar(8) NOT NULL,
+    interval_seq             smallint NOT NULL,
+    start_station_km         numeric(12,6) NOT NULL,
+    end_station_km           numeric(12,6) NOT NULL,
+    median_width_m           numeric(6,3),
+    half_carriageway_width_m numeric(6,3),
+    extra_lane_flag          smallint,
+    hard_shoulder_width_m    numeric(6,3),
+    earth_shoulder_width_m   numeric(6,3),
+    extra_lane_file          text,
+    remark                   text,
+    UNIQUE (section_id, side, interval_seq)
+);
+COMMENT ON TABLE roadbed_width IS '路幅宽度（.WID）★设计输入，一行 = 一侧的一个桩号区间。教程 §13.4 的 7 列原样保存。★本表**不存**路基总宽：总宽 = 中央分隔带 + 2×(半侧路面 + 硬路肩 + 土路肩)，是跨"左右两行"的派生量，故按「存设计输入、导出派生量」不落库';
+COMMENT ON COLUMN roadbed_width.side IS '路基侧别：left 左侧 / right 右侧。教程 §13.4 用一行"Z"/"Y"引出其后数据；实测 6.00 版用 [LEFT]/[RIGHT] 段标题行';
+COMMENT ON COLUMN roadbed_width.half_carriageway_width_m IS '半侧路面宽度＝行车道＋内侧路缘带（教程 §13.4 第 3 列）。本工程 3.500 m，即路面 2×3.5＝7 m，与 section_design_attr.roadway_width_m=10.00（含硬路肩/土路肩）自洽';
+COMMENT ON COLUMN roadbed_width.extra_lane_flag IS '有无附加车道标识（教程 §13.4 第 4 列）：0 无附加车道 / 1 或 2 有；为 2 时其下一行的 0 表示主线外侧路缘带宽度。本工程全 0';
+CREATE INDEX IF NOT EXISTS idx_roadbed_width_interval ON roadbed_width(section_id, side, start_station_km);
 
 COMMIT;

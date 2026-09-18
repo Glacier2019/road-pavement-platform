@@ -40,10 +40,10 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta, sup, zdm    # noqa: E402
+from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta, sup, wid, zdm  # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
-IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.2.schema.json"
+IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.3.schema.json"
 DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
 
 
@@ -593,14 +593,14 @@ def main() -> int:
         # 等级断言故意把「已实现段清单」也一起钉住：将来往 IMPLEMENTED 里加了新解析器，
         # 这条会立刻红，逼你回来确认新等级是否符合预期——而不是让它悄悄变。
         # 已经生效过两次：加 .pm 时红了；加 .DMX 时又红了，而这次答案是"等级**不该**动"。
-        # 第 3 次变红：加 .SUP 时又红了。而这次的答案**仍然是"等级不该动"** ——
-        # 超高是平纵都具备之后的**设计细节**（横坡），不是一级几何；L0–L4 只认平/纵/横。
-        # 所以下面把 superelev_transition 加进已实现清单，而 level 断言依旧是 L3。
+        # 第 4 次变红：加 .WID 时又红了。而这次的答案**仍然是"等级不该动"** ——
+        # 超高与路幅宽度都是平纵都具备之后的**设计细节**，不是一级几何；
+        # L0–L4 只认平/纵/横（横＝.HDM 横断面地面线，即 cross_section，尚未实现）。
         check("★ 等级 = L3（.ZDM/.DMX 都实现：设计线与地面线同时具备）",
               full["geometry_level"] == "L3"
               and sorted(weidi.IMPLEMENTED)
               == ["alignment_element", "alignment_pi", "profile_grade_point",
-                  "profile_ground_point", "station_sequence",
+                  "profile_ground_point", "roadbed_width", "station_sequence",
                   "superelev_transition"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
         gpts = full["segments"].get("profile_ground_point", [])
@@ -632,7 +632,8 @@ def main() -> int:
               sorted(f["note"] for f in full["source"]["files"]
                      if f["parse_status"] == "ok")
               == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
-                  "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.84"],
+                  "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.84",
+                  "厂商版本 6.00"],
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
         _vps = full["segments"]["profile_grade_point"]
@@ -748,7 +749,7 @@ def main() -> int:
             check("派生纵坡量级合理（|i| < 20%，超出即说明列错位或推导错）",
                   grades and max(abs(g) for g in grades) < 20.0,
                   f"最大 {max(abs(g) for g in grades):.4f}%")
-        check("台账登记了 8 类文件（含未实现的）", len(full["source"]["files"]) == 8,
+        check("台账登记了 9 类文件（含未实现的）", len(full["source"]["files"]) == 9,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
@@ -890,6 +891,137 @@ def main() -> int:
     _badpt2 = dict(_s["points"][0]); del _badpt2["station_m"]
     check("★ 元测试：superelev_point 定义真的会拒绝缺 station_m",
           bool(list(_spv.iter_errors(_badpt2))))
+
+    # ── 第 6d 组：.WID 路幅宽度解析器（应通过 / 应拒绝两侧）───────────────────
+    print("\n第 6d 组  .WID 路幅宽度解析器（应通过 / 应拒绝两侧）")
+    _wh = "HINTCAD6.00_WID_SHUJU\r\n"
+
+    def _wrow(st, med, half, flag, hard, earth, fn):
+        return f"{st}\t{med}\t{half}\t{flag}\t{hard}\t{earth}\t{fn}\r\n"
+
+    _w_ok = (_wh + "[LEFT]\r\n"
+             + _wrow("0.000", "0.000", "3.500", "0.000", "0.750", "0.750", "0") + "\r\n"
+             + _wrow("5701.461", "0.000", "3.500", "0.000", "0.750", "0.750", "0") + "\r\n"
+             + "[RIGHT]\r\n"
+             + _wrow("0.000", "0.000", "3.500", "0.000", "0.750", "0.750", "0") + "\r\n"
+             + _wrow("5701.461", "0.000", "3.500", "0.000", "0.750", "0.750", "0"))
+    _w = wid.parse(_w_ok, file="ok.WID")
+    _iv = _w["intervals"]
+    check("应通过：解析出 2 个区间（左右各 1）", len(_iv) == 2, str(len(_iv)))
+    check("应通过：厂商版本从魔数取出", _w["vendor_version"] == "6.00", _w["vendor_version"])
+    check("应通过：side 归一到 left/right", sorted(r["side"] for r in _iv) == ["left", "right"])
+    check("应通过：detect 认得自家魔数", wid.detect(_w_ok) is True)
+    check("应通过：detect 不认别家魔数", wid.detect("HINTCAD5.83_SUP_SHUJU\r\n") is False)
+    check("应通过：段名与文件类别与 SEGMENT_FILES 登记一致",
+          wid.SEGMENT == "roadbed_width"
+          and weidi.SEGMENT_FILES["roadbed_width"][0] == ".WID"
+          and weidi.SEGMENT_FILES["roadbed_width"][1] == wid.FILE_KIND,
+          f"{wid.SEGMENT} / {wid.FILE_KIND}")
+    # 「每两行为一组」收成一行一个区间：起终点分别落两列
+    check("应通过：两行一组 → start/end 两列",
+          _iv[0]["start_station_m"] == 0.0 and abs(_iv[0]["end_station_m"] - 5701.461) < 1e-9)
+    check("应通过：六列宽度逐列落位（半侧路面 3.5 / 硬路肩 0.75 / 土路肩 0.75）",
+          _iv[0]["half_carriageway_width_m"] == 3.5
+          and _iv[0]["hard_shoulder_width_m"] == 0.75
+          and _iv[0]["earth_shoulder_width_m"] == 0.75
+          and _iv[0]["median_width_m"] == 0.0)
+    check("应通过：源文件写 0 的附加车道文件名 → None（不是字符串 '0'）",
+          _iv[0]["extra_lane_file"] is None, repr(_iv[0]["extra_lane_file"]))
+    # ★ 教程 §13.4 的分段标记是 z/y（5.8 代），实测是 [LEFT]/[RIGHT]（6.00）——**两种都要认**
+    _zy = ("HINTCAD5.8_WID_SHUJU\r\n" + "z" * 56 + "\r\n"
+           + _wrow("29000.00", "1.00", "8.00", "0.0", "2.5", "0.75", "0") + "\r\n"
+           + _wrow("31420.98", "1.00", "8.00", "0.0", "2.5", "0.75", "0") + "\r\n"
+           + "y" * 56 + "\r\n"
+           + _wrow("29000.00", "1.00", "8.00", "0.0", "2.5", "0.75", "0") + "\r\n"
+           + _wrow("31420.98", "1.00", "8.00", "0.0", "2.5", "0.75", "0"))
+    _w2 = wid.parse(_zy, file="教程示例.wid")
+    check("★ 应通过：教程 §13.4 的 z/y 写法也认（版本 5.8）",
+          _w2["vendor_version"] == "5.8" and sorted(r["side"] for r in _w2["intervals"])
+          == ["left", "right"], f"{_w2['vendor_version']} / {_w2['sides']}")
+    check("★ 应通过：教程示例的中央分隔带 1.00 落位正确",
+          _w2["intervals"][0]["median_width_m"] == 1.0)
+
+    # 区间是**分段常量**（不是渐变）→ 查区间，不外推
+    check("查值：区间内取到 3.5", wid.width_at(_iv, 3000.0, side="left") == 3.5)
+    check("查值：区间之外返回 None（不外推）",
+          wid.width_at(_iv, 9999.0, side="left") is None
+          and wid.width_at(_iv, -1.0, side="left") is None)
+    check("查值：查右侧与左侧互不串（同值不同侧）",
+          wid.width_at(_iv, 3000.0, side="right") == 3.5)
+
+    # 覆盖缺口：本工程 .WID 只到 5701.461，路线到 5805.421 —— 必须**报出来**
+    _stn6 = [{"station_m": 0.0}, {"station_m": 5805.421}]
+    _cov = wid.check_against_stations(_iv, _stn6)
+    check("★ 覆盖：不覆盖到路线终点要报（实测缺 103.960 m）",
+          len(_cov) == 1 and "103.96" in _cov[0], str(_cov))
+    check("覆盖：完整覆盖则不报",
+          wid.check_against_stations(_iv, [{"station_m": 0.0}, {"station_m": 5701.461}]) == [])
+    check("连续性：单个区间无从谈不连续", wid.check_intervals(_iv) == [])
+    _gap = [dict(_iv[0]), dict(_iv[0], interval_seq=2, start_station_m=6000.0,
+                               end_station_m=7000.0)]
+    check("★ 连续性：相邻区间不相接要报", bool(wid.check_intervals(_gap)))
+
+    # ★★ 元测试：「同一区间两行不一致」必须**真能报出来**（否则那条 notes 是空的）
+    _disagree = (_wh + "[LEFT]\r\n"
+                 + _wrow("0.000", "0.000", "3.500", "0.000", "0.750", "0.750", "0") + "\r\n"
+                 + _wrow("100.000", "0.000", "3.500", "0.000", "1.500", "0.750", "0"))
+    _wd = wid.parse(_disagree, file="不一致.WID")
+    check("★★ 元测试：两行硬路肩不一致（0.75 vs 1.50）→ 必须产出一条 notes",
+          len(_wd["notes"]) == 1 and "硬路肩" in _wd["notes"][0], str(_wd["notes"]))
+    check("★★ 元测试：取值以第一行为准（0.75，不是 1.50）",
+          _wd["intervals"][0]["hard_shoulder_width_m"] == 0.75)
+    # 列 4（附加车道标识）**有意**允许两行不同 → 不产 notes
+    _flag_ok = (_wh + "[LEFT]\r\n"
+                + _wrow("0.000", "0.000", "3.500", "2.000", "0.750", "0.750", "0") + "\r\n"
+                + _wrow("100.000", "0.000", "3.500", "0.000", "0.750", "0.750", "0"))
+    check("★★ 元测试：列 4 两行不同（2 / 0）是教程允许的 → 不产 notes",
+          wid.parse(_flag_ok, file="列4.WID")["notes"] == [])
+
+    # 解析结果必须过契约⑤ v0.3 的 roadbed_interval 定义
+    _riv = jsonschema.Draft7Validator(
+        json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"]["roadbed_interval"])
+    check("★ 解析出的每个区间都过 schema 的 roadbed_interval 定义",
+          not [e for r in _iv for e in _riv.iter_errors(r)],
+          str([e.message for r in _iv for e in _riv.iter_errors(r)][:2]))
+    _badr = dict(_iv[0]); _badr["typo_col"] = 1
+    check("★ 元测试：roadbed_interval 定义真的会拒绝多余列",
+          bool(list(_riv.iter_errors(_badr))))
+
+    check_raises("应拒绝：魔数是 .SUP 的（张冠李戴）",
+                 "HINTCAD5.83_SUP_SHUJU\r\n[LEFT]\r\n"
+                 + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0")
+                 + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="魔数不匹配")
+    check_raises("应拒绝：字段数 6（漏了附加车道文件名列）",
+                 _wh + "[LEFT]\r\n" + "0\t0\t3.5\t0\t0.75\t0.75\r\n"
+                 + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="字段数应为 7")
+    check_raises("★ 应拒绝：数据行出现在分段标记之前（不知是左还是右）",
+                 _wh + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="任何分段标记之前")
+    check_raises("★ 应拒绝：桩号区间不成对（只有起点没有终点）",
+                 _wh + "[LEFT]\r\n" + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="成对出现")
+    check_raises("应拒绝：区间终点不大于起点",
+                 _wh + "[LEFT]\r\n" + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0")
+                 + _wrow("5", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="不大于起点")
+    check_raises("应拒绝：宽度为负",
+                 _wh + "[LEFT]\r\n" + _wrow("0", "0", "-3.5", "0", "0.75", "0.75", "0")
+                 + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="为负")
+    check_raises("★ 应拒绝：宽度串成了桩号那种量级（列错位）",
+                 _wh + "[LEFT]\r\n" + _wrow("0", "0", "5805.4", "0", "0.75", "0.75", "0")
+                 + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="超出合理区间")
+    check_raises("应拒绝：宽度不是数字",
+                 _wh + "[LEFT]\r\n" + _wrow("0", "abc", "3.5", "0", "0.75", "0.75", "0")
+                 + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="不是合法数字")
+    check_raises("应拒绝：只有魔数没有数据", _wh, parser=wid, expect="没有任何桩号区间")
+    check_raises("应拒绝：空文件", "", parser=wid, expect="空文件")
+    check("组间空行应通过（教程示例就有）",
+          len(wid.parse(_w_ok.replace("[RIGHT]", "\r\n[RIGHT]"), file="x.WID")["intervals"]) == 2)
 
     # ── 第 7 组：桩号精度 —— 真实数据必须装得进 DDL 声明的精度 ──────────────
     # 本轮实测抓到：.STA 里 1659.917 与 1660.000 相距仅 0.083 m，
@@ -1230,10 +1362,10 @@ def main() -> int:
     counts = {t: len(r) for t, r in planned["tables"].items()}
     # 合成 IR 里没有纵断面，故两张新表是 0 行 —— 但仍然必须在 plan 的产出里：
     # 漏掉一个键会让落库阶段静默少写一张表，而不是报错。
-    check("行数：桩号 30 / 交点 1 / 单元 4 / 设计线 0 / 地面线 0 / 超高 0",
+    check("行数：桩号 30 / 交点 1 / 单元 4 / 设计线 0 / 地面线 0 / 超高 0 / 路幅 0",
           counts == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4,
                      "profile_grade_point": 0, "profile_ground_point": 0,
-                     "superelev_transition": 0},
+                     "superelev_transition": 0, "roadbed_width": 0},
           str(counts))
     check("交点来源 = 推导（.JD 作输入被忽略）",
           planned["pi_source"] == "derived" and planned["pi_from_file_ignored"] is True,
@@ -1340,6 +1472,7 @@ def main() -> int:
     try:
         from rpdao.errors import WriteGuardError
         from rpdao.write import WriteDao
+        from rpdao.catalog import TABLE_OWNER
         dao_e2e = WriteDao(pg_dsn() or "", app_name="contract-test",
                            min_size=1, max_size=2, timeout=10)
         dao_e2e.open()                             # 池是懒打开的，不 open 会到第一次用时才炸
@@ -1350,6 +1483,37 @@ def main() -> int:
         print("    需要时：uv run --with psycopg[binary] --with jsonschema --with pyyaml <本文件>")
     else:
         MARK = "契约⑤落库器自测"
+        # ── 自愈：先清掉**上一次**留下的残留 ────────────────────────────────
+        # 本组用 f"TEST-DI-{os.getpid()}" 当唯一标识，而清理写在 finally 里 ——
+        # 进程被 kill（超时、Ctrl-C、CI 取消）时 finally 不跑，残留就留在真库里。
+        # 下一次跑若 PID 恰好等于某个残留编号，就会撞 road_line_line_code_key，
+        # 报一个**与代码无关的错**。实测撞过一次（PID 109）。
+        # 所以开跑前先自愈，而不是指望上次跑得干净。
+        _stale = dao_e2e.query(
+            "select id from road_line where line_code like 'TEST-DI-%%'")
+        if _stale:
+            _sids = [r["id"] for r in _stale]
+            _secs = [r["id"] for r in dao_e2e.query(
+                "select id from road_section where line_id = any(%(i)s)", {"i": _sids})]
+            for _t in ("roadbed_width", "superelev_transition", "profile_grade_point",
+                       "alignment_element", "alignment_pi", "station_sequence"):
+                if _secs:
+                    dao_e2e.execute_write(
+                        _t, f"DELETE FROM {_t} WHERE section_id = any(%(s)s)",
+                        {"s": _secs}, writer="M2")
+            dao_e2e.execute_write(
+                "data_import_batch",
+                "DELETE FROM data_import_batch WHERE batch_no like 'test-di-%%'", {},
+                writer="M2")
+            if _secs:
+                dao_e2e.execute_write(
+                    "road_section", "DELETE FROM road_section WHERE id = any(%(s)s)",
+                    {"s": _secs}, writer="M2")
+            dao_e2e.execute_write(
+                "road_line", "DELETE FROM road_line WHERE id = any(%(i)s)",
+                {"i": _sids}, writer="M2")
+            print(f"  ⚠ 自愈：清掉上一次留下的 {len(_stale)} 行残留"
+                  f"（进程被 kill 时 finally 不跑，属已知情况）")
         try:
             line_id = dao_e2e.insert_returning(
                 "road_line", {"line_code": f"TEST-DI-{os.getpid()}",
@@ -1359,11 +1523,12 @@ def main() -> int:
 
             # ① 预检：dry_run 必须一行都不写（这就是 M9 导入页"预检"的语义）
             rep = di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch, dry_run=True)
-            check("dry_run 报告计划行数（桩号 30 / 交点 1 / 单元 4 / 超高 0）",
+            check("dry_run 报告计划行数（桩号 30 / 交点 1 / 单元 4 / 超高 0 / 路幅 0）",
                   rep["planned"] == {"station_sequence": 30, "alignment_pi": 1,
                                      "alignment_element": 4,
                                      "profile_grade_point": 0, "profile_ground_point": 0,
-                                     "superelev_transition": 0}, str(rep["planned"]))
+                                     "superelev_transition": 0, "roadbed_width": 0},
+                  str(rep["planned"]))
             check("dry_run 后没有批次行",
                   dao_e2e.scalar("SELECT count(*) FROM data_import_batch WHERE batch_no=%(b)s",
                                  {"b": batch}) == 0)
@@ -1431,14 +1596,56 @@ def main() -> int:
                                  {"b": batch + "-bad"}) == 0)
         finally:
             # 清理：按 FK 反序删掉本组造的一切（不留痕，种子数据不受影响）
+            # ⚠ 清理**不能吞异常**：本组曾用 `except Exception: pass`，于是外键挡着删不掉时
+            #   一声不响地留下残留（实测留过 TEST-DI-109，还会让下一次跑 flaky）。
+            #   现在失败会打出来，并计入 _cleanup_failed。
+            _cleanup_failed: list[str] = []
+
+            # ⚠ 三条踩过的坑，都是"清理悄悄失败"这一类：
+            #   ① 这里原来写 d14.execute_write —— 而 d14 定义在**另一个组**（1856 行），
+            #      在 finally 里是 NameError → 每一次清理都失败、又被 except 吞掉，
+            #      于是**从第一天起就在静默留残留**（TEST-DI-109 就是这么来的）。
+            #   ② 手写的删除清单漏表：漏过 section_design_attr（e2e 会写 .PRJ 分段）、
+            #      profile_ground_point/geometry_point（锚在 station_id 上，挡着 station_sequence）。
+            #   ③ 顺序：alignment_element.pi_id → alignment_pi.id，所以 element 必须先删。
+            # 现在：DAO 用 dao_e2e（本组自己的）、清单**现查 pg_constraint**（以后新增 GE 表自动覆盖）、
+            #       顺序按真实外键定、失败**上报**而不是吞掉。
+            _cleanup_failed: list[str] = []
+
             def _del(table: str, sql: str, params: dict) -> None:
                 try:
-                    d14.execute_write(table, sql, params, writer="M2")
-                except Exception:                  # noqa: BLE001
-                    pass
+                    dao_e2e.execute_write(table, sql, params, writer="M2")
+                except Exception as exc:                      # noqa: BLE001
+                    _cleanup_failed.append(f"{table}: {type(exc).__name__}: {exc}")
+
             if sec_id:
-                for tbl in ("alignment_element", "alignment_pi", "station_sequence"):
-                    _del(tbl, f"DELETE FROM {tbl} WHERE section_id=%(s)s", {"s": sec_id})
+                _refs = dao_e2e.query(
+                    "select c.relname as tbl, a.attname as col "
+                    "from pg_constraint k "
+                    "join pg_class c on c.oid = k.conrelid "
+                    "join pg_class f on f.oid = k.confrelid "
+                    "join unnest(k.conkey) with ordinality as ck(attnum, ord) on true "
+                    "join pg_attribute a on a.attrelid = c.oid and a.attnum = ck.attnum "
+                    "where k.contype = 'f' and f.relname = 'road_section'")
+                # 只删 M2 名下的表：其余（如 M8 的 maintenance_advice）本组根本写不进去，
+                # 硬删会被写权守卫拒绝 —— 那是守卫在**正确工作**，不是清理失败。
+                _refs = [r for r in _refs if TABLE_OWNER.get(r["tbl"]) == "M2"]
+
+                def _rank(r: dict) -> int:
+                    if r["col"] == "station_id":
+                        return 0                    # 锚在 station_sequence 上，必须先删
+                    if r["tbl"] == "alignment_element":
+                        return 1                    # 它引用 alignment_pi，必须早于它
+                    return 2
+
+                for _r in sorted(_refs, key=_rank):
+                    if _r["col"] == "station_id":
+                        _del(_r["tbl"], f"DELETE FROM {_r['tbl']} WHERE station_id IN "
+                             f"(SELECT id FROM station_sequence WHERE section_id=%(s)s)",
+                             {"s": sec_id})
+                    else:
+                        _del(_r["tbl"], f"DELETE FROM {_r['tbl']} WHERE {_r['col']}=%(s)s",
+                             {"s": sec_id})
                 for b in (batch, batch + "-x", batch + "-bad"):
                     _del("data_import_batch",
                          "DELETE FROM data_import_batch WHERE batch_no=%(b)s", {"b": b})
@@ -1446,6 +1653,9 @@ def main() -> int:
             if line_id:
                 _del("road_line", "DELETE FROM road_line WHERE id=%(i)s", {"i": line_id})
             dao_e2e.close()
+            if _cleanup_failed:
+                print(f"  ✗ 清理失败（残留会污染下一次跑）：{_cleanup_failed}")
+                _fail.append('清理失败：' + str(_cleanup_failed))
             print(f"  （已清理：路段 {sec_id} / 批次 {batch}）")
 
     # ── 第 13 组：纬地 .PRJ 总项目文件（项目档案，不是几何段）──────────────
@@ -1607,10 +1817,11 @@ def main() -> int:
     # 已实现适配器的后缀才给 ok。加 .DMX/.ZDM 后从 3 个变 5 个 —— 这条断言当时
     # 变红是对的（它抓住了行为变化）。103/104 是不是 .DMX/.ZDM 已从库里核实：
     #   103 = 毕设.DMX         104 = 纵断面设计拟合.ZDM
-    # 107 是不是 .SUP 也已从库里核实：107 = 052201341刘其立道路毕设超高设计文件.SUP
-    check("parse_status 只对已实现适配器的后缀给 ok（实测 6 个）",
+    # 107 = .SUP、106 = .WID 均已从库里核实（design_file.file_kind_code ↔ 文件名）
+    check("parse_status 只对已实现适配器的后缀给 ok（实测 7 个）",
           sorted(f["file_kind_code"] for f in planned["tables"]["design_file"]
-                 if f["parse_status"] == "ok") == ["101", "102", "103", "104", "107", "109"],
+                 if f["parse_status"] == "ok")
+          == ["101", "102", "103", "104", "106", "107", "109"],
           str([f["file_kind_code"] for f in planned["tables"]["design_file"]
                if f["parse_status"] == "ok"]))
     attr = planned["tables"]["section_design_attr"][0]

@@ -40,7 +40,7 @@ from adapters import geom
 # 免得一个 IR 段的增删悄悄改变写入范围。
 LOADABLE_TABLES = ("station_sequence", "alignment_pi", "alignment_element",
                    "profile_grade_point", "profile_ground_point",
-                   "superelev_transition")
+                   "superelev_transition", "roadbed_width")
 
 # 推导值与 .JD 文件值的允许偏差。实测全部 ≤ 3.6×10⁻⁸，此处留三个数量级余量，
 # 但仍远小于任何有工程意义的差（1 mm = 1×10⁻³）。
@@ -198,6 +198,35 @@ def _plan_superelev_transitions(ir: Mapping[str, Any],
     return out
 
 
+def _plan_roadbed_widths(ir: Mapping[str, Any], section_id: int) -> list[dict[str, Any]]:
+    """``roadbed_width`` 行（路幅宽度分段，.WID 的真源）。
+
+    ``start_station_km``/``end_station_km`` 是**千米**（表里就是这么定的），
+    IR 里是米 —— 与其余 GE 表同一处换算。
+
+    ▲ 适配器发现「组内两行宽度不一致」时**不**往行里塞内部键，而是走 IR 根部的
+    ``warnings``（见 ``wid.parse`` 的说明）—— 因为 IR 的段定义是
+    ``additionalProperties: false``，内部键会被 schema 直接拒。
+    """
+    out = []
+    for r in ir["segments"].get("roadbed_width") or []:
+        out.append({
+            "section_id": section_id,
+            "side": r["side"],
+            "interval_seq": r["interval_seq"],
+            "start_station_km": round(r["start_station_m"] / 1000.0, 6),
+            "end_station_km": round(r["end_station_m"] / 1000.0, 6),
+            "median_width_m": r.get("median_width_m"),
+            "half_carriageway_width_m": r.get("half_carriageway_width_m"),
+            "extra_lane_flag": r.get("extra_lane_flag"),
+            "hard_shoulder_width_m": r.get("hard_shoulder_width_m"),
+            "earth_shoulder_width_m": r.get("earth_shoulder_width_m"),
+            "extra_lane_file": r.get("extra_lane_file"),
+            "remark": None,                       # 见上：异常说明走 IR warnings，不落 remark
+        })
+    return out
+
+
 def _plan_ground_points(ir: Mapping[str, Any]) -> list[dict[str, Any]]:
     """``profile_ground_point`` 行（纵断面**地面线**：逐桩原始地形高程）。
 
@@ -335,6 +364,7 @@ def plan(ir: Mapping[str, Any], *, section_id: int,
         "profile_grade_point": _plan_grade_points(ir, section_id),
         "profile_ground_point": _plan_ground_points(ir),
         "superelev_transition": _plan_superelev_transitions(ir, section_id),
+        "roadbed_width": _plan_roadbed_widths(ir, section_id),
     }
     return {"tables": tables, "pi_source": pi_source,
             "pi_from_file_ignored": bool(pi_derived) and bool(pi_file)}
@@ -577,7 +607,13 @@ def load(ir: Mapping[str, Any], dao: Any, *,
                 "superelev_transition", tables["superelev_transition"],
                 on_conflict=("section_id", "transition_seq"))
 
-        # ⑦ 批次登记
+        # ⑦ 路幅宽度分段：锚 section_id，与其余 GE 表相同
+        if tables["roadbed_width"]:
+            report["written"]["roadbed_width"] = tx.insert(
+                "roadbed_width", tables["roadbed_width"],
+                on_conflict=("section_id", "side", "interval_seq"))
+
+        # ⑧ 批次登记
         tx.insert("data_import_batch", [batch], on_conflict=("batch_no",))
 
     return report
@@ -624,7 +660,7 @@ ARCHIVE_TABLES = ("design_project", "road_line", "road_section",
 _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
                        ".pm": "alignment_element", ".prj": "design_project",
                        ".dmx": "profile_ground_point", ".zdm": "profile_grade_point",
-                       ".sup": "superelev_transition"}
+                       ".sup": "superelev_transition", ".wid": "roadbed_width"}
 
 
 def _basename(rel_path: str | None) -> str | None:

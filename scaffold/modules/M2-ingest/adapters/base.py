@@ -3,7 +3,7 @@
 设计要点（契约⑤）
 -------------------------------------------------------------------------------
 ① **格式无关的 IR**：纬地 / 鸿业 / 图纸人工录入 / 由监测数据反推，四种来源的适配器
-   产出**同一个结构**（road_geometry_ir.v0.2.schema.json）。于是：
+   产出**同一个结构**（road_geometry_ir.v0.3.schema.json）。于是：
      新增一家厂商 = 新增一个适配器；校验规则与落库路径**永不重写**。
 
 ② **能力声明 ≠ 解析结果**。适配器先说"我这个来源**有能力**给哪些段"（`capabilities`），
@@ -168,7 +168,7 @@ def make_ir(*,
     caps = tuple(dict.fromkeys(capabilities))          # 去重且保序
     clean_segments = {k: v for k, v in segments.items() if v}
     ir = {
-        "ir_version": "0.2",
+        "ir_version": "0.3",
         "source": {
             "vendor": vendor,
             "vendor_version": vendor_version,

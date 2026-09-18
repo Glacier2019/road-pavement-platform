@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://road-pavement-platform/contracts/design-import/road_geometry_ir.v0.2.schema.json",
-  "title": "道路几何中间表示（Road Geometry IR）v0.2",
+  "$id": "https://road-pavement-platform/contracts/design-import/road_geometry_ir.v0.3.schema.json",
+  "title": "道路几何中间表示（Road Geometry IR）v0.3",
   "description": "契约⑤。设计数据导入的**格式无关**中间表示：任何来源（纬地 HintCAD / 鸿业 / 图纸人工录入 / 由监测数据反推）的采集适配器都产出本结构，下游的校验与落库**只认它**。因此新增一家厂商格式 = 新增一个适配器，校验规则与落库路径不必重写。",
   "type": "object",
   "required": [
@@ -15,7 +15,7 @@
   "additionalProperties": false,
   "properties": {
     "ir_version": {
-      "const": "0.2"
+      "const": "0.3"
     },
     "source": {
       "$ref": "#/definitions/source"
@@ -52,7 +52,7 @@
   },
   "definitions": {
     "segment": {
-      "description": "几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对（不另造一套别名）。 v0.2 起含 superelev_transition（超高过渡，E(s) 的真源段）。",
+      "description": "几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对（不另造一套别名）。 v0.2 起含 superelev_transition（超高过渡，E(s) 的真源段）； v0.3 起含 roadbed_width（路幅宽度分段）。",
       "enum": [
         "station_sequence",
         "station_equation",
@@ -62,7 +62,8 @@
         "profile_ground_point",
         "geometry_point",
         "cross_section",
-        "superelev_transition"
+        "superelev_transition",
+        "roadbed_width"
       ]
     },
     "level": {
@@ -240,6 +241,14 @@
           },
           "minItems": 2,
           "description": "超高过渡变化点（.SUP）。**不是逐桩**：它是过渡的转折点，本工程实测 76 个，而 station_sequence 逐桩 332 个 —— 两者粒度不同，故单独成段。逐桩的插值结果落在 geometry_point 的六列横坡上。"
+        },
+        "roadbed_width": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/roadbed_interval"
+          },
+          "minItems": 1,
+          "description": "路幅宽度分段（.WID）。一行 = **一侧**的一个桩号区间。教程 §13.4 说「数据每两行为一组，说明路基一侧某个桩号区间内的路幅宽度变化情况」，本段把每组的起、终点收成 start/end 两列。"
         }
       }
     },
@@ -585,6 +594,83 @@
             "null"
           ],
           "description": "右侧土路肩横坡 %（源第 7 项）"
+        }
+      }
+    },
+    "roadbed_interval": {
+      "description": "路幅宽度的一个桩号区间。依据《纬地道路辅助设计系统教程 v5.88》§13.4：「此文件描述了整个路线（或匝道）路幅左右侧的分段变化情况，特别是加宽变化。……一行\"Z\"字母或一行\"Y\"分别表示其后跟随的是描述左侧或右侧路幅变化的数据。……数据每两行为一组……此文件桩号区间必须成对出现，桩号区间要连续。」 ⚠ 实测 6.00 版的分段标记是 `[LEFT]`/`[RIGHT]`，**教程全文未覆盖这一写法**，故 side 由适配器两种写法归一到 left/right。",
+      "type": "object",
+      "required": [
+        "side",
+        "interval_seq",
+        "start_station_m",
+        "end_station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "side": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "description": "路基侧别（教程的 Z/Y 行；实测为 [LEFT]/[RIGHT]）"
+        },
+        "interval_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "该侧第几个区间（源文件行序，从 1 起）"
+        },
+        "start_station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "区间起点桩号，单位**米**（源文件原生单位，落库时再换算 km）"
+        },
+        "end_station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "区间终点桩号，单位**米**"
+        },
+        "median_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "中央分隔带宽度（0 = 无中央分隔带）"
+        },
+        "half_carriageway_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "半侧路面（行车道＋内侧路缘带）宽度"
+        },
+        "extra_lane_flag": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "有无附加车道的判断标识：0 无 / 1 或 2 有；为 2 时其下一行的 0 表示主线外侧路缘带宽度"
+        },
+        "hard_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "硬路肩宽度（折线法标注时是楔形端部鼻端半径）"
+        },
+        "earth_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "土路肩宽度（同上）"
+        },
+        "extra_lane_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "有附加车道时的项目文件名；源文件写 0（无）时此处为 null"
         }
       }
     }

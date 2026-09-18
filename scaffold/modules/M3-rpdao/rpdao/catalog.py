@@ -41,7 +41,11 @@ DOMAINS: dict[str, Domain] = {
          # ↓ 第 11 张：超高过渡。原列在 v0.4 待办（"超高路幅"），
          #   因读纬地教程 §13.5 发现 geometry_point 的 superelev_pct 单列存不下
          #   "左右各一个行车道横坡"，故提前落地，与 .SUP 变化点一一对应。
-         "superelev_transition"),
+         "superelev_transition",
+        # ↓ 第 12 张：路幅宽度。原列在 v0.4 待办，因 section_design_attr.roadway_width_m
+        #   是**标量**、而路幅宽度本来就随桩号变（加宽/匝道/交叉口/变速车道），
+        #   一个标量装不下分段变化 → 按「存设计输入、导出派生量」提前落地。
+        "roadbed_width"),
         # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
         (),
         "关系库",
@@ -99,10 +103,11 @@ CROSS_TABLES: tuple[str, ...] = (
 # DDL v0.3 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
 # 由 tests/contract/test_ddl_dict_catalog.py 强制核对——不允许各自漂移。
 # 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）；
-#       v0.3 = 43 表（+GE 域 11 张，契约变更工单 #2 ＋ 纬地教程 §13.5 校正）。
-#       第二批 10 张（横断面/路幅宽度/路基土方/构造物）随 v0.4 落地 → 53 表。
-#       （原为 11 张，其中"超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition）
-EXPECTED_PHYSICAL_TABLES = 43
+#       v0.3 = 44 表（+GE 域 12 张，契约变更工单 #2 ＋ 纬地教程 §13.5/§13.4 校正）。
+#       第二批 9 张（横断面/路基土方/构造物）随 v0.4 落地 → 53 表。
+#       （原为 11 张："超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition，
+#         "路幅宽度"已按教程 §13.4 提前落到 v0.3 的 roadbed_width）
+EXPECTED_PHYSICAL_TABLES = 44
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -124,7 +129,7 @@ TABLE_OWNER: dict[str, str] = {
     "station_sequence": "M2", "station_equation": "M2",
     "alignment_pi": "M2", "alignment_element": "M2",
     "profile_grade_point": "M2", "profile_ground_point": "M2", "geometry_point": "M2",
-    "superelev_transition": "M2",
+    "superelev_transition": "M2", "roadbed_width": "M2",
     # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
     # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
     # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，

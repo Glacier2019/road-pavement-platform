@@ -2,18 +2,19 @@
 
 能力 vs 已实现（**这个区分必须留在代码里，不能只留在文档里**）
 -------------------------------------------------------------------------------
-一套完整的纬地工程（.PRJ〔文件名〕段列了 18 类文件）**有能力**提供 8 个几何段；
-本适配器**已实现 6 段**：`.STA` → `station_sequence`、`.JD` → `alignment_pi`、
+一套完整的纬地工程（.PRJ〔文件名〕段列了 18 类文件）**有能力**提供 9 个几何段；
+本适配器**已实现 7 段**：`.STA` → `station_sequence`、`.JD` → `alignment_pi`、
 `.pm` → `alignment_element`（平面线形单元）、`.DMX` → `profile_ground_point`（纵断面地面线）、
 `.ZDM` → `profile_grade_point`（纵断面设计线）、
-`.SUP` → `superelev_transition`（超高过渡变化点，E(s) 的真源段）。
+`.SUP` → `superelev_transition`（超高过渡变化点，E(s) 的真源段）、
+`.WID` → `roadbed_width`（路幅宽度分段）。
 
 **平纵都齐了，故本工程的几何等级到 L3** —— L3 要求设计线与地面线**同时**具备
 （见 base.py 里那条 any→all 的说明：只给地面线不算"有纵断面设计"）。
 ⚠ 超高**不参与**等级判定：L0–L4 是平/纵/横的完整度，横坡是平纵都具备之后的
 **设计细节**，不是一级几何。所以多实现了 `.SUP`，等级仍然是 L3。
 
-因此 IR 里 `capabilities` 列 8 项、`segments` 有 6 项，`gaps` 如实登记 2 项，
+因此 IR 里 `capabilities` 列 9 项、`segments` 有 7 项，`gaps` 如实登记 2 项，
 其中多为 `not_supported`（"适配器还没写"），可能是 `source_absent`（"源里没这个文件"）。
 **这两种缺口对用户的含义完全不同**：前者等代码、后者要去找文件。
 混成一个"缺纵断面"，用户无从下手。
@@ -26,7 +27,7 @@ from typing import Any
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
-from . import dmx, jd, pm, sta, sup, zdm
+from . import dmx, jd, pm, sta, sup, wid, zdm
 
 VENDOR = "weidi-hintcad"
 
@@ -38,6 +39,7 @@ CAPABILITIES: tuple[str, ...] = (
     "profile_grade_point",
     "profile_ground_point",
     "superelev_transition",
+    "roadbed_width",
     "geometry_point",
     "cross_section",
 )
@@ -45,7 +47,7 @@ CAPABILITIES: tuple[str, ...] = (
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
 IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_element",
                                 "profile_ground_point", "profile_grade_point",
-                                "superelev_transition")
+                                "superelev_transition", "roadbed_width")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -59,6 +61,7 @@ _PARSERS: dict[str, Any] = {
     "profile_ground_point": dmx,
     "profile_grade_point": zdm,
     "superelev_transition": sup,
+    "roadbed_width": wid,
 }
 
 
@@ -120,6 +123,7 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     "profile_grade_point": (".ZDM", "纵断面设计文件"),
     "profile_ground_point": (".DMX", "纵断面地面线文件"),
     "superelev_transition": (".SUP", "超高过渡数据文件"),
+    "roadbed_width": (".WID", "路幅宽度数据文件"),
     "geometry_point": (".tf", "土方数据文件（逐桩坐标）"),
     "cross_section": (".HDM", "横断面地面线文件"),
 }
@@ -144,6 +148,7 @@ def build_ir(project_dir: str | pathlib.Path, *,
     # .STA 是 5.84，而 .JD/.pm/.DMX/.ZDM 都是 5.83 —— 只留第一个的话，
     # "另外四个文件是另一个版本"这件事会被静默吃掉，而跨版本格式差异无从保证。
     versions: dict[str, str] = {}
+    warns_at_parse: list[str] = []
 
     for seg in CAPABILITIES:
         suffix, kind = SEGMENT_FILES[seg]
@@ -172,6 +177,10 @@ def build_ir(project_dir: str | pathlib.Path, *,
             version = version or out["vendor_version"]
             versions[seg] = out["vendor_version"]
             segments[seg] = out[parser.PAYLOAD_KEY]
+            # 解析器可把「可疑但合法」的发现放在**顶层** notes（不进 payload ——
+            # payload 会被原样塞进 IR，而 IR 的段定义是 additionalProperties: false，
+            # 内部键会被 schema 拒）。对没有 notes 的解析器这是 no-op。
+            warns_at_parse += out.get("notes") or []
             # note 是自由文本，正好用来记该文件自报的版本 —— 这样"哪个文件是哪个版本"
             # 在 source.files 里逐条可见，而不是只留一个汇总值。
             files.append({"name": path.name, "kind": kind, "parse_status": "ok",
@@ -189,7 +198,8 @@ def build_ir(project_dir: str | pathlib.Path, *,
             reasons[seg] = "parse_blocked"
 
     # 只有两段都拿到才能做的跨文件动作。单看一份文件做不了这些事。
-    warns: list[str] = []
+    # （warns_at_parse 是**单文件内部**的发现，由解析器自己给出，先攒着）
+    warns: list[str] = list(warns_at_parse)
 
     # ⓪ 混版告警：同一套工程里出现了多个厂商版本。放在最前，因为它是"整批数据的
     #    来源前提"，后面那些对质结论都建立在"格式一致"这个假设上。
@@ -241,6 +251,16 @@ def build_ir(project_dir: str | pathlib.Path, *,
             warns += sup.check_against_stations(segments["superelev_transition"],
                                                 segments["station_sequence"])
 
+    # ⑥ 路幅宽度：区间连续性 + 覆盖范围。
+    #    ⚠ 覆盖检查与 .ZDM 的**含义相反**：.ZDM 不覆盖全线是"设计没做到头"（错误），
+    #    而 .WID 不覆盖全线是**源文件的真实缺口**（本工程后 103.960 m 就没有宽度数据）——
+    #    报出来是为了让下游知道"落在这段里取不到宽度"，不是因为文件格式不对。
+    if segments.get("roadbed_width"):
+        warns += wid.check_intervals(segments["roadbed_width"])
+        if segments.get("station_sequence"):
+            warns += wid.check_against_stations(segments["roadbed_width"],
+                                                segments["station_sequence"])
+
     return make_ir(
         vendor=VENDOR,
         origin="file",
@@ -255,4 +275,4 @@ def build_ir(project_dir: str | pathlib.Path, *,
 
 
 __all__ = ["VENDOR", "CAPABILITIES", "IMPLEMENTED", "SEGMENT_FILES", "build_ir",
-           "sta", "jd", "pm", "prj", "dmx", "zdm", "sup"]
+           "sta", "jd", "pm", "prj", "dmx", "zdm", "sup", "wid"]
