@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://road-pavement-platform/contracts/design-import/road_geometry_ir.v0.1.schema.json",
-  "title": "道路几何中间表示（Road Geometry IR）v0.1",
+  "$id": "https://road-pavement-platform/contracts/design-import/road_geometry_ir.v0.2.schema.json",
+  "title": "道路几何中间表示（Road Geometry IR）v0.2",
   "description": "契约⑤。设计数据导入的**格式无关**中间表示：任何来源（纬地 HintCAD / 鸿业 / 图纸人工录入 / 由监测数据反推）的采集适配器都产出本结构，下游的校验与落库**只认它**。因此新增一家厂商格式 = 新增一个适配器，校验规则与落库路径不必重写。",
   "type": "object",
   "required": [
@@ -15,7 +15,7 @@
   "additionalProperties": false,
   "properties": {
     "ir_version": {
-      "const": "0.1"
+      "const": "0.2"
     },
     "source": {
       "$ref": "#/definitions/source"
@@ -52,7 +52,7 @@
   },
   "definitions": {
     "segment": {
-      "description": "几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对（不另造一套别名）。",
+      "description": "几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对（不另造一套别名）。 v0.2 起含 superelev_transition（超高过渡，E(s) 的真源段）。",
       "enum": [
         "station_sequence",
         "station_equation",
@@ -61,7 +61,8 @@
         "profile_grade_point",
         "profile_ground_point",
         "geometry_point",
-        "cross_section"
+        "cross_section",
+        "superelev_transition"
       ]
     },
     "level": {
@@ -231,6 +232,14 @@
           "items": {
             "type": "object"
           }
+        },
+        "superelev_transition": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/superelev_point"
+          },
+          "minItems": 2,
+          "description": "超高过渡变化点（.SUP）。**不是逐桩**：它是过渡的转折点，本工程实测 76 个，而 station_sequence 逐桩 332 个 —— 两者粒度不同，故单独成段。逐桩的插值结果落在 geometry_point 的六列横坡上。"
         }
       }
     },
@@ -513,6 +522,69 @@
         "aux_y": {
           "type": "number",
           "description": "第 2 组坐标，**用途未定论**：直线单元的它是中点（已验证），曲线单元的它不是弧中点（到圆心 453.5 而 R=450）。未定论前不赋予语义。"
+        }
+      }
+    },
+    "superelev_point": {
+      "description": "超高过渡的一个变化点。六列横坡绕桩号**左右对称**，依据《纬地道路辅助设计系统教程 v5.88》§13.5：「每一行前三项数据与后三项数据绕第四项数据呈对称位置排列。分别为 左侧土路肩的横坡值、左侧硬路肩的横坡值、左侧行车道（路面）的横坡值、桩号、右侧行车道横坡值、右侧硬路肩的横坡值、右侧土路肩横坡值。其中数据 9999 表示可以忽略此数据，横坡渐变至此位置时，系统跳过此数据的计算继续进行横坡的超高渐变。」 —— 故六个横坡值**可空**：null 表示源文件写了 9999，即「该列在此位置不参与约束」，不是缺值、也不是沿用上值。",
+      "type": "object",
+      "required": [
+        "seq_no",
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "seq_no": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "过渡变化点序号（.SUP 行序，从 1 起）"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "桩号，单位**米**（源文件原生单位，落库时再换算 km）"
+        },
+        "earth_shoulder_left_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "左侧土路肩横坡 %（源第 1 项）"
+        },
+        "hard_shoulder_left_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "左侧硬路肩横坡 %（源第 2 项）"
+        },
+        "lane_left_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "左侧行车道（路面）横坡 % ＝左半幅超高（源第 3 项）"
+        },
+        "lane_right_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "右侧行车道（路面）横坡 % ＝右半幅超高（源第 5 项）"
+        },
+        "hard_shoulder_right_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "右侧硬路肩横坡 %（源第 6 项）"
+        },
+        "earth_shoulder_right_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "右侧土路肩横坡 %（源第 7 项）"
         }
       }
     }

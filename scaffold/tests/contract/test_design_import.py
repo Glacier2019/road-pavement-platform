@@ -40,10 +40,10 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta, zdm       # noqa: E402
+from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta, sup, zdm    # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
-IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.1.schema.json"
+IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.2.schema.json"
 DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
 
 
@@ -593,11 +593,15 @@ def main() -> int:
         # 等级断言故意把「已实现段清单」也一起钉住：将来往 IMPLEMENTED 里加了新解析器，
         # 这条会立刻红，逼你回来确认新等级是否符合预期——而不是让它悄悄变。
         # 已经生效过两次：加 .pm 时红了；加 .DMX 时又红了，而这次答案是"等级**不该**动"。
+        # 第 3 次变红：加 .SUP 时又红了。而这次的答案**仍然是"等级不该动"** ——
+        # 超高是平纵都具备之后的**设计细节**（横坡），不是一级几何；L0–L4 只认平/纵/横。
+        # 所以下面把 superelev_transition 加进已实现清单，而 level 断言依旧是 L3。
         check("★ 等级 = L3（.ZDM/.DMX 都实现：设计线与地面线同时具备）",
               full["geometry_level"] == "L3"
               and sorted(weidi.IMPLEMENTED)
               == ["alignment_element", "alignment_pi", "profile_grade_point",
-                  "profile_ground_point", "station_sequence"],
+                  "profile_ground_point", "station_sequence",
+                  "superelev_transition"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
         gpts = full["segments"].get("profile_ground_point", [])
         check("纵断面地面线 332 条（与桩号条数相同）", len(gpts) == 332, f"实为 {len(gpts)}")
@@ -628,7 +632,7 @@ def main() -> int:
               sorted(f["note"] for f in full["source"]["files"]
                      if f["parse_status"] == "ok")
               == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
-                  "厂商版本 5.83", "厂商版本 5.84"],
+                  "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.84"],
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
         _vps = full["segments"]["profile_grade_point"]
@@ -744,12 +748,148 @@ def main() -> int:
             check("派生纵坡量级合理（|i| < 20%，超出即说明列错位或推导错）",
                   grades and max(abs(g) for g in grades) < 20.0,
                   f"最大 {max(abs(g) for g in grades):.4f}%")
-        check("台账登记了 7 类文件（含未实现的）", len(full["source"]["files"]) == 7,
+        check("台账登记了 8 类文件（含未实现的）", len(full["source"]["files"]) == 8,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
-    else:
-        print("  – 跳过（docpipe/materials/纬地工程项目文件 不在本机）")
+    # ── 第 6c 组：.SUP 超高过渡解析器（应通过 / 应拒绝两侧）─────────────────
+    print("\n第 6c 组  .SUP 超高过渡解析器（应通过 / 应拒绝两侧）")
+    _sh = "HINTCAD5.83_SUP_SHUJU\r\n"
+
+    def _sup_row(a, b, c, st, d, e, f):
+        return f"{a}\t{b}\t{c}\t{st}\t{d}\t{e}\t{f}\r\n"
+
+    # 正例：正常路拱（左右同号）→ 单向超高（左右异号），中间夹一个 9999
+    _s_ok = (_sh
+             + _sup_row("-3.00", "-2.00", "-2.00", "0.000", "-2.00", "-2.00", "-3.00")
+             + _sup_row("9999.00", "9999.00", "9999.00", "100.000", "9999.00", "9999.00", "-3.00")
+             + _sup_row("-3.00", "4.00", "4.00", "200.000", "-4.00", "-4.00", "-4.00"))
+    _s = sup.parse(_s_ok, file="ok.SUP")
+    check("应通过：解析出 3 个过渡变化点", len(_s["points"]) == 3, str(len(_s["points"])))
+    check("应通过：厂商版本从魔数取出", _s["vendor_version"] == "5.83", _s["vendor_version"])
+    check("应通过：seq_no 从 1 起编号", [p["seq_no"] for p in _s["points"]] == [1, 2, 3])
+    check("应通过：detect 认得自家魔数", sup.detect(_s_ok) is True)
+    check("应通过：detect 不认别家的魔数", sup.detect("HINTCAD5.83_ZDM_SHUJU\r\n") is False)
+    check("应通过：段名与文件类别与 SEGMENT_FILES 登记一致",
+          sup.SEGMENT == "superelev_transition"
+          and weidi.SEGMENT_FILES["superelev_transition"][0] == ".SUP"
+          and weidi.SEGMENT_FILES["superelev_transition"][1] == sup.FILE_KIND,
+          f"{sup.SEGMENT} / {sup.FILE_KIND}")
+    # ★ 9999 必须收成 None，而不是 0、也不是沿用上值
+    _p2 = _s["points"][1]
+    check("★ 应通过：9999 → None（不是 0）",
+          _p2["lane_left_pct"] is None and _p2["hard_shoulder_left_pct"] is None
+          and _p2["lane_right_pct"] is None,
+          str({k: v for k, v in _p2.items() if k.endswith("_pct")}))
+    check("应通过：同行的非 9999 列原样保留（-3.00）",
+          _p2["earth_shoulder_right_pct"] == -3.0, str(_p2["earth_shoulder_right_pct"]))
+    # 超高段左右**异号**：教程说的"对称"是位置对称，不是值相等
+    check("应通过：超高段左右行车道异号（左 +4 / 右 −4）",
+          _s["points"][2]["lane_left_pct"] == 4.0
+          and _s["points"][2]["lane_right_pct"] == -4.0)
+
+    # ★★ 元测试：证明「9999 跳过该列」与「沿用上值」是**可区分**的两种语义。
+    #     ★ 期望值**由数据算出来**，不写死：跳过语义下，该列的两个实值点是
+    #     (0, -2.00) 与 (200, +4.00)，在 150 处线性插值即得期望值。
+    #     （这里踩过一次：第一版按"在 100 与 200 之间插"心算成 2.00，实际是 2.50 ——
+    #      把期望值写死就是这种错法的温床。）
+    _lpts = [(p["station_m"], p["lane_left_pct"]) for p in _s["points"]
+             if p["lane_left_pct"] is not None]
+    (_s1, _v1), (_s2, _v2) = _lpts[0], _lpts[-1]
+    _t = (150.0 - _s1) / (_s2 - _s1)
+    _expect = _v1 + (_v2 - _v1) * _t
+    _hold = _v1                              # 「沿用上值」语义下会得到的值
+    _mid = sup.superelev_at(_s["points"], 150.0, "lane_left_pct")
+    check(f"★★ 元测试：跨 9999 插值 = {_expect:.2f}（跳过语义，期望值由数据算得）",
+          _mid is not None and abs(_mid - _expect) < 1e-9,
+          f"实为 {_mid}")
+    check(f"★★ 元测试：与「沿用上值」({_hold:.2f}) 确实不同 —— 该断言可伪证",
+          abs(_expect - _hold) > 1e-9,
+          f"跳过={_expect} 沿用={_hold}")
+
+    check("插值：0.000 m 处 = 源值 -2.00",
+          sup.superelev_at(_s["points"], 0.0, "lane_left_pct") == -2.0)
+    check("插值：范围之外不外推，返回 None",
+          sup.superelev_at(_s["points"], -1.0, "lane_left_pct") is None
+          and sup.superelev_at(_s["points"], 9999.0, "lane_left_pct") is None)
+    # 某列**全为** 9999 → 没有任何约束点 → None（另造一组，不指望正例里有这种列）
+    _none_col = [dict(p, lane_left_pct=None) for p in _s["points"]]
+    check("插值：某列全是 9999 时返回 None（没有可用的约束点）",
+          sup.superelev_at(_none_col, 150.0, "lane_left_pct") is None)
+
+    # 物理合理性：正例必须**零告警**（否则告警就是噪声，人会学会无视它）
+    check("物理检查：正例零告警", sup.check_superelev(_s["points"]) == [],
+          str(sup.check_superelev(_s["points"])))
+    # 三条判据各自可触发（非空洞）
+    _bad_sh = [dict(_s["points"][0], earth_shoulder_left_pct=2.0)]
+    check("★ 物理检查：土路肩为正 → 告警", bool(sup.check_superelev(_bad_sh)))
+    _bad_sum = [dict(_s["points"][0], lane_left_pct=3.0, lane_right_pct=3.0)]
+    check("★ 物理检查：左右行车道横坡之和为正 → 告警", bool(sup.check_superelev(_bad_sum)))
+    _all_nine = [dict(_s["points"][0], **{k: None for _, k in sup.PCT_COLUMNS})]
+    check("★ 物理检查：整行六列全 None → 告警", bool(sup.check_superelev(_all_nine)))
+    # 超界检查：只查越界，**不**查首尾对齐（.SUP 不必覆盖全线）
+    _stn = [{"station_m": 0.0}, {"station_m": 200.0}]
+    check("对账：过渡落在路线内则不报", sup.check_against_stations(_s["points"], _stn) == [])
+    check("对账：过渡晚于路线终点要报",
+          bool(sup.check_against_stations(_s["points"], [{"station_m": 0.0},
+                                                         {"station_m": 150.0}])))
+
+    check_raises("应拒绝：魔数是 .ZDM 的（张冠李戴）",
+                 "HINTCAD5.83_ZDM_SHUJU\r\n"
+                 + _sup_row("-3.00", "-2.00", "-2.00", "0.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="魔数不匹配")
+    check_raises("应拒绝：非纬地文件", "随便一个文本\r\n", parser=sup, expect="魔数不匹配")
+    check_raises("应拒绝：字段数 6（漏了一列）",
+                 _sh + "-3.00\t-2.00\t-2.00\t0.000\t-2.00\t-2.00\r\n"
+                 + _sup_row("-3.00", "-2.00", "-2.00", "10.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="字段数应为 7")
+    # ★ 桩号列是唯一不接受 9999 的列（实测源文件 0 次）
+    check_raises("★ 应拒绝：桩号列出现 9999（桩号不能被「忽略」）",
+                 _sh + _sup_row("-3.00", "-2.00", "-2.00", "9999.00", "-2.00", "-2.00", "-3.00")
+                 + _sup_row("-3.00", "-2.00", "-2.00", "10.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="桩号列出现 9999")
+    check_raises("应拒绝：桩号未严格递增",
+                 _sh + _sup_row("-3.00", "-2.00", "-2.00", "10.000", "-2.00", "-2.00", "-3.00")
+                 + _sup_row("-3.00", "-2.00", "-2.00", "5.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="未严格递增")
+    check_raises("应拒绝：桩号为负",
+                 _sh + _sup_row("-3.00", "-2.00", "-2.00", "-1.000", "-2.00", "-2.00", "-3.00")
+                 + _sup_row("-3.00", "-2.00", "-2.00", "10.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="桩号为负")
+    check_raises("★ 应拒绝：横坡串成了桩号那种量级（列错位）",
+                 _sh + _sup_row("-3.00", "-2.00", "5805.421", "0.000", "-2.00", "-2.00", "-3.00")
+                 + _sup_row("-3.00", "-2.00", "-2.00", "10.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="超出合理区间")
+    check_raises("应拒绝：横坡不是数字",
+                 _sh + _sup_row("-3.00", "-2.00", "abc", "0.000", "-2.00", "-2.00", "-3.00")
+                 + _sup_row("-3.00", "-2.00", "-2.00", "10.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="不是合法数字")
+    check_raises("应拒绝：只有 1 个过渡点（构不成过渡）",
+                 _sh + _sup_row("-3.00", "-2.00", "-2.00", "0.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="不足 2 个")
+    check_raises("应拒绝：只有魔数没有数据行", _sh, parser=sup, expect="没有任何数据行")
+    check_raises("应拒绝：空文件", "", parser=sup, expect="空文件")
+    check_raises("应拒绝：文件中间有空行（漏读一段过渡）",
+                 _sh + _sup_row("-3.00", "-2.00", "-2.00", "0.000", "-2.00", "-2.00", "-3.00")
+                 + "\r\n"
+                 + _sup_row("-3.00", "-2.00", "-2.00", "10.000", "-2.00", "-2.00", "-3.00"),
+                 parser=sup, expect="中间出现空行")
+    check("末尾空行应通过（不误杀）",
+          len(sup.parse(_s_ok + "\r\n", file="ok.SUP")["points"]) == 3)
+
+    # ★ 解析结果必须过契约⑤ v0.2 的 superelev_point 定义（真契约校验，非自说自话）
+    _spv = jsonschema.Draft7Validator(
+        json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"]["superelev_point"])
+    check("★ 解析出的每一点都过 schema 的 superelev_point 定义",
+          not [e for p in _s["points"] for e in _spv.iter_errors(p)],
+          str([e.message for p in _s["points"] for e in _spv.iter_errors(p)][:2]))
+    # 元测试：该定义必须**真的会拒**（否则上面那条是空断言）
+    _badpt = dict(_s["points"][0]); _badpt["typo_col"] = 1
+    check("★ 元测试：superelev_point 定义真的会拒绝多余列",
+          bool(list(_spv.iter_errors(_badpt))))
+    _badpt2 = dict(_s["points"][0]); del _badpt2["station_m"]
+    check("★ 元测试：superelev_point 定义真的会拒绝缺 station_m",
+          bool(list(_spv.iter_errors(_badpt2))))
 
     # ── 第 7 组：桩号精度 —— 真实数据必须装得进 DDL 声明的精度 ──────────────
     # 本轮实测抓到：.STA 里 1659.917 与 1660.000 相距仅 0.083 m，
@@ -1090,9 +1230,10 @@ def main() -> int:
     counts = {t: len(r) for t, r in planned["tables"].items()}
     # 合成 IR 里没有纵断面，故两张新表是 0 行 —— 但仍然必须在 plan 的产出里：
     # 漏掉一个键会让落库阶段静默少写一张表，而不是报错。
-    check("行数：桩号 30 / 交点 1 / 单元 4 / 设计线 0 / 地面线 0",
+    check("行数：桩号 30 / 交点 1 / 单元 4 / 设计线 0 / 地面线 0 / 超高 0",
           counts == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4,
-                     "profile_grade_point": 0, "profile_ground_point": 0},
+                     "profile_grade_point": 0, "profile_ground_point": 0,
+                     "superelev_transition": 0},
           str(counts))
     check("交点来源 = 推导（.JD 作输入被忽略）",
           planned["pi_source"] == "derived" and planned["pi_from_file_ignored"] is True,
@@ -1218,9 +1359,11 @@ def main() -> int:
 
             # ① 预检：dry_run 必须一行都不写（这就是 M9 导入页"预检"的语义）
             rep = di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch, dry_run=True)
-            check("dry_run 报告计划行数（桩号 30 / 交点 1 / 单元 4）",
+            check("dry_run 报告计划行数（桩号 30 / 交点 1 / 单元 4 / 超高 0）",
                   rep["planned"] == {"station_sequence": 30, "alignment_pi": 1,
-                                     "alignment_element": 4}, str(rep["planned"]))
+                                     "alignment_element": 4,
+                                     "profile_grade_point": 0, "profile_ground_point": 0,
+                                     "superelev_transition": 0}, str(rep["planned"]))
             check("dry_run 后没有批次行",
                   dao_e2e.scalar("SELECT count(*) FROM data_import_batch WHERE batch_no=%(b)s",
                                  {"b": batch}) == 0)
@@ -1464,9 +1607,10 @@ def main() -> int:
     # 已实现适配器的后缀才给 ok。加 .DMX/.ZDM 后从 3 个变 5 个 —— 这条断言当时
     # 变红是对的（它抓住了行为变化）。103/104 是不是 .DMX/.ZDM 已从库里核实：
     #   103 = 毕设.DMX         104 = 纵断面设计拟合.ZDM
-    check("parse_status 只对已实现适配器的后缀给 ok（实测 5 个）",
+    # 107 是不是 .SUP 也已从库里核实：107 = 052201341刘其立道路毕设超高设计文件.SUP
+    check("parse_status 只对已实现适配器的后缀给 ok（实测 6 个）",
           sorted(f["file_kind_code"] for f in planned["tables"]["design_file"]
-                 if f["parse_status"] == "ok") == ["101", "102", "103", "104", "109"],
+                 if f["parse_status"] == "ok") == ["101", "102", "103", "104", "107", "109"],
           str([f["file_kind_code"] for f in planned["tables"]["design_file"]
                if f["parse_status"] == "ok"]))
     attr = planned["tables"]["section_design_attr"][0]

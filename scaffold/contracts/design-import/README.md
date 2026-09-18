@@ -36,7 +36,7 @@
 
 ## IR 结构
 
-Schema：`road_geometry_ir.v0.1.schema.json`
+Schema：`road_geometry_ir.v0.2.schema.json`
 
 | 字段 | 含义 |
 |---|---|
@@ -105,7 +105,12 @@ Schema：`road_geometry_ir.v0.1.schema.json`
 1. 写 `adapters/weidi/jd.py`：`detect(text)` + `parse(text) -> {...}`，畸形输入抛 `SourceInvalid`；
 2. 在 `adapters/weidi/__init__.py` 的 `IMPLEMENTED` 里加上段名；
 3. 在 `tests/contract/test_design_import.py` 增加**应通过 + 应拒绝两侧**的用例；
-4. 跑 `./run_contract_tests.sh design`——**IR 结构、校验、落库都不用改**。
+4. 跑 `./run_contract_tests.sh design`。
+
+⚠ **第 4 步"不用改"只对"该段已在 `segments` 里"成立。** 若新段**不在**契约里，
+第 4 步要改成：先给 schema 的 `segments` 加键 + 定义点结构 + 升 `ir_version`，
+再动 `LOADABLE_TABLES`/`plan`/`load`。`.SUP`（超高过渡）就是这么走的 ——
+见下节「`.SUP` 与 `.PRJ`：一个进 `segments`、一个不进」。
 
 第 3 步的"应拒绝"一侧不可省：**一个永远不会失败的检查，比没有检查更糟**。
 桩号是下游一切逐桩数据的对齐基准，静默读错一条，挂在上面的
@@ -117,7 +122,7 @@ WIM / 病害 / 试验数据**全部错位且没有任何报错**。
 
 | 来源 | 适配器 | `origin` | 现状 |
 |---|---|---|---|
-| 纬地 HintCAD | `weidi/` | `file` | ✅ `.STA`/`.JD`/`.pm` 已实现（→ **L2**）；✅ `.PRJ` 项目档案另成一路（见下节）；`.ZDM`/`.DMX` 待做（→ L3） |
+| 纬地 HintCAD | `weidi/` | `file` | ✅ 已实现 6 段：`.STA`/`.JD`/`.pm`/`.DMX`/`.ZDM`/`.SUP`（→ **L3**）；✅ `.PRJ` 项目档案另成一路（见下节）；`geometry_point`/`cross_section` 待做（需 DDL v0.4） |
 | 鸿业 | `hongye/` | `file` | 待建 |
 | 只有图纸 | `manual/` | `manual` | 待建：人工读图 → 表格模板（桩号、X、Y、R、切线长、转角…） |
 | 无文件、只有监测数据 | `inferred/` | `inferred` | 待建：由监测断面实测坐标反推骨架（**只建 `road_line`/`road_section`/`station_sequence`**） |
@@ -140,9 +145,31 @@ L1 骨架就足以支撑逐桩数据的挂靠与定位。
 | `[项目分段N]`（起终点桩号/等级/车速/路幅/横坡/超高/加宽…） | `section_design_attr`（每分段 1 行）+ `road_line` + `road_section` |
 | `[文件名]`（声明的文件清单） | `design_file`（每个声明 1 行） |
 
-**为什么不塞进 `segments`**：`segments` 是 `additionalProperties: false` 的 8 个几何段，
+**为什么不塞进 `segments`**：`segments` 是 `additionalProperties: false` 的 9 个几何段，
 而且它的每一项都是"几何点数组"。硬塞一个项目对象进去，schema 就废了。
 所以 `.PRJ` 走**独立解析器 + 独立调用**，契约⑤ 的 IR 结构**未作任何改动**。
+
+### `.SUP` 与 `.PRJ`：一个进 `segments`、一个不进
+
+判据只有一条 —— **它是不是"沿桩号的点数组"**：
+
+| 文件 | 是什么 | 进 `segments` 吗 | 为什么 |
+|---|---|---|---|
+| `.PRJ` | **档案**：工程是谁、有哪些分段属性、声明了哪些文件 | ❌ 不进 | 它不是点数组，是**元数据**。硬塞进去 schema 就废了 → 走独立解析器 + 独立调用 |
+| `.SUP` | **逐桩点数组**：每个过渡变化点上 7 个数 | ✅ 进（v0.2 起第 9 段） | 与 `station_sequence`/`profile_ground_point` **同类**；与 `alignment_element` 一样是某个派生量的**真源**（它给 E(s)，`alignment_element` 给 κ(s)） |
+
+`.SUP` 因此**改了契约**（v0.1 → v0.2：加段 + 加 `superelev_point` 定义 + 升 `ir_version`）。
+这与"新增适配器不用改 IR"并不矛盾 —— 那句话的前提是**该段已在契约里**。
+
+**为什么值得单列一段**：`.SUP` 是**过渡转折点**（本工程 76 个），而 `station_sequence`
+是**逐桩**（332 个）—— 粒度不同，混成一张表会让"逐桩表里混进了转折点"无从表达。
+逐桩的六列横坡是**插值后**的结果，落在 `geometry_point`。
+
+**9999 的语义已用数据独立验证**：教程 §13.5 说 9999 是「可以忽略此数据……系统跳过
+此数据的计算继续进行横坡的超高渐变」。实测跨过一个 9999 后，该列的下一个实值
+**有时相同、有时改变**（左土路肩 39 同 / 16 变；左行车道 25 同 / 24 变）——
+若是"沿用上值"，跨过后应当**全部相同**。数据否决了"沿用上值"，与教程一致。
+故解析器把 9999 收成 `null`（`.SUP` 每格非数即 9999，`null` 与"缺值"无歧义）。
 
 ### 两段式调用
 

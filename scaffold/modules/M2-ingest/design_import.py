@@ -39,7 +39,8 @@ from adapters import geom
 # 落库器只写这几张表。白名单是刻意的：**新增映射必须在这里显式登记**，
 # 免得一个 IR 段的增删悄悄改变写入范围。
 LOADABLE_TABLES = ("station_sequence", "alignment_pi", "alignment_element",
-                   "profile_grade_point", "profile_ground_point")
+                   "profile_grade_point", "profile_ground_point",
+                   "superelev_transition")
 
 # 推导值与 .JD 文件值的允许偏差。实测全部 ≤ 3.6×10⁻⁸，此处留三个数量级余量，
 # 但仍远小于任何有工程意义的差（1 mm = 1×10⁻³）。
@@ -145,6 +146,55 @@ def _plan_grade_points(ir: Mapping[str, Any], section_id: int) -> list[dict[str,
             "grade_out_pct": p.get("grade_out_pct"),
             "grade_len_m": p.get("grade_len_m"),
         })
+    return out
+
+
+#: 超高六列 → 中文名。顺序即教程 §13.5 的**列位置顺序**（左三 / 桩号 / 右三），
+#: 与 ``adapters.weidi.sup.PCT_COLUMNS`` 必须一致。用途有二：生成 ``remark`` 里
+#: 「哪几列被 9999 跳过」的可读文字；以及给测试一个稳定的列顺序。
+_SUP_PCT_LABELS: tuple[tuple[str, str], ...] = (
+    ("earth_shoulder_left_pct", "左侧土路肩横坡"),
+    ("hard_shoulder_left_pct", "左侧硬路肩横坡"),
+    ("lane_left_pct", "左侧行车道横坡"),
+    ("lane_right_pct", "右侧行车道横坡"),
+    ("hard_shoulder_right_pct", "右侧硬路肩横坡"),
+    ("earth_shoulder_right_pct", "右侧土路肩横坡"),
+)
+
+
+def _plan_superelev_transitions(ir: Mapping[str, Any],
+                                section_id: int) -> list[dict[str, Any]]:
+    """``superelev_transition`` 行（超高过渡**变化点**，.SUP 的真源）。
+
+    ``station_km`` 是**千米**（表里就是这么定的），IR 里是米 —— 与
+    :func:`_plan_grade_points` 同一处换算，不留给下游各自换算。
+
+    ▲ 六个横坡的 ``None`` **原样带过去**，不填 0。IR 里的 ``None`` 来自源文件的
+    9999，教程 §13.5 的语义是「可以忽略此数据，横坡渐变至此位置时，系统跳过此数据的
+    计算继续进行横坡的超高渐变」—— 也就是**该列在此点不参与约束**。填 0 会把
+    "不约束"变成"约束为平坡"，是**造数据**：下游会算出一条源文件里没有的过渡曲线。
+    （.SUP 每格非数即 9999，所以 NULL 与"缺值"无歧义。）
+
+    ``remark`` 记下**哪几列被 9999 跳过了**。这不是派生几何量，是**来源注记**：
+    表里 NULL 只说明"不约束"，说不出"为什么是 NULL、其他列是否还约束着"，
+    而人翻这张表时正需要这一句。
+    """
+    out = []
+    for p in ir["segments"].get("superelev_transition") or []:
+        row: dict[str, Any] = {
+            "section_id": section_id,
+            "transition_seq": p["seq_no"],
+            "station_km": round(p["station_m"] / 1000.0, 6),
+        }
+        ignored: list[str] = []
+        for name, label in _SUP_PCT_LABELS:
+            v = p.get(name)
+            row[name] = v
+            if v is None:
+                ignored.append(label)
+        row["remark"] = (f"源文件 9999（忽略此数据）：{'、'.join(ignored)}"
+                         if ignored else None)
+        out.append(row)
     return out
 
 
@@ -284,6 +334,7 @@ def plan(ir: Mapping[str, Any], *, section_id: int,
         "alignment_element": _plan_elements(ir, section_id),
         "profile_grade_point": _plan_grade_points(ir, section_id),
         "profile_ground_point": _plan_ground_points(ir),
+        "superelev_transition": _plan_superelev_transitions(ir, section_id),
     }
     return {"tables": tables, "pi_source": pi_source,
             "pi_from_file_ignored": bool(pi_derived) and bool(pi_file)}
@@ -517,7 +568,16 @@ def load(ir: Mapping[str, Any], dao: Any, *,
             report["written"]["profile_ground_point"] = tx.insert(
                 "profile_ground_point", ground_rows, on_conflict=("station_id",))
 
-        # ⑥ 批次登记
+        # ⑥ 超高过渡变化点：锚 section_id，与其余 GE 表相同。
+        #    六个横坡的 None 是**源文件 9999「忽略此数据」**，原样写 NULL，不填 0
+        #    （见 _plan_superelev_transitions 的说明：填 0 会把"不约束"变成
+        #    "约束为平坡"，下游会算出一条源文件里没有的过渡曲线）。
+        if tables["superelev_transition"]:
+            report["written"]["superelev_transition"] = tx.insert(
+                "superelev_transition", tables["superelev_transition"],
+                on_conflict=("section_id", "transition_seq"))
+
+        # ⑦ 批次登记
         tx.insert("data_import_batch", [batch], on_conflict=("batch_no",))
 
     return report
@@ -563,7 +623,8 @@ ARCHIVE_TABLES = ("design_project", "road_line", "road_section",
 #: 已实现适配器的后缀 → 该文件可解析。用于 design_file.parse_status。
 _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
                        ".pm": "alignment_element", ".prj": "design_project",
-                       ".dmx": "profile_ground_point", ".zdm": "profile_grade_point"}
+                       ".dmx": "profile_ground_point", ".zdm": "profile_grade_point",
+                       ".sup": "superelev_transition"}
 
 
 def _basename(rel_path: str | None) -> str | None:
