@@ -256,7 +256,7 @@ def build_ir(project_dir: str | pathlib.Path, *,
     #    而 .WID 不覆盖全线是**源文件的真实缺口**（本工程后 103.960 m 就没有宽度数据）——
     #    报出来是为了让下游知道"落在这段里取不到宽度"，不是因为文件格式不对。
     if segments.get("roadbed_width"):
-        warns += wid.check_intervals(segments["roadbed_width"])
+        warns += wid.check_stations(segments["roadbed_width"])
         if segments.get("station_sequence"):
             warns += wid.check_against_stations(segments["roadbed_width"],
                                                 segments["station_sequence"])

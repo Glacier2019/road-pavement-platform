@@ -245,10 +245,10 @@
         "roadbed_width": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/roadbed_interval"
+            "$ref": "#/definitions/roadbed_point"
           },
           "minItems": 1,
-          "description": "路幅宽度分段（.WID）。一行 = **一侧**的一个桩号区间。教程 §13.4 说「数据每两行为一组，说明路基一侧某个桩号区间内的路幅宽度变化情况」，本段把每组的起、终点收成 start/end 两列。"
+          "description": "路幅宽度（.WID）。**一行源数据行 = 一个桩号**（一侧），与 superelev_transition 同形。教程 §13.4 说「数据每两行为一组，说明路基一侧某个桩号区间内的路幅宽度变化情况」——但每一行都有自己的桩号，两行是「这个区间的起、终点」。本段**照原样保留每一行**，不折叠成区间：① GE 域其余逐桩数据表都按桩号寻址，折叠等于另立一套区间寻址；② 组内两行本来就可不同（列 4），折叠必然丢一个值；③ geometry_point 要按桩号取宽度，点查才能直接对齐。"
         }
       }
     },
@@ -597,14 +597,14 @@
         }
       }
     },
-    "roadbed_interval": {
-      "description": "路幅宽度的一个桩号区间。依据《纬地道路辅助设计系统教程 v5.88》§13.4：「此文件描述了整个路线（或匝道）路幅左右侧的分段变化情况，特别是加宽变化。……一行\"Z\"字母或一行\"Y\"分别表示其后跟随的是描述左侧或右侧路幅变化的数据。……数据每两行为一组……此文件桩号区间必须成对出现，桩号区间要连续。」 ⚠ 实测 6.00 版的分段标记是 `[LEFT]`/`[RIGHT]`，**教程全文未覆盖这一写法**，故 side 由适配器两种写法归一到 left/right。",
+    "roadbed_point": {
+      "description": "路幅宽度的一个桩号（一侧）。依据《纬地道路辅助设计系统教程 v5.88》§13.4：「此文件描述了整个路线（或匝道）路幅左右侧的分段变化情况，特别是加宽变化。……一行 Z 字母或一行 Y 分别表示其后跟随的是描述左侧或右侧路幅变化的数据。……数据每两行为一组……此文件桩号区间必须成对出现，桩号区间要连续。」 ⚠ 实测 6.00 版的分段标记是 [LEFT]/[RIGHT]，**教程全文未覆盖这一写法**，故 side 由适配器两种写法归一到 left/right。 ★与 superelev_point 同一个模型：**分段常量**——值自本桩号起保持到同侧下一个桩号，所以取某桩号的宽度是**查变化点**，不是插值。",
       "type": "object",
       "required": [
         "side",
-        "interval_seq",
-        "start_station_m",
-        "end_station_m"
+        "seq_no",
+        "group_seq",
+        "station_m"
       ],
       "additionalProperties": false,
       "properties": {
@@ -615,20 +615,20 @@
           ],
           "description": "路基侧别（教程的 Z/Y 行；实测为 [LEFT]/[RIGHT]）"
         },
-        "interval_seq": {
+        "seq_no": {
           "type": "integer",
           "minimum": 1,
-          "description": "该侧第几个区间（源文件行序，从 1 起）"
+          "description": "该侧第几个数据行（源文件行序，从 1 起）"
         },
-        "start_station_m": {
+        "group_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "该侧第几个桩号区间（教程「每两行为一组」的组号）。同一 group_seq 的两行 = 这个区间的起、终点"
+        },
+        "station_m": {
           "type": "number",
           "minimum": 0,
-          "description": "区间起点桩号，单位**米**（源文件原生单位，落库时再换算 km）"
-        },
-        "end_station_m": {
-          "type": "number",
-          "minimum": 0,
-          "description": "区间终点桩号，单位**米**"
+          "description": "本行自己的桩号，单位**米**（源文件原生单位，落库时再换算 km）"
         },
         "median_width_m": {
           "type": [
@@ -649,7 +649,7 @@
             "integer",
             "null"
           ],
-          "description": "有无附加车道的判断标识：0 无 / 1 或 2 有；为 2 时其下一行的 0 表示主线外侧路缘带宽度"
+          "description": "有无附加车道的判断标识：0 无 / 1 或 2 有；为 2 时其下一行的 0 表示主线外侧路缘带宽度。★这一列**有意**允许同组两行不同"
         },
         "hard_shoulder_width_m": {
           "type": [

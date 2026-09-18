@@ -23,8 +23,8 @@
 --   §13.5 .sup 每行六列横坡「绕桩号左右对称」，行车道横坡才是超高
 --         → A15 的 superelev_pct 单列存不下左右，删除；改六列
 --         → 新增 A16 superelev_transition 存原始过渡变化点（9999 → NULL）
---   §13.4 .wid 7 列描述**分段**路幅宽度（「每两行为一组，说明路基一侧某个桩号
---         区间内的路幅宽度变化情况」）→ 新增 A17 roadbed_width
+--   §13.4 .wid 7 列描述**逐桩**路幅宽度（「数据每两行为一组，说明路基一侧某个
+--         桩号区间内的路幅宽度变化情况」；每行各有自己的桩号）→ 新增 A17 roadbed_width
 --         为什么必须提前落地：section_design_attr.roadway_width_m 是**标量**，
 --         而路幅宽度本来就随桩号变（加宽/匝道/交叉口/变速车道），标量装不下
 --         分段变化。按「存设计输入、导出派生量」：.WID 是输入（A17），
@@ -78,17 +78,43 @@ CREATE TABLE IF NOT EXISTS superelev_transition (
 COMMENT ON TABLE superelev_transition IS '超高过渡（.SUP）★设计输入，一行一个过渡变化点。六列横坡绕桩号左右对称；NULL 表示源文件写了 9999「可以忽略此数据」，即该列在此位置不参与约束、过渡照常继续（不是缺值、也不是沿用上值）。教程 §13.5';
 CREATE INDEX IF NOT EXISTS idx_superelev_trans_station ON superelev_transition(section_id, station_km);
 
--- ── ⑤ 新增 A17 roadbed_width：路幅宽度的原始设计输入（教程 §13.4）──────────
--- 一行 = **一侧**的一个桩号区间。教程的「两行一组」（起、终点）收成 start/end 两列。
--- ⚠ 教程 §13.4 用一行 Z/Y 引出左右侧数据；实测 6.00 版用 [LEFT]/[RIGHT] 段标题行，
---   **教程未覆盖这一写法**（全文无 [LEFT]），故 side 列两种来源都归一到 left/right。
+-- ── ⑤ 两表的**键都改为桩号** ─────────────────────────────────────────────
+-- 起因：逐桩数据表应当按桩号寻址（GE 域其余表皆如此，A9 station_sequence 的注释
+--       即写明"其余逐桩数据表以 station_id FK 锚定本表"）。原来 A16 用 transition_seq、
+--       A17 用 (side, interval_seq) 并存 start/end 区间 —— 等于在 GE 域**另立一套
+--       区间寻址**，且组内两行本来就可不同（列 4：有附加车道时上一行 1/2、下一行 0），
+--       折叠成区间必然丢一个值。
+--
+-- ⑤-1 A16 superelev_transition：换约束，**保数据**（实库有 76 行真实数据）
+--      先确认新键成立：实测 count(*)=76 = count(distinct (section_id, station_km))。
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'superelev_transition_section_id_transition_seq_key') THEN
+        ALTER TABLE superelev_transition
+            DROP CONSTRAINT superelev_transition_section_id_transition_seq_key;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'superelev_transition_section_id_station_km_key') THEN
+        ALTER TABLE superelev_transition
+            ADD CONSTRAINT superelev_transition_section_id_station_km_key
+            UNIQUE (section_id, station_km);
+    END IF;
+END $$;
+
+-- ⑤-2 A17 roadbed_width：**重建**（去掉 start/end，改成一行一个桩号）
+--      为什么重建是可接受的：该表是本版当天新建的，实库里只有导入器刚写的 2 行，
+--      内容**完全可由 .WID 源文件重导**（不承载任何不可再生的信息）。
+--      重建后需重新导入一次 .WID —— 这是有意的，不是丢失数据。
+DROP TABLE IF EXISTS roadbed_width;
+
 CREATE TABLE IF NOT EXISTS roadbed_width (
     id                       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     section_id               bigint NOT NULL REFERENCES road_section(id),
     side                     varchar(8) NOT NULL,
-    interval_seq             smallint NOT NULL,
-    start_station_km         numeric(12,6) NOT NULL,
-    end_station_km           numeric(12,6) NOT NULL,
+    seq_no                   smallint NOT NULL,
+    group_seq                smallint NOT NULL,
+    station_km               numeric(12,6) NOT NULL,
     median_width_m           numeric(6,3),
     half_carriageway_width_m numeric(6,3),
     extra_lane_flag          smallint,
@@ -96,12 +122,14 @@ CREATE TABLE IF NOT EXISTS roadbed_width (
     earth_shoulder_width_m   numeric(6,3),
     extra_lane_file          text,
     remark                   text,
-    UNIQUE (section_id, side, interval_seq)
+    UNIQUE (section_id, side, station_km)
 );
-COMMENT ON TABLE roadbed_width IS '路幅宽度（.WID）★设计输入，一行 = 一侧的一个桩号区间。教程 §13.4 的 7 列原样保存。★本表**不存**路基总宽：总宽 = 中央分隔带 + 2×(半侧路面 + 硬路肩 + 土路肩)，是跨"左右两行"的派生量，故按「存设计输入、导出派生量」不落库';
-COMMENT ON COLUMN roadbed_width.side IS '路基侧别：left 左侧 / right 右侧。教程 §13.4 用一行"Z"/"Y"引出其后数据；实测 6.00 版用 [LEFT]/[RIGHT] 段标题行';
+COMMENT ON TABLE roadbed_width IS '路幅宽度（.WID）★设计输入，一行 = 一侧的一个桩号。教程 §13.4 的 7 列原样保存。★与 A16 superelev_transition 同形：**键是桩号**，值自本桩号起保持到同侧下一个桩号（分段常量，不是渐变）。区间起终点由相邻两行推得，不落库。★本表**不存**路基总宽：总宽 = 中央分隔带 + 2×(半侧路面 + 硬路肩 + 土路肩)，是跨左右两行的派生量，GENERATED 列也表达不了（生成列不能跨行），故不落库';
+COMMENT ON COLUMN roadbed_width.side IS '路基侧别：left 左侧 / right 右侧。教程 §13.4 用一行"Z"/"Y"引出其后数据；实测 6.00 版用 [LEFT]/[RIGHT] 段标题行（教程全文无此写法）';
+COMMENT ON COLUMN roadbed_width.station_km IS '★桩号（本行自己的桩号）。⚠ 与 A16 一样**不挂 station_id 外键**：设计变化点的桩号不是 .STA 桩号序列的子集（实测 .SUP 76 点只有 34 点在序列里）';
+COMMENT ON COLUMN roadbed_width.group_seq IS '该侧第几个桩号区间（教程 §13.4「数据每两行为一组」的组号）。同一 group_seq 的两行 = 这个区间的起、终点';
 COMMENT ON COLUMN roadbed_width.half_carriageway_width_m IS '半侧路面宽度＝行车道＋内侧路缘带（教程 §13.4 第 3 列）。本工程 3.500 m，即路面 2×3.5＝7 m，与 section_design_attr.roadway_width_m=10.00（含硬路肩/土路肩）自洽';
-COMMENT ON COLUMN roadbed_width.extra_lane_flag IS '有无附加车道标识（教程 §13.4 第 4 列）：0 无附加车道 / 1 或 2 有；为 2 时其下一行的 0 表示主线外侧路缘带宽度。本工程全 0';
-CREATE INDEX IF NOT EXISTS idx_roadbed_width_interval ON roadbed_width(section_id, side, start_station_km);
+COMMENT ON COLUMN roadbed_width.extra_lane_flag IS '有无附加车道标识（教程 §13.4 第 4 列）：0 无附加车道 / 1 或 2 有；为 2 时其下一行的 0 表示主线外侧路缘带宽度。★这一列**有意**允许同组两行不同，故本表不折叠成区间';
+CREATE INDEX IF NOT EXISTS idx_roadbed_width_station ON roadbed_width(section_id, side, station_km);
 
 COMMIT;

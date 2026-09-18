@@ -30,15 +30,25 @@
   · 教程**全文没有** `[LEFT]`/`[RIGHT]` 这种写法（grep 0 命中），所以这是**升级后
     未更新的文档**，不是我们读错。两种都认，才既支持老工程也支持新工程。
 
-★「每两行为一组」收成一行一个区间
+★「每两行为一组」照原样一行一行存，**不折叠成区间**
 -------------------------------------------------------------------------------
-教程说「数据每两行为一组」—— 两行是**同一个区间**的起点桩号与终点桩号，
-其余六列在两组内重复。落库时（`roadbed_width` 表）把起终点收成
-`start_station_km`/`end_station_km` 两列，一行一个区间，比"两行一组"好查。
+教程说「数据每两行为一组」—— 但**每一行都有自己的桩号**，两行是"这个区间的
+起、终点"。本解析器**照原样保留每一行**（`rows`），并给每行标上它是第几组
+（`group_seq`）、该侧第几行（`seq_no`）。
 
-⚠ 既然六列在两行里重复，就必须**核对它们真的一致**：不一致时哪一行算数？
-本解析器**不猜** —— 取值以**组内第一行**为准（教程说"上一行为 1 或 2、下一行为 0"
-时两行本就有意不同，见下），并对其它列的不一致**告警**。
+为什么不在解析层折叠成区间（第一版就是这么做的，是错的）：
+  · GE 域其余逐桩数据表**都按桩号寻址**（A9 `station_sequence` 的注释写明
+    "其余逐桩数据表以 station_id FK 锚定本表"）。折叠成区间 = 在 GE 域**另立
+    一套区间寻址**，查"某桩号的宽度"得做范围查询，与查横坡/高程的点查不一致。
+  · 组内两行**本来就可以不同**：教程说列 4「有附加车道时上一行为"1（或 2）"，
+    下一行为"0"」—— 折叠成区间**必然丢一个值**。
+  · A15 `geometry_point` 要按桩号取宽度，点查才能直接对齐。
+
+区间起终点由**同侧相邻两行推得**，不落库。
+
+⚠ 除列 4 外，组内两行的其余五列应当一致；不一致时**哪一行算数**？
+本解析器**不猜** —— 不报错（源文件说了算），但产出一条 `notes` 告警，
+说明"这两行不一致，请人工确认"。
 
 ★ 列 4 是**有意**允许两行不同的
 -------------------------------------------------------------------------------
@@ -67,10 +77,13 @@ MAGIC_RE = re.compile(r"^HINTCAD([0-9][0-9.]*)_WID_SHUJU$")
 
 SEGMENT = "roadbed_width"
 FILE_KIND = "路幅宽度数据文件"
-PAYLOAD_KEY = "intervals"
+PAYLOAD_KEY = "rows"
 
 #: 数据行的字段数。多一列少一列都说明格式与预期不符，宁可拒绝也不猜列义。
 FIELD_COUNT = 7
+
+#: 每几行为一组（教程 §13.4「数据每两行为一组」）。
+ROWS_PER_GROUP = 2
 
 #: 分段标记：教程 §13.4 的 `Z`/`Y` 行（示例是一整行 z），实测 6.00 的 `[LEFT]`/`[RIGHT]`。
 _SIDE_Z_RE = re.compile(r"^[zZ]+$")
@@ -139,11 +152,11 @@ def _width(txt: str, what: str, *, file: str | None, line_no: int) -> float:
 
 
 def parse(text: str, *, file: str | None = None) -> dict[str, Any]:
-    """解析 `.WID` → ``{"vendor_version": "6.00", "intervals": [...]}``
+    """解析 `.WID` → ``{"vendor_version": "6.00", "rows": [...]}``
 
-    ``intervals`` 每项：``{side, interval_seq, start_station_m, end_station_m,
-    median_width_m, half_carriageway_width_m, extra_lane_flag,
-    hard_shoulder_width_m, earth_shoulder_width_m, extra_lane_file}``。
+    ``rows`` 每项（**一行源数据行 = 一个桩号**）：
+    ``{side, seq_no, group_seq, station_m, median_width_m, half_carriageway_width_m,
+    extra_lane_flag, hard_shoulder_width_m, earth_shoulder_width_m, extra_lane_file}``。
 
     校验策略与其余适配器一致：**宁可拒绝，不要猜。**
     路幅宽度决定路面面积与车道布置，读错一列不会报错，只会让整条路的宽度组成
@@ -162,25 +175,25 @@ def parse(text: str, *, file: str | None = None) -> dict[str, Any]:
         )
     version = m.group(1)
 
-    intervals: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     notes: list[str] = []                                # 组内两行不一致的说明，见下
     side: str | None = None
-    pending: tuple[list[float], int] | None = None      # 组内第一行（起桩号行）
     seen_sides: set[str] = set()
+    last_station: dict[str, float] = {}                  # 每侧上一个桩号（必须严格递增）
 
     for i, raw in enumerate(lines[1:], start=2):
         if raw.strip() == "":
             continue                                     # 组间空行：教程示例就有，放行
 
-        s = _side_of(raw)
-        if s is not None:
-            if pending is not None:
+        s_side = _side_of(raw)
+        if s_side is not None:
+            if rows and rows[-1]["side"] == side and rows[-1]["seq_no"] % ROWS_PER_GROUP:
                 raise SourceInvalid(
-                    f"上一个桩号区间只写了起点（第 {pending[1]} 行），缺少终点行，"
-                    f"就遇到了新的分段标记 —— 教程 §13.4 要求「桩号区间必须成对出现」",
+                    f"上一组只写了 {rows[-1]['seq_no'] % ROWS_PER_GROUP} 行就遇到了新的"
+                    f"分段标记 —— 教程 §13.4 要求「桩号区间必须成对出现」",
                     file=file, line_no=i)
-            side = s
-            seen_sides.add(s)
+            side = s_side
+            seen_sides.add(s_side)
             continue
 
         if side is None:
@@ -204,91 +217,104 @@ def parse(text: str, *, file: str | None = None) -> dict[str, Any]:
             raise SourceInvalid(
                 f"桩号 {station} 超出合理区间 [0, {STATION_MAX_M:g}]（疑似列错位）",
                 file=file, line_no=i)
+        seq = sum(1 for r in rows if r["side"] == side) + 1
+        # 桩号递增规则：**组内严格递增，组边界允许相等**。
+        # 因为教程 §13.4 要求「桩号区间要连续」—— 上一组的**终点**桩号必然等于
+        # 下一组的**起点**桩号，那个桩号会**出现两次**。一刀切"严格递增"会把
+        # 合法的连续区间判成错误（本适配器第一版就是这样，被自己的测试抓到）。
+        is_group_start = (seq - 1) % ROWS_PER_GROUP == 0
+        if side in last_station:
+            prev = last_station[side]
+            if station < prev or (station == prev and not is_group_start):
+                raise SourceInvalid(
+                    f"{'左' if side == 'left' else '右'}侧桩号未递增："
+                    f"{prev} → {station}（第 {i} 行）。组内必须严格递增；"
+                    f"只有新一组的起点行才允许与上一组的终点桩号相同"
+                    f"（教程 §13.4「桩号区间要连续」）", file=file, line_no=i)
+        last_station[side] = station
+
         widths = [_width(parts[k].strip(), f"第 {k + 1} 列", file=file, line_no=i)
                   for k in range(1, 6)]
-
-        if pending is None:
-            pending = ([station, *widths], i)             # 起点行：连行号一起存，报错时指得到
-            continue
-
-        # 组内第二行：终点桩号 + 重复的六列
-        start_vals, start_line = pending
-        pending = None
-        start_station, *start_widths = start_vals
-        end_station, *end_widths = [station, *widths]
-
-        if end_station <= start_station:
-            raise SourceInvalid(
-                f"区间终点桩号 {end_station} 不大于起点 {start_station}"
-                f"（第 {start_line}–{i} 行）", file=file, line_no=i)
-
-        # 附加车道标识**有意**允许两行不同（教程：「有附加车道时上一行为"1（或 2）"，
-        # 下一行为"0"」），故排除它；其余四列两行应当一致。
-        _WIDTH_NAMES = {IDX_MEDIAN: "中央分隔带", IDX_HALF_CARRIAGEWAY: "半侧路面",
-                        IDX_HARD_SHOULDER: "硬路肩", IDX_EARTH_SHOULDER: "土路肩"}
-        diffs = [k for k in range(WIDTH_COUNT)
-                 if k != IDX_EXTRA_LANE_FLAG and abs(start_widths[k] - end_widths[k]) > 1e-9]
-        if diffs:
-            notes.append(
-                f"{'左' if side == 'left' else '右'}侧第 "
-                f"{sum(1 for x in intervals if x['side'] == side) + 1} 个区间"
-                f"（{start_station:.3f}–{end_station:.3f} m）两行的"
-                + "、".join(_WIDTH_NAMES[k] for k in diffs)
-                + "不一致，已取第一行值")
-
-        intervals.append({
+        rows.append({
             "side": side,
-            "interval_seq": sum(1 for x in intervals if x["side"] == side) + 1,
-            "start_station_m": start_station,
-            "end_station_m": end_station,
-            "median_width_m": start_widths[IDX_MEDIAN],
-            "half_carriageway_width_m": start_widths[IDX_HALF_CARRIAGEWAY],
-            "extra_lane_flag": int(round(start_widths[IDX_EXTRA_LANE_FLAG])),
-            "hard_shoulder_width_m": start_widths[IDX_HARD_SHOULDER],
-            "earth_shoulder_width_m": start_widths[IDX_EARTH_SHOULDER],
+            "seq_no": seq,
+            "group_seq": (seq - 1) // ROWS_PER_GROUP + 1,
+            "station_m": station,
+            "median_width_m": widths[IDX_MEDIAN],
+            "half_carriageway_width_m": widths[IDX_HALF_CARRIAGEWAY],
+            "extra_lane_flag": int(round(widths[IDX_EXTRA_LANE_FLAG])),
+            "hard_shoulder_width_m": widths[IDX_HARD_SHOULDER],
+            "earth_shoulder_width_m": widths[IDX_EARTH_SHOULDER],
             "extra_lane_file": parts[6].strip() if parts[6].strip() not in ("0", "0.0") else None,
         })
 
-    if pending is not None:
+    if rows and rows[-1]["seq_no"] % ROWS_PER_GROUP:
         raise SourceInvalid(
-            f"最后一个桩号区间只写了起点（第 {pending[1]} 行），缺少终点行 —— "
+            f"最后一个桩号区间只写了起点（{rows[-1]['station_m']:.3f} m），缺少终点行 —— "
             f"教程 §13.4 要求「桩号区间必须成对出现」", file=file)
-    if not intervals:
-        raise SourceInvalid("没有任何桩号区间（只有魔数）", file=file)
+    if not rows:
+        raise SourceInvalid("没有任何桩号数据（只有魔数）", file=file)
 
-    # ★ `notes` 在**顶层**，不放进 interval 里：interval 会被原样塞进契约⑤ 的 IR，
-    #   而 IR 的 roadbed_interval 是 additionalProperties: false —— 带个 `_note`
-    #   进去会被 schema 直接拒（本适配器第一版正是这样翻车的，契约当场抓住）。
+    # 组内两行（除列 4 外）应当一致 —— 不一致不报错，但要让人知道。
+    _WIDTH_NAMES = {IDX_MEDIAN: "中央分隔带", IDX_HALF_CARRIAGEWAY: "半侧路面",
+                    IDX_HARD_SHOULDER: "硬路肩", IDX_EARTH_SHOULDER: "土路肩"}
+    for s2 in sorted(seen_sides):
+        rs = [r for r in rows if r["side"] == s2]
+        for a, b in zip(rs[0::2], rs[1::2]):
+            diffs = [k for k in _WIDTH_NAMES
+                     if abs(_row_width(a, k) - _row_width(b, k)) > 1e-9]
+            if diffs:
+                notes.append(
+                    f"{'左' if s2 == 'left' else '右'}侧第 {a['group_seq']} 组"
+                    f"（{a['station_m']:.3f}–{b['station_m']:.3f} m）两行的"
+                    + "、".join(_WIDTH_NAMES[k] for k in diffs)
+                    + "不一致 —— 源文件如此，请人工确认以哪一行为准")
+
+    # ★ `notes` 在**顶层**，不放进 row 里：row 会被原样塞进契约⑤ 的 IR，
+    #   而 IR 的 roadbed_point 是 additionalProperties: false —— 带内部键进去
+    #   会被 schema 直接拒（本适配器第一版正是这样翻车的，契约当场抓住）。
     #   顶层 notes 由 build_ir 收进 IR 根部的 warnings，与 zdm.derive_grades 同一路数。
-    return {"vendor_version": version, "intervals": intervals,
+    return {"vendor_version": version, "rows": rows,
             "sides": sorted(seen_sides), "notes": notes}
 
 
-def check_intervals(intervals: list[dict[str, Any]]) -> list[str]:
+def _row_width(row: dict[str, Any], idx: int) -> float | None:
+    """按列下标取宽度（用于组内两行比对）。"""
+    key = {IDX_MEDIAN: "median_width_m",
+           IDX_HALF_CARRIAGEWAY: "half_carriageway_width_m",
+           IDX_HARD_SHOULDER: "hard_shoulder_width_m",
+           IDX_EARTH_SHOULDER: "earth_shoulder_width_m"}[idx]
+    return row.get(key)
+
+
+def check_stations(rows: list[dict[str, Any]]) -> list[str]:
     """桩号区间的**连续性**检查。返回**告警**（可疑 ≠ 非法），不抛异常。
 
     教程 §13.4：「此文件桩号区间必须成对出现，**桩号区间要连续**。」
 
-    ⚠ 这里只做**该侧内相邻区间是否首尾相接**这一件事，**不**要求覆盖整条路线 ——
+    这里查的是：同一侧**上一组的终点行**桩号 == **下一组的起点行**桩号。
+    每组两行（`group_seq` 相同的两行 = 起、终点），所以是"第 2n 行 == 第 2n+1 行"。
+
+    ⚠ 只查**该侧内相邻组是否首尾相接**，**不**要求覆盖整条路线 ——
     实测该工程 `.WID` 覆盖 0.000–5701.461 m，而路线是 0.000–5805.421 m，
     **最后约 104 m 没有路幅宽度数据**。那是源文件的真实缺口（属 `gaps` 一类），
-    不是本文件格式错误，所以由 `check_against_stations` 单独报，不在这里误报为"不连续"。
+    不是本文件格式错误，所以由 `check_against_stations` 单独报，不在这里误报。
     """
     warn: list[str] = []
-    for s in ("left", "right"):
-        rows = sorted((r for r in intervals if r["side"] == s),
-                      key=lambda r: r["start_station_m"])
-        for a, b in zip(rows, rows[1:]):
-            if abs(b["start_station_m"] - a["end_station_m"]) > 1e-6:
+    for sd in ("left", "right"):
+        rs = sorted((r for r in rows if r["side"] == sd), key=lambda r: r["station_m"])
+        ends = [r for r in rs if r["seq_no"] % ROWS_PER_GROUP == 0]
+        starts = [r for r in rs if r["seq_no"] % ROWS_PER_GROUP == 1]
+        for a, b in zip(ends, starts[1:]):
+            if abs(b["station_m"] - a["station_m"]) > 1e-6:
                 warn.append(
-                    f"{'左' if s == 'left' else '右'}侧区间不连续："
-                    f"{a['interval_seq']} 止于 {a['end_station_m']:.3f} m，"
-                    f"但 {b['interval_seq']} 起于 {b['start_station_m']:.3f} m"
-                    f"（教程 §13.4 要求桩号区间要连续）")
+                    f"{'左' if sd == 'left' else '右'}侧区间不连续：第 {a['group_seq']} 组"
+                    f"止于 {a['station_m']:.3f} m，但第 {b['group_seq']} 组"
+                    f"起于 {b['station_m']:.3f} m（教程 §13.4 要求桩号区间要连续）")
     return warn
 
 
-def check_against_stations(intervals: list[dict[str, Any]],
+def check_against_stations(rows: list[dict[str, Any]],
                            stations: list[dict[str, Any]]) -> list[str]:
     """路幅宽度是否覆盖整条路线。返回告警（不抛异常）。
 
@@ -298,11 +324,11 @@ def check_against_stations(intervals: list[dict[str, Any]],
     下游按 `station_km` 取宽度时，落在缺口里的桩号**取不到值**，必须知道这件事。
     """
     warn: list[str] = []
-    if not intervals or not stations:
+    if not rows or not stations:
         return warn
     lo, hi = stations[0]["station_m"], stations[-1]["station_m"]
-    starts = min(r["start_station_m"] for r in intervals)
-    ends = max(r["end_station_m"] for r in intervals)
+    starts = min(r["station_m"] for r in rows)
+    ends = max(r["station_m"] for r in rows)
     if starts > lo + 1e-6:
         warn.append(f"路幅宽度起点 {starts:.3f} m 晚于路线起点 {lo:.3f} m，"
                     f"前 {starts - lo:.3f} m 没有路幅宽度数据")
@@ -313,22 +339,36 @@ def check_against_stations(intervals: list[dict[str, Any]],
     return warn
 
 
-def width_at(intervals: list[dict[str, Any]], station_m: float, *,
+def width_at(rows: list[dict[str, Any]], station_m: float, *,
              side: str = "left", column: str = "half_carriageway_width_m") -> float | None:
-    """某桩号某侧的某个宽度。落在区间之外返回 ``None``，**不外推**。
+    """某桩号某侧的某个宽度。**分段常量**：取"不晚于该桩号的最后一个变化点"的值。
 
-    区间是**分段常量**（不是渐变）：纬地用相邻区间不同的常值来表达加宽，
-    过渡发生在区间边界上。所以这里是**查区间**，不是插值 ——
-    与 `zdm.design_elevation_at` / `sup.superelev_at` 的线性插值**刻意不同**。
+    与 A16 `sup.superelev_at` **同一个模型**：文件里写的是**变化点**，
+    值自该桩号起保持到同侧下一个变化点（纬地用相邻变化点的不同常值表达加宽，
+    过渡发生在变化点上）——所以这是**查变化点**，不是插值。
+    与 `zdm.design_elevation_at` 的线性插值**刻意不同**。
+
+    早于该侧第一个变化点 → 返回 ``None``（**不外推**）。
     """
-    for r in intervals:
-        if r["side"] == side and r["start_station_m"] <= station_m <= r["end_station_m"]:
-            return r.get(column)
-    return None
+    rs = [r for r in rows if r["side"] == side]
+    if not rs:
+        return None
+    # ⚠ 超出源文件**该侧最后一个变化点**就返回 None，不外推 ——
+    #   本工程 .WID 只到 5701.461 m，而路线到 5805.421 m：最后 103.960 m 源文件
+    #   根本没写宽度。沿用最后一个值是个**假设**，不是数据，所以不给。
+    #   （缺口本身由 check_against_stations 报出来。）
+    #   与 sup.superelev_at 的"范围外返回 None"保持同一行为。
+    if station_m > max(r["station_m"] for r in rs):
+        return None
+    best: dict[str, Any] | None = None
+    for r in rs:
+        if r["station_m"] <= station_m and (best is None or r["station_m"] > best["station_m"]):
+            best = r
+    return best.get(column) if best else None
 
 
-__all__ = ["detect", "parse", "check_intervals", "check_against_stations", "width_at",
+__all__ = ["detect", "parse", "check_stations", "check_against_stations", "width_at",
            "MAGIC_RE", "SEGMENT", "FILE_KIND", "PAYLOAD_KEY", "FIELD_COUNT",
            "STATION_MAX_M", "WIDTH_MAX_M", "IDX_MEDIAN", "IDX_HALF_CARRIAGEWAY",
            "IDX_EXTRA_LANE_FLAG", "IDX_HARD_SHOULDER", "IDX_EARTH_SHOULDER",
-           "WIDTH_COUNT"]
+           "WIDTH_COUNT", "ROWS_PER_GROUP"]

@@ -906,10 +906,18 @@ def main() -> int:
              + _wrow("0.000", "0.000", "3.500", "0.000", "0.750", "0.750", "0") + "\r\n"
              + _wrow("5701.461", "0.000", "3.500", "0.000", "0.750", "0.750", "0"))
     _w = wid.parse(_w_ok, file="ok.WID")
-    _iv = _w["intervals"]
-    check("应通过：解析出 2 个区间（左右各 1）", len(_iv) == 2, str(len(_iv)))
+    _rows = _w["rows"]
+    # ★ 一行 = 一侧的一个桩号（与 superelev_transition 同形），**不折叠成区间**
+    check("★ 应通过：4 行 = 左右各 2 个桩号（一行一个桩号，不折叠成区间）",
+          len(_rows) == 4, str(len(_rows)))
     check("应通过：厂商版本从魔数取出", _w["vendor_version"] == "6.00", _w["vendor_version"])
-    check("应通过：side 归一到 left/right", sorted(r["side"] for r in _iv) == ["left", "right"])
+    check("应通过：side 归一到 left/right", sorted(r["side"] for r in _rows) == ["left", "left", "right", "right"])
+    check("★ 应通过：每行**自带桩号**（不是 start/end 区间）",
+          [r["station_m"] for r in _rows if r["side"] == "left"] == [0.0, 5701.461]
+          and all("start_station_m" not in r and "end_station_m" not in r for r in _rows))
+    check("应通过：seq_no 按侧从 1 起", [r["seq_no"] for r in _rows if r["side"] == "right"] == [1, 2])
+    check("应通过：group_seq = 每两行一组（教程「数据每两行为一组」）",
+          [r["group_seq"] for r in _rows] == [1, 1, 1, 1])
     check("应通过：detect 认得自家魔数", wid.detect(_w_ok) is True)
     check("应通过：detect 不认别家魔数", wid.detect("HINTCAD5.83_SUP_SHUJU\r\n") is False)
     check("应通过：段名与文件类别与 SEGMENT_FILES 登记一致",
@@ -917,16 +925,13 @@ def main() -> int:
           and weidi.SEGMENT_FILES["roadbed_width"][0] == ".WID"
           and weidi.SEGMENT_FILES["roadbed_width"][1] == wid.FILE_KIND,
           f"{wid.SEGMENT} / {wid.FILE_KIND}")
-    # 「每两行为一组」收成一行一个区间：起终点分别落两列
-    check("应通过：两行一组 → start/end 两列",
-          _iv[0]["start_station_m"] == 0.0 and abs(_iv[0]["end_station_m"] - 5701.461) < 1e-9)
     check("应通过：六列宽度逐列落位（半侧路面 3.5 / 硬路肩 0.75 / 土路肩 0.75）",
-          _iv[0]["half_carriageway_width_m"] == 3.5
-          and _iv[0]["hard_shoulder_width_m"] == 0.75
-          and _iv[0]["earth_shoulder_width_m"] == 0.75
-          and _iv[0]["median_width_m"] == 0.0)
+          _rows[0]["half_carriageway_width_m"] == 3.5
+          and _rows[0]["hard_shoulder_width_m"] == 0.75
+          and _rows[0]["earth_shoulder_width_m"] == 0.75
+          and _rows[0]["median_width_m"] == 0.0)
     check("应通过：源文件写 0 的附加车道文件名 → None（不是字符串 '0'）",
-          _iv[0]["extra_lane_file"] is None, repr(_iv[0]["extra_lane_file"]))
+          _rows[0]["extra_lane_file"] is None, repr(_rows[0]["extra_lane_file"]))
     # ★ 教程 §13.4 的分段标记是 z/y（5.8 代），实测是 [LEFT]/[RIGHT]（6.00）——**两种都要认**
     _zy = ("HINTCAD5.8_WID_SHUJU\r\n" + "z" * 56 + "\r\n"
            + _wrow("29000.00", "1.00", "8.00", "0.0", "2.5", "0.75", "0") + "\r\n"
@@ -936,40 +941,55 @@ def main() -> int:
            + _wrow("31420.98", "1.00", "8.00", "0.0", "2.5", "0.75", "0"))
     _w2 = wid.parse(_zy, file="教程示例.wid")
     check("★ 应通过：教程 §13.4 的 z/y 写法也认（版本 5.8）",
-          _w2["vendor_version"] == "5.8" and sorted(r["side"] for r in _w2["intervals"])
-          == ["left", "right"], f"{_w2['vendor_version']} / {_w2['sides']}")
+          _w2["vendor_version"] == "5.8"
+          and sorted(set(r["side"] for r in _w2["rows"])) == ["left", "right"],
+          f"{_w2['vendor_version']} / {_w2['sides']}")
     check("★ 应通过：教程示例的中央分隔带 1.00 落位正确",
-          _w2["intervals"][0]["median_width_m"] == 1.0)
+          _w2["rows"][0]["median_width_m"] == 1.0)
 
-    # 区间是**分段常量**（不是渐变）→ 查区间，不外推
-    check("查值：区间内取到 3.5", wid.width_at(_iv, 3000.0, side="left") == 3.5)
-    check("查值：区间之外返回 None（不外推）",
-          wid.width_at(_iv, 9999.0, side="left") is None
-          and wid.width_at(_iv, -1.0, side="left") is None)
-    check("查值：查右侧与左侧互不串（同值不同侧）",
-          wid.width_at(_iv, 3000.0, side="right") == 3.5)
+    # 取值是**分段常量**（与 A16 同模型）：自本桩号起保持到同侧下一个桩号
+    check("★ 查值：变化点之间取到该变化点的值（3000 m → 3.5）",
+          wid.width_at(_rows, 3000.0, side="left") == 3.5)
+    check("★ 查值：变化点本身取到（5701.461 m 边界）",
+          wid.width_at(_rows, 5701.461, side="left") == 3.5)
+    check("★ 查值：**超出源文件范围返回 None**（5750 m 无数据，不外推）",
+          wid.width_at(_rows, 5750.0, side="left") is None)
+    check("查值：早于该侧第一个变化点 → None",
+          wid.width_at(_rows, -1.0, side="left") is None)
+    check("查值：左右侧互不串（同值不同侧）",
+          wid.width_at(_rows, 3000.0, side="right") == 3.5)
+    check("查值：可按列取（土路肩）",
+          wid.width_at(_rows, 0.0, side="right", column="earth_shoulder_width_m") == 0.75)
 
     # 覆盖缺口：本工程 .WID 只到 5701.461，路线到 5805.421 —— 必须**报出来**
-    _stn6 = [{"station_m": 0.0}, {"station_m": 5805.421}]
-    _cov = wid.check_against_stations(_iv, _stn6)
+    _cov = wid.check_against_stations(_rows, [{"station_m": 0.0}, {"station_m": 5805.421}])
     check("★ 覆盖：不覆盖到路线终点要报（实测缺 103.960 m）",
           len(_cov) == 1 and "103.96" in _cov[0], str(_cov))
     check("覆盖：完整覆盖则不报",
-          wid.check_against_stations(_iv, [{"station_m": 0.0}, {"station_m": 5701.461}]) == [])
-    check("连续性：单个区间无从谈不连续", wid.check_intervals(_iv) == [])
-    _gap = [dict(_iv[0]), dict(_iv[0], interval_seq=2, start_station_m=6000.0,
-                               end_station_m=7000.0)]
-    check("★ 连续性：相邻区间不相接要报", bool(wid.check_intervals(_gap)))
+          wid.check_against_stations(_rows, [{"station_m": 0.0}, {"station_m": 5701.461}]) == [])
+    check("连续性：单组无从谈不连续", wid.check_stations(_rows) == [])
+    # ★ 连续性：上一组终点行桩号 ≠ 下一组起点行桩号 → 要报（教程「桩号区间要连续」）
+    _disc = (_wh + "[LEFT]\r\n"
+             + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0") + "\r\n"
+             + _wrow("100", "0", "3.5", "0", "0.75", "0.75", "0") + "\r\n"
+             + _wrow("500", "0", "3.5", "0", "0.75", "0.75", "0") + "\r\n"
+             + _wrow("900", "0", "3.5", "0", "0.75", "0.75", "0"))
+    check("★ 连续性：相邻组不相接要报（100 → 500 断了）",
+          len(wid.check_stations(wid.parse(_disc, file="断.WID")["rows"])) == 1)
+    _cont = _disc.replace("500", "100").replace("900", "200")
+    check("连续性：相接则不报",
+          wid.check_stations(wid.parse(_cont, file="连.WID")["rows"]) == [])
 
-    # ★★ 元测试：「同一区间两行不一致」必须**真能报出来**（否则那条 notes 是空的）
+    # ★★ 元测试：组内两行不一致必须**真能报出来**（否则那条 notes 是空的）
     _disagree = (_wh + "[LEFT]\r\n"
                  + _wrow("0.000", "0.000", "3.500", "0.000", "0.750", "0.750", "0") + "\r\n"
                  + _wrow("100.000", "0.000", "3.500", "0.000", "1.500", "0.750", "0"))
     _wd = wid.parse(_disagree, file="不一致.WID")
     check("★★ 元测试：两行硬路肩不一致（0.75 vs 1.50）→ 必须产出一条 notes",
           len(_wd["notes"]) == 1 and "硬路肩" in _wd["notes"][0], str(_wd["notes"]))
-    check("★★ 元测试：取值以第一行为准（0.75，不是 1.50）",
-          _wd["intervals"][0]["hard_shoulder_width_m"] == 0.75)
+    check("★★ 元测试：两行不一致时**两行都保留**（不折叠，故不丢值）",
+          [r["hard_shoulder_width_m"] for r in _wd["rows"]] == [0.75, 1.5],
+          str([r["hard_shoulder_width_m"] for r in _wd["rows"]]))
     # 列 4（附加车道标识）**有意**允许两行不同 → 不产 notes
     _flag_ok = (_wh + "[LEFT]\r\n"
                 + _wrow("0.000", "0.000", "3.500", "2.000", "0.750", "0.750", "0") + "\r\n"
@@ -977,15 +997,14 @@ def main() -> int:
     check("★★ 元测试：列 4 两行不同（2 / 0）是教程允许的 → 不产 notes",
           wid.parse(_flag_ok, file="列4.WID")["notes"] == [])
 
-    # 解析结果必须过契约⑤ v0.3 的 roadbed_interval 定义
-    _riv = jsonschema.Draft7Validator(
-        json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"]["roadbed_interval"])
-    check("★ 解析出的每个区间都过 schema 的 roadbed_interval 定义",
-          not [e for r in _iv for e in _riv.iter_errors(r)],
-          str([e.message for r in _iv for e in _riv.iter_errors(r)][:2]))
-    _badr = dict(_iv[0]); _badr["typo_col"] = 1
-    check("★ 元测试：roadbed_interval 定义真的会拒绝多余列",
-          bool(list(_riv.iter_errors(_badr))))
+    # 解析结果必须过契约⑤ v0.3 的 roadbed_point 定义
+    _rp = jsonschema.Draft7Validator(
+        json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"]["roadbed_point"])
+    check("★ 解析出的每一行都过 schema 的 roadbed_point 定义",
+          not [e for r in _rows for e in _rp.iter_errors(r)],
+          str([e.message for r in _rows for e in _rp.iter_errors(r)][:2]))
+    _badr = dict(_rows[0]); _badr["typo_col"] = 1
+    check("★ 元测试：roadbed_point 定义真的会拒绝多余列", bool(list(_rp.iter_errors(_badr))))
 
     check_raises("应拒绝：魔数是 .SUP 的（张冠李戴）",
                  "HINTCAD5.83_SUP_SHUJU\r\n[LEFT]\r\n"
@@ -993,8 +1012,7 @@ def main() -> int:
                  + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
                  parser=wid, expect="魔数不匹配")
     check_raises("应拒绝：字段数 6（漏了附加车道文件名列）",
-                 _wh + "[LEFT]\r\n" + "0\t0\t3.5\t0\t0.75\t0.75\r\n"
-                 + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 _wh + "[LEFT]\r\n" + "0\t0\t3.5\t0\t0.75\t0.75\r\n",
                  parser=wid, expect="字段数应为 7")
     check_raises("★ 应拒绝：数据行出现在分段标记之前（不知是左还是右）",
                  _wh + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0"),
@@ -1002,10 +1020,15 @@ def main() -> int:
     check_raises("★ 应拒绝：桩号区间不成对（只有起点没有终点）",
                  _wh + "[LEFT]\r\n" + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0"),
                  parser=wid, expect="成对出现")
-    check_raises("应拒绝：区间终点不大于起点",
+    check_raises("★ 应拒绝：换侧时上一组没写完（组跨了分段标记）",
+                 _wh + "[LEFT]\r\n" + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0")
+                 + "[RIGHT]\r\n" + _wrow("0", "0", "3.5", "0", "0.75", "0.75", "0")
+                 + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
+                 parser=wid, expect="成对出现")
+    check_raises("★ 应拒绝：桩号未严格递增",
                  _wh + "[LEFT]\r\n" + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0")
                  + _wrow("5", "0", "3.5", "0", "0.75", "0.75", "0"),
-                 parser=wid, expect="不大于起点")
+                 parser=wid, expect="未递增")
     check_raises("应拒绝：宽度为负",
                  _wh + "[LEFT]\r\n" + _wrow("0", "0", "-3.5", "0", "0.75", "0.75", "0")
                  + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
@@ -1018,10 +1041,10 @@ def main() -> int:
                  _wh + "[LEFT]\r\n" + _wrow("0", "abc", "3.5", "0", "0.75", "0.75", "0")
                  + _wrow("10", "0", "3.5", "0", "0.75", "0.75", "0"),
                  parser=wid, expect="不是合法数字")
-    check_raises("应拒绝：只有魔数没有数据", _wh, parser=wid, expect="没有任何桩号区间")
+    check_raises("应拒绝：只有魔数没有数据", _wh, parser=wid, expect="没有任何桩号数据")
     check_raises("应拒绝：空文件", "", parser=wid, expect="空文件")
     check("组间空行应通过（教程示例就有）",
-          len(wid.parse(_w_ok.replace("[RIGHT]", "\r\n[RIGHT]"), file="x.WID")["intervals"]) == 2)
+          len(wid.parse(_w_ok.replace("[RIGHT]", "\r\n[RIGHT]"), file="x.WID")["rows"]) == 4)
 
     # ── 第 7 组：桩号精度 —— 真实数据必须装得进 DDL 声明的精度 ──────────────
     # 本轮实测抓到：.STA 里 1659.917 与 1660.000 相距仅 0.083 m，
@@ -1483,6 +1506,42 @@ def main() -> int:
         print("    需要时：uv run --with psycopg[binary] --with jsonschema --with pyyaml <本文件>")
     else:
         MARK = "契约⑤落库器自测"
+
+        # ── ★★ 契约对账：源码里每一处 on_conflict 都必须有**真实唯一约束**兜底 ──
+        # 这一条是**数据库抓到的 bug 反推出来的**：把 A16 的键从 transition_seq 改成
+        # station_km 时，只同步了 roadbed_width，漏了 superelev_transition —— 重导时
+        # psycopg 报 InvalidColumnReference（没有匹配 ON CONFLICT 的唯一约束）。
+        # 测试当时全绿：因为它验的是"映射对不对"，**根本不碰约束**。
+        # 一个不碰约束的测试不可能发现"键改了没同步"，所以这里把两边对起来：
+        # 源码抠出 on_conflict 目标列 → 跟 pg_constraint 里的真实唯一约束比。
+        _ast_mod = __import__("ast")
+        _src = (ROOT / "modules" / "M2-ingest" / "design_import.py").read_text(encoding="utf-8")
+        _pairs = []
+        for _n in _ast_mod.walk(_ast_mod.parse(_src)):
+            if (isinstance(_n, _ast_mod.Call) and isinstance(_n.func, _ast_mod.Attribute)
+                    and _n.func.attr in ("insert", "insert_returning")
+                    and _n.args and isinstance(_n.args[0], _ast_mod.Constant)):
+                for _kw in _n.keywords:
+                    if _kw.arg == "on_conflict" and isinstance(_kw.value, _ast_mod.Tuple):
+                        _pairs.append((_n.args[0].value,
+                                       tuple(e.value for e in _kw.value.elts)))
+        # ★ 元测试：抠不到东西 = 下面那条检查永远通过（空洞）—— 所以先证明抠得到
+        check("★★ 元测试：能从源码抠出 on_conflict 对（否则下面那条是空洞检查）",
+              len(_pairs) >= 10, f"抠到 {len(_pairs)} 对")
+        _bad = []
+        for _t, _cols in _pairs:
+            _crows = dao_e2e.query(
+                """select c.conname, array_agg(a.attname) as cols
+                     from pg_constraint c
+                     join pg_class r on r.oid = c.conrelid
+                     join unnest(c.conkey) k(attnum) on true
+                     join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+                    where c.contype in ('u','p') and r.relname = %(t)s
+                    group by c.conname, c.conrelid""", {"t": _t})
+            if not any(set(_r["cols"]) == set(_cols) for _r in _crows):
+                _bad.append(f"{_t}{tuple(sorted(_cols))}")
+        check("★★ 源码里每一处 on_conflict 都有实库唯一约束兜底（改了键必须同步）",
+              not _bad, f"对不上的：{_bad}")
         # ── 自愈：先清掉**上一次**留下的残留 ────────────────────────────────
         # 本组用 f"TEST-DI-{os.getpid()}" 当唯一标识，而清理写在 finally 里 ——
         # 进程被 kill（超时、Ctrl-C、CI 取消）时 finally 不跑，残留就留在真库里。

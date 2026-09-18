@@ -199,30 +199,28 @@ def _plan_superelev_transitions(ir: Mapping[str, Any],
 
 
 def _plan_roadbed_widths(ir: Mapping[str, Any], section_id: int) -> list[dict[str, Any]]:
-    """``roadbed_width`` 行（路幅宽度分段，.WID 的真源）。
+    """``roadbed_width`` 行（路幅宽度，.WID 的真源）。
 
-    ``start_station_km``/``end_station_km`` 是**千米**（表里就是这么定的），
-    IR 里是米 —— 与其余 GE 表同一处换算。
+    ★ **一行 = 一侧的一个桩号**（与 `superelev_transition` 同形），不折叠成区间：
+    区间起终点由同侧相邻两行推得，不落库。见 `wid.py` 顶部的说明。
 
-    ▲ 适配器发现「组内两行宽度不一致」时**不**往行里塞内部键，而是走 IR 根部的
-    ``warnings``（见 ``wid.parse`` 的说明）—— 因为 IR 的段定义是
-    ``additionalProperties: false``，内部键会被 schema 直接拒。
+    ``station_km`` 是**千米**（表里就是这么定的），IR 里是米 —— 与其余 GE 表同一处换算。
     """
     out = []
     for r in ir["segments"].get("roadbed_width") or []:
         out.append({
             "section_id": section_id,
             "side": r["side"],
-            "interval_seq": r["interval_seq"],
-            "start_station_km": round(r["start_station_m"] / 1000.0, 6),
-            "end_station_km": round(r["end_station_m"] / 1000.0, 6),
+            "seq_no": r["seq_no"],
+            "group_seq": r["group_seq"],
+            "station_km": round(r["station_m"] / 1000.0, 6),
             "median_width_m": r.get("median_width_m"),
             "half_carriageway_width_m": r.get("half_carriageway_width_m"),
             "extra_lane_flag": r.get("extra_lane_flag"),
             "hard_shoulder_width_m": r.get("hard_shoulder_width_m"),
             "earth_shoulder_width_m": r.get("earth_shoulder_width_m"),
             "extra_lane_file": r.get("extra_lane_file"),
-            "remark": None,                       # 见上：异常说明走 IR warnings，不落 remark
+            "remark": None,          # 组内不一致的说明走 IR 根部 warnings，不落 remark
         })
     return out
 
@@ -605,13 +603,13 @@ def load(ir: Mapping[str, Any], dao: Any, *,
         if tables["superelev_transition"]:
             report["written"]["superelev_transition"] = tx.insert(
                 "superelev_transition", tables["superelev_transition"],
-                on_conflict=("section_id", "transition_seq"))
+                on_conflict=("section_id", "station_km"))
 
         # ⑦ 路幅宽度分段：锚 section_id，与其余 GE 表相同
         if tables["roadbed_width"]:
             report["written"]["roadbed_width"] = tx.insert(
                 "roadbed_width", tables["roadbed_width"],
-                on_conflict=("section_id", "side", "interval_seq"))
+                on_conflict=("section_id", "side", "station_km"))
 
         # ⑧ 批次登记
         tx.insert("data_import_batch", [batch], on_conflict=("batch_no",))
