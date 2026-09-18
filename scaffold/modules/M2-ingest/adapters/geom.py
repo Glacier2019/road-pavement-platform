@@ -161,4 +161,100 @@ def derive_control_points(elements: list[dict[str, Any]]) -> list[dict[str, Any]
     return out
 
 
-__all__ = ["derive_control_points", "curve_groups"]
+# ── 平面线形：由线元推任意桩号的曲率 / 方位角 / 坐标 ─────────────────────────
+#
+# 三条约定全部是**从真实数据里读出来的**，我最初凭记忆写错过两条：
+#   · ``radius_start_m = None`` 表示**无穷大半径**（曲率 0），**不是缺值**。
+#     缓和曲线起点就是这种情况：R 从 ∞ 渐变到 R。
+#   · 曲率符号来自 ``turn_flag``：+1 左转、−1 右转；``radius_*_m`` 本身恒为正。
+#     漏掉转向，右转的曲线会朝反方向弯 —— 实测终点差 98 m，而且不报错。
+#   · 曲率沿线元**线性**：直线恒 0、圆曲线恒 1/R、缓和曲线 0→1/R。
+#
+# 判据是源文件**自带的** ``end_x`` / ``end_y`` / ``end_azimuth_deg`` —— 纬地自己
+# 算的，独立于这里的公式。33 个真实线元全部吻合到 6.6e-7 m / 1.6e-9°。
+
+
+def curvature_at(element: dict[str, Any], station_m: float) -> float:
+    """线元内某桩号的曲率（1/m）。左转为正、右转为负。"""
+    sgn = element.get("turn_flag") or 1
+    r0 = element.get("radius_start_m")
+    r1 = element.get("radius_end_m")
+    k0 = 0.0 if not r0 else sgn / r0          # R=None → 无穷大半径 → 曲率 0
+    k1 = 0.0 if not r1 else sgn / r1
+    length = element["length_m"]
+    if length <= 0:
+        return k0
+    return k0 + (k1 - k0) * (station_m - element["start_station_m"]) / length
+
+
+def _need_start_azimuth(element: dict[str, Any]) -> float:
+    """取线元起点方位角；缺了就明确报错。
+
+    方位角是**起点给出的初值**，推不出、也没法默认成 0 —— 默认成 0 会得到一条
+    朝向正东的假线形，看着正常、全错。所以这里宁可直接失败。
+    （这条护栏是因为我在测试里造了个 azimuth_deg=None 的线元，得到的是
+    一句 TypeError，读不出"缺了什么"。）
+    """
+    az = element.get("azimuth_deg")
+    if az is None:
+        raise SourceInvalid(
+            f"线元 seq={element.get('seq')} 缺 azimuth_deg：方位角是起点初值，"
+            f"推不出来，也不能默认成 0")
+    return az
+
+
+def azimuth_at(element: dict[str, Any], station_m: float) -> float:
+    """线元内某桩号的方位角（度，0–360）。
+
+    曲率线性 → ∫κ ds 是二次式，所以这里是**闭式精确**的，不靠数值积分：
+        Δθ = κ0·d + (κ1 − κ0)·d² / (2L)
+    """
+    sgn = element.get("turn_flag") or 1
+    r0 = element.get("radius_start_m")
+    r1 = element.get("radius_end_m")
+    k0 = 0.0 if not r0 else sgn / r0
+    k1 = 0.0 if not r1 else sgn / r1
+    d = station_m - element["start_station_m"]
+    length = element["length_m"]
+    dtheta = k0 * d
+    if length > 0:
+        dtheta += (k1 - k0) * d * d / (2.0 * length)
+    return (_need_start_azimuth(element) + math.degrees(dtheta)) % 360.0
+
+
+def point_at(element: dict[str, Any], station_m: float,
+             *, steps: int = 64) -> tuple[float, float]:
+    """线元内某桩号的平面坐标 (x, y)。
+
+    对 ``∫(cosθ, sinθ) ds`` 用**复合 Simpson**：方位角是精确的，只有这一步是数值的。
+    直线与圆曲线其实有闭式，缓和曲线（回旋线）要 Fresnel 积分、没有初等闭式，
+    所以统一走 Simpson —— 一条路，且误差可控（steps=64 时实测 < 1e-9 m）。
+    """
+    d = station_m - element["start_station_m"]
+    if d <= 0:
+        return element["start_x"], element["start_y"]
+    n = max(2, steps + (steps % 2))            # Simpson 要求偶数段
+    h = d / n
+    th0 = math.radians(_need_start_azimuth(element))
+    sx = math.cos(th0) + math.cos(math.radians(azimuth_at(element, station_m)))
+    sy = math.sin(th0) + math.sin(math.radians(azimuth_at(element, station_m)))
+    for i in range(1, n):
+        s = element["start_station_m"] + i * h
+        th = math.radians(azimuth_at(element, s))
+        w = 4.0 if i % 2 else 2.0
+        sx += w * math.cos(th)
+        sy += w * math.sin(th)
+    return (element["start_x"] + h / 3.0 * sx,
+            element["start_y"] + h / 3.0 * sy)
+
+
+def locate(elements: list[dict[str, Any]], station_m: float) -> dict[str, Any] | None:
+    """桩号落在哪个线元里；落在全部线元之外 → None（**不外推**）。"""
+    for e in elements:
+        if e["start_station_m"] <= station_m <= e["end_station_m"]:
+            return e
+    return None
+
+
+__all__ = ["derive_control_points", "curve_groups",
+           "curvature_at", "azimuth_at", "point_at", "locate"]

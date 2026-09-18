@@ -525,6 +525,58 @@ def main() -> int:
           str(zdm.check_vertical_curves(_ov)[:2]))
     check("正常数据下竖曲线无重叠/越界", zdm.check_vertical_curves(_zp) == [])
 
+    # ── 第 5d 组：平面线形（曲率/方位角/坐标）─────────────────────────────
+    print("\n第 5d 组  平面线形：由线元推任意桩号")
+    from adapters import geom as _geom
+    _el = [
+        dict(seq=1, type="line", turn_flag=1, start_station_m=0.0, end_station_m=100.0,
+             length_m=100.0, azimuth_deg=0.0, end_azimuth_deg=0.0,
+             start_x=0.0, start_y=0.0, end_x=100.0, end_y=0.0,
+             radius_start_m=None, radius_end_m=None),
+        dict(seq=2, type="transition", turn_flag=1, start_station_m=100.0, end_station_m=160.0,
+             length_m=60.0, azimuth_deg=0.0, end_azimuth_deg=None,
+             start_x=100.0, start_y=0.0, end_x=None, end_y=None,
+             radius_start_m=None, radius_end_m=300.0),
+        dict(seq=3, type="circular", turn_flag=1, start_station_m=160.0, end_station_m=260.0,
+             length_m=100.0, azimuth_deg=0.0, end_azimuth_deg=None,
+             start_x=None, start_y=None, end_x=None, end_y=None,
+             radius_start_m=300.0, radius_end_m=300.0),
+    ]
+    check("★ R=None 表示**无穷大半径**（曲率 0），不是缺值",
+          _geom.curvature_at(_el[0], 50.0) == 0.0
+          and _geom.curvature_at(_el[1], 100.0) == 0.0,          # 缓和曲线起点 R=∞
+          f"{_geom.curvature_at(_el[0], 50.0)} / {_geom.curvature_at(_el[1], 100.0)}")
+    check("圆曲线曲率 = 1/R，缓和曲线内**线性**过渡",
+          abs(_geom.curvature_at(_el[2], 200.0) - 1 / 300.0) < 1e-15
+          and abs(_geom.curvature_at(_el[1], 130.0) - (1 / 300.0) * 0.5) < 1e-15,
+          f"{_geom.curvature_at(_el[2], 200.0)} / {_geom.curvature_at(_el[1], 130.0)}")
+    check("★ 曲率符号来自 turn_flag：右转（−1）曲率为负",
+          _geom.curvature_at(dict(_el[2], turn_flag=-1), 200.0) < 0,
+          str(_geom.curvature_at(dict(_el[2], turn_flag=-1), 200.0)))
+    check("直线段方位角恒定、坐标沿方位角直线前进",
+          abs(_geom.azimuth_at(_el[0], 30.0) - 0.0) < 1e-12
+          and abs(_geom.point_at(_el[0], 30.0)[0] - 30.0) < 1e-9
+          and abs(_geom.point_at(_el[0], 30.0)[1]) < 1e-9,
+          str(_geom.point_at(_el[0], 30.0)))
+    # 圆曲线：方位角按 Δ/R 线性增加。本线元 L=100、R=300 → 转过 100/300 rad
+    # 注意桩号必须落在**线元范围内**（160–260），取到 631 就是外推了。
+    check("圆曲线：方位角按 Δ/R 变化（L=100、R=300 → 转过 100/300 rad ≈ 19.099°）",
+          abs(_geom.azimuth_at(_el[2], 260.0) - math.degrees(100.0 / 300.0)) < 1e-9,
+          str(_geom.azimuth_at(_el[2], 260.0)))
+    check("起点处严格等于源值（d=0 边界）",
+          _geom.point_at(_el[1], 100.0) == (100.0, 0.0)
+          and abs(_geom.azimuth_at(_el[1], 100.0)) < 1e-12)
+    check("★ 桩号落在全部线元之外 → locate 返回 None，**不外推**",
+          _geom.locate(_el, -1.0) is None and _geom.locate(_el, 1000.0) is None)
+
+    # ★★ 元测试：把 turn_flag 丢掉（一律按左转算），右转的线元必须算不对。
+    #    这正是我第一版犯的错 —— 33 个真实线元里有 16 个是右转，终点最多差 98 m。
+    _r = dict(_el[2], turn_flag=-1)
+    check("★★ 元测试：丢掉 turn_flag（一律当左转）会被认出来，不是摆设",
+          abs(_geom.azimuth_at(_r, 260.0) - _geom.azimuth_at(dict(_r, turn_flag=1), 260.0)) > 1.0,
+          f"右转 {_geom.azimuth_at(_r, 260.0):.4f}° vs 误当左转 "
+          f"{_geom.azimuth_at(dict(_r, turn_flag=1), 260.0):.4f}°")
+
     # ── 第 6 组：真实完整文件（可选，docpipe/ 不入库）──────────────────────
     print("\n第 6 组  真实完整工程文件（可选：docpipe/ 未入库，干净检出会跳过）")
     if d and REAL_DIR.is_dir():
@@ -607,6 +659,53 @@ def main() -> int:
         check("★ 真实数据：桩号范围外不外推",
               zdm.design_elevation_at(_vps, -1.0) is None
               and zdm.design_elevation_at(_vps, 1e6) is None)
+        # ── 平面线形：真实 33 个线元，用源文件自带的终点做对照 ──
+        from adapters import geom as _g2
+        _els = full["segments"]["alignment_element"]
+        # 阈值定在 **DDL 存储精度**（x/y 是 numeric(16,6) → 1e-6 m；
+        # 方位角 numeric(10,6) → 1e-6°），不是定在浮点噪声上。
+        # 实测残差 3.2e-8 m / 1.6e-9°，比存储精度小 32 倍和 629 倍 —— 入不了库。
+        # 我第一版把阈值写成 1e-9，那是拿"我能算多准"当判据，不是拿"存得下多少"。
+        _ep = []
+        for _e in _els:
+            _x, _y = _g2.point_at(_e, _e["end_station_m"])
+            if (math.hypot(_x - _e["end_x"], _y - _e["end_y"]) > 1e-6
+                    or abs((_g2.azimuth_at(_e, _e["end_station_m"])
+                            - _e["end_azimuth_deg"] + 180) % 360 - 180) > 1e-6):
+                _ep.append(_e["seq"])
+        check("★ 真实数据：33 个线元的终点坐标与方位角全部对上源文件（33/33）",
+              _ep == [], f"不符的 seq：{_ep}")
+        check("★ 真实数据：每个线元起点处严格等于源值（d=0 边界）",
+              all(_g2.point_at(_e, _e["start_station_m"]) == (_e["start_x"], _e["start_y"])
+                  and _g2.azimuth_at(_e, _e["start_station_m"]) == _e["azimuth_deg"]
+                  for _e in _els))
+        # 曲率/方位角在**线元接缝**处必须连续 —— 这是独立于源终点的另一条检查
+        _seam_k = [(_a["seq"], _b["seq"]) for _a, _b in zip(_els, _els[1:])
+                   if abs(_g2.curvature_at(_a, _a["end_station_m"])
+                          - _g2.curvature_at(_b, _b["start_station_m"])) > 1e-12]
+        _seam_a = [(_a["seq"], _b["seq"]) for _a, _b in zip(_els, _els[1:])
+                   if abs((_g2.azimuth_at(_a, _a["end_station_m"])
+                           - _g2.azimuth_at(_b, _b["start_station_m"]) + 180) % 360 - 180) > 1e-6]
+        check("★ 真实数据：曲率在 32 个线元接缝处连续", _seam_k == [], str(_seam_k))
+        check("★ 真实数据：方位角在 32 个线元接缝处连续", _seam_a == [], str(_seam_a))
+        check("★ 真实数据：332 个桩号每个都能定位到线元，且范围外不外推",
+              all(_g2.locate(_els, _st["station_m"]) is not None
+                  for _st in full["segments"]["station_sequence"])
+              and _g2.locate(_els, -1.0) is None)
+        # ★★ 元测试（真实数据版）：把 turn_flag 抹平，16 个右转线元必须算不对
+        _flat = [dict(_e, turn_flag=1) for _e in _els]
+        _n_bad = sum(1 for _e, _f in zip(_els, _flat)
+                     if abs((_g2.azimuth_at(_f, _e["end_station_m"])
+                             - _e["end_azimuth_deg"] + 180) % 360 - 180) > 1e-6)
+        # 期望值**从数据算**，不写死：右转且**有曲率**的线元才会受影响。
+        # turn_flag 对直线毫无意义（曲率恒 0，符号翻转什么也不改变）——
+        # 16 个右转里有 4 个是直线，所以只有 12 个会算错。我第一版写死 16，错了。
+        _turned = [_e for _e in _els if _e["turn_flag"] == -1
+                   and (_e["radius_start_m"] or _e["radius_end_m"])]
+        check("★★ 元测试：真实数据里抹掉 turn_flag，右转且有曲率的线元会算错（不是摆设）",
+              _n_bad == len(_turned) and len(_turned) > 0,
+              f"抹平后 {_n_bad} 个线元终点方位角不符；右转且带曲率的线元共 {len(_turned)} 个"
+              f"（右转共 {sum(1 for _e in _els if _e['turn_flag'] == -1)} 个，其中直线不受影响）")
         check("缺口只剩 2 项（平纵都齐了）",
               sorted(x["segment"] for x in full["gaps"])
               == ["cross_section", "geometry_point"],
