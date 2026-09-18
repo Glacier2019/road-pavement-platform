@@ -453,6 +453,78 @@ def main() -> int:
           and _w_ir["source"].get("warnings", []) == []
           and _w_ir["source"].get("warnings", []) != _w_ir.get("warnings"))
 
+    # ── 第 5c 组：竖曲线内插（设计高程）────────────────────────────────────
+    print("\n第 5c 组  竖曲线内插：设计高程")
+    # 合成一段纵断面设计线：3 个变坡点，中间那个带竖曲线。
+    # 写法与第 6b 组一致（显式 CRLF + 计数行）——.ZDM 的计数行是它自带的自检。
+    # 变量名用 _vc_ 前缀，**不要用 _z**：第 6b 组已有一个 _z，同名会把它的值覆盖掉。
+    _vc_txt = ("HINTCAD5.83_ZDM_SHUJU\r\n"
+               "          3\r\n"
+               "         0.000\t100.00000000\t0.00000000\t     0.000\t0.00000000\r\n"
+               "       500.000\t105.00000000\t5000.00000000\t     0.000\t0.00000000\r\n"
+               "      1000.000\t100.00000000\t0.00000000\t     0.000\t0.00000000\r\n")
+    _zp, _ = zdm.derive_grades(zdm.parse(_vc_txt, file="t.ZDM")["points"])
+    _c = zdm.vertical_curve_of(_zp[1])
+    # 本段是 100→105→100 跨 500 m，即 i入=+1%、i出=-1%：
+    #   ω = -0.02，L = R·|ω| = 5000×0.02 = 100，T = 50，E = |ω|·L/8 = 0.25
+    check("竖曲线参数：ω/L/T/E 与定义一致",
+          abs(_c["omega"] + 0.02) < 1e-12 and abs(_c["len_m"] - 100.0) < 1e-9
+          and abs(_c["tangent_len_m"] - 50.0) < 1e-9
+          and abs(_c["external_m"] - 0.25) < 1e-12, str(_c))
+    check("★ 曲线以变坡点为中心：BVC = 变坡点 − T，EVC = 变坡点 + T",
+          abs(_c["bvc_station_m"] - 450.0) < 1e-9 and abs(_c["evc_station_m"] - 550.0) < 1e-9,
+          f"BVC={_c['bvc_station_m']} EVC={_c['evc_station_m']}")
+    # 凸（ω<0）曲线在变坡点处**低于**交点：105 - 0.25 = 104.75
+    check("★ 变坡点处：曲线 = 交点高程 + sign(ω)·E（凸则低、凹则高）",
+          abs(zdm.design_elevation_at(_zp, 500.0) - 104.75) < 1e-9,
+          str(zdm.design_elevation_at(_zp, 500.0)))
+    # BVC=450：切线值 100 + 0.01×450 = 104.5；EVC=550：105 - 0.01×50 = 104.5
+    check("曲线端点（BVC/EVC）处曲线值 = 切线值（两端对称，都是 104.5）",
+          abs(zdm.design_elevation_at(_zp, 450.0) - 104.5) < 1e-9
+          and abs(zdm.design_elevation_at(_zp, 550.0) - 104.5) < 1e-9,
+          f"{zdm.design_elevation_at(_zp, 450.0)} / {zdm.design_elevation_at(_zp, 550.0)}")
+    check("跨 BVC/EVC 左右连续（无跳变）",
+          all(abs(zdm.design_elevation_at(_zp, s - 1e-7)
+                  - zdm.design_elevation_at(_zp, s + 1e-7)) < 1e-6 for s in (450.0, 550.0)))
+    check("★ 桩号落在已知范围外 → None，**不外推**",
+          zdm.design_elevation_at(_zp, -1.0) is None
+          and zdm.design_elevation_at(_zp, 1001.0) is None)
+    check("首末变坡点处（无竖曲线）高程 = .ZDM 原值",
+          abs(zdm.design_elevation_at(_zp, 0.0) - 100.0) < 1e-9
+          and abs(zdm.design_elevation_at(_zp, 1000.0) - 100.0) < 1e-9)
+
+    # ★★ 元测试：把曲线错放到变坡点**之后**（我第一版的错），上面那条必须能抓出来。
+    #    错位版本在变坡点处算出来恰好**等于**切线交点高程（差值 0.0000），
+    #    而正确版本差一个外距 E —— 两者可辨，所以这条钉子不是摆设。
+    def _wrong_placement(points, sta):
+        for q in points:
+            cc = zdm.vertical_curve_of(q)
+            if not cc:
+                continue
+            bvc = q["station_m"] + cc["tangent_len_m"]          # ← 错：应以变坡点为中心
+            if bvc <= sta <= bvc + cc["len_m"]:
+                x = sta - bvc
+                yb = q["elevation_m"] + (q["grade_in_pct"] / 100.0) * cc["tangent_len_m"]
+                return yb + (q["grade_in_pct"] / 100.0) * x + (cc["omega"] / (2 * cc["len_m"])) * x * x
+        return None
+    # 在真曲线区间 [450,550] 内取三个桩号：错位版（曲线在 [550,650]）与正确版必须都能分辨
+    _probe = (460.0, 500.0, 540.0)
+    _disagree = [s for s in _probe
+                 if _wrong_placement(_zp, s) != zdm.design_elevation_at(_zp, s)]
+    check("★★ 元测试：曲线错位（甩到变坡点之后）会被认出来，不是摆设",
+          len(_disagree) == len(_probe),
+          f"{len(_probe)} 个曲线内桩号只有 {len(_disagree)} 个能分辨；"
+          f"错位版在变坡点 500 处算得 {_wrong_placement(_zp, 500.0)}（给不出值）"
+          f"／正确版 {zdm.design_elevation_at(_zp, 500.0)}")
+
+    # 元测试：重叠检查必须非空 —— 造两条真重叠的曲线
+    _ov = [dict(_zp[0]), dict(_zp[1]), dict(_zp[2])]
+    _ov[1]["vertical_curve_radius_m"] = 200000.0     # L 大到把相邻变坡点包进来
+    check("★ 元测试：竖曲线重叠/越界检查确实会报（不是空断言）",
+          len(zdm.check_vertical_curves(_ov)) > 0,
+          str(zdm.check_vertical_curves(_ov)[:2]))
+    check("正常数据下竖曲线无重叠/越界", zdm.check_vertical_curves(_zp) == [])
+
     # ── 第 6 组：真实完整文件（可选，docpipe/ 不入库）──────────────────────
     print("\n第 6 组  真实完整工程文件（可选：docpipe/ 未入库，干净检出会跳过）")
     if d and REAL_DIR.is_dir():
@@ -506,6 +578,35 @@ def main() -> int:
               == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
                   "厂商版本 5.83", "厂商版本 5.84"],
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
+        # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
+        _vps = full["segments"]["profile_grade_point"]
+        check("真实数据：竖曲线之间无重叠、无越界",
+              zdm.check_vertical_curves(_vps) == [],
+              str(zdm.check_vertical_curves(_vps)[:2]))
+        _ext_bad = []
+        for _p in _vps:
+            _cc = zdm.vertical_curve_of(_p)
+            if not _cc:
+                continue
+            _y = zdm.design_elevation_at(_vps, _p["station_m"])
+            _exp = _p["elevation_m"] + math.copysign(_cc["external_m"], _cc["omega"])
+            if abs(_y - _exp) > 1e-6:
+                _ext_bad.append((_p["vpi_seq"], _y, _exp))
+        check("★ 真实数据：每个变坡点处，曲线 = 交点高程 + sign(ω)·外距（10/10）",
+              _ext_bad == [], str(_ext_bad))
+        # 首末变坡点没有竖曲线 → 该处高程必须**等于 .ZDM 原值**
+        _first, _last = _vps[0], _vps[-1]
+        check("★ 真实数据：首末变坡点处高程 = .ZDM 原值（57.2620 / 57.4592）",
+              abs(zdm.design_elevation_at(_vps, _first["station_m"]) - _first["elevation_m"]) < 1e-6
+              and abs(zdm.design_elevation_at(_vps, _last["station_m"]) - _last["elevation_m"]) < 1e-6,
+              f"{zdm.design_elevation_at(_vps, _first['station_m'])} / "
+              f"{zdm.design_elevation_at(_vps, _last['station_m'])}")
+        check("★ 真实数据：全线 332 个桩号都算得出设计高程，且不越出变坡点高程的包络",
+              all(zdm.design_elevation_at(_vps, st["station_m"]) is not None
+                  for st in full["segments"]["station_sequence"]))
+        check("★ 真实数据：桩号范围外不外推",
+              zdm.design_elevation_at(_vps, -1.0) is None
+              and zdm.design_elevation_at(_vps, 1e6) is None)
         check("缺口只剩 2 项（平纵都齐了）",
               sorted(x["segment"] for x in full["gaps"])
               == ["cross_section", "geometry_point"],

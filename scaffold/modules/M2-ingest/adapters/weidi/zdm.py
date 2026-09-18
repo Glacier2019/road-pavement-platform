@@ -236,8 +236,105 @@ def check_against_stations(points: list[dict[str, Any]],
     return warn
 
 
+def vertical_curve_of(point: dict[str, Any]) -> dict[str, Any] | None:
+    """一个变坡点的竖曲线参数；没有竖曲线时返回 ``None``。
+
+    **曲线以变坡点为中心**：BVC = 变坡点桩号 − T，EVC = 变坡点桩号 + T（L = 2T）。
+    ω = i出 − i入（小数），L = R·|ω|，T = L/2，E = |ω|·L/8。
+
+    为什么要把"以变坡点为中心"写进注释：我第一版把曲线放在
+    ``[变坡点 + T, 变坡点 + T + L]``，也就是整条曲线甩在变坡点**之后**。
+    那样每个桩号的高程都会整体偏 T，而且**不报任何错**。真实数据一验就露了：
+    曲线在变坡点处应比切线交点低（凸）或高（凹）一个外距 E，错位版本算出来
+    恰好**等于**交点高程，差值 0.0000 —— 一眼可辨。
+
+    要求 ``derive_grades`` 已经跑过（本函数读 grade_in/out_pct）。
+    """
+    i1 = point.get("grade_in_pct")
+    i2 = point.get("grade_out_pct")
+    R = point.get("vertical_curve_radius_m")
+    if i1 is None or i2 is None or not R:
+        return None
+    w = (i2 - i1) / 100.0
+    L = R * abs(w)
+    if L <= 0:                    # 前后同坡 → 没有竖曲线（不是"半径为零的曲线"）
+        return None
+    T = L / 2.0
+    return {
+        "omega": w,
+        "len_m": L,
+        "tangent_len_m": T,
+        "bvc_station_m": point["station_m"] - T,
+        "evc_station_m": point["station_m"] + T,
+        "bvc_elev_m": point["elevation_m"] - (i1 / 100.0) * T,
+        "external_m": abs(w) * L / 8.0,
+    }
+
+
+def check_vertical_curves(points: list[dict[str, Any]]) -> list[str]:
+    """竖曲线之间的位置检查。返回**告警**（可疑 ≠ 非法），不抛异常。
+
+    两条：
+      · 相邻曲线不得重叠（前一条的 EVC 不能超过后一条的 BVC）；
+      · 一条曲线不得把**别的变坡点**包进去（否则那个变坡点的切线交点落在曲线内部，
+        几何上自相矛盾）。
+    这两种情况都会让"某桩号属于哪条曲线"出现歧义，而歧义不该静默地随便挑一条。
+    """
+    warn: list[str] = []
+    curves = [(p, vertical_curve_of(p)) for p in points]
+    curves = [(p, c) for p, c in curves if c]
+    for (p1, c1), (p2, c2) in zip(curves, curves[1:]):
+        if c1["evc_station_m"] > c2["bvc_station_m"] + 1e-9:
+            warn.append(
+                f"竖曲线重叠：VPI{p1['vpi_seq']} 的 EVC={c1['evc_station_m']:.3f} m "
+                f"超过了 VPI{p2['vpi_seq']} 的 BVC={c2['bvc_station_m']:.3f} m")
+    for p, c in curves:
+        for q in points:
+            if q is p:
+                continue
+            if c["bvc_station_m"] < q["station_m"] < c["evc_station_m"]:
+                warn.append(
+                    f"竖曲线越界：VPI{p['vpi_seq']} 的曲线 "
+                    f"[{c['bvc_station_m']:.3f}, {c['evc_station_m']:.3f}] "
+                    f"把 VPI{q['vpi_seq']}（{q['station_m']:.3f} m）包在里面")
+    return warn
+
+
+def design_elevation_at(points: list[dict[str, Any]],
+                        station_m: float) -> float | None:
+    """某桩号的**设计高程**：竖曲线内按抛物线，其余按切线。
+
+    抛物线用工程上通用的二次式：以 BVC 为原点，x 沿桩号增大方向，
+        y = y_BVC + i入·x + (ω / (2L))·x²
+    在 x = T（即变坡点处）得到 y = 交点高程 + sign(ω)·E —— 凸则低、凹则高，
+    与"外距"的定义一致（这条在 tests 里被钉住）。
+
+    桩号**落在已知范围之外时返回 None，不做外推**：外推出来的高程看着像真的，
+    会被下游当成设计值用。宁可没有。
+    要求 ``derive_grades`` 已经跑过。
+    """
+    if not points:
+        return None
+    if station_m < points[0]["station_m"] or station_m > points[-1]["station_m"]:
+        return None
+    for p in points:                       # ① 落在某条竖曲线内
+        c = vertical_curve_of(p)
+        if c and c["bvc_station_m"] <= station_m <= c["evc_station_m"]:
+            x = station_m - c["bvc_station_m"]
+            return (c["bvc_elev_m"] + (p["grade_in_pct"] / 100.0) * x
+                    + (c["omega"] / (2.0 * c["len_m"])) * x * x)
+    for a, b in zip(points, points[1:]):   # ② 否则按切线在两变坡点间插值
+        if a["station_m"] <= station_m <= b["station_m"]:
+            if a["grade_out_pct"] is None:
+                return None
+            return a["elevation_m"] + (a["grade_out_pct"] / 100.0) * (
+                station_m - a["station_m"])
+    return None
+
+
 PAYLOAD_KEY = "points"
 
-__all__ = ["detect", "parse", "derive_grades", "check_against_stations", "MAGIC_RE",
+__all__ = ["detect", "parse", "derive_grades", "check_against_stations",
+           "vertical_curve_of", "check_vertical_curves", "design_elevation_at", "MAGIC_RE",
            "SEGMENT", "FILE_KIND", "PAYLOAD_KEY", "FIELD_COUNT",
            "ELEV_MIN_M", "ELEV_MAX_M", "RADIUS_MAX_M"]
