@@ -1502,6 +1502,22 @@ def main() -> int:
     check("元测试：旧精度 numeric(10,3) **确实会碰撞**（证明本组非空断言）", c3a == c3b,
           f"两者都成 {c3a} km")
 
+    # ★★ 通用断言（本轮补）：DDL 里**所有** station*_km 列的 scale 都必须 ≥ 6。
+    #    上面那条只钉了 station_local_km。本轮实测抓到 J1 earthwork_section.station_km
+    #    被我写成了 numeric(10,4)（0.1 m），而全库其余 30 处都是 numeric(12,6)。
+    #    本工程 .tf 的桩号是 20 m 一个，0.1 m 确实"够用" —— 但"对本工程够用"不是标准：
+    #    下一条路的桩号精度不由本工程决定。同族列必须同一个标准，故这条钉**全族**。
+    _km_cols = re.findall(r"^\s{4}(\w*station\w*_km)\s+numeric\((\d+),\s*(\d+)\)",
+                          ddl_text, re.M)
+    _km_bad = [(c, f"numeric({p},{sc})") for c, p, sc in _km_cols if int(sc) < 6]
+    check(f"★★ DDL 里 {len(_km_cols)} 个 station*_km 列，scale 全部 ≥ 6（1 mm）",
+          bool(_km_cols) and not _km_bad, f"不合格：{_km_bad}")
+    # 元测试：证明这条不是空断言 —— 把我犯过的那个写法喂进去，必须被判不合格
+    _fake = "    station_km                             numeric(10,4)    NULL,   -- x"
+    _fm = re.findall(r"^\s{4}(\w*station\w*_km)\s+numeric\((\d+),\s*(\d+)\)", _fake, re.M)
+    check("★★ 元测试：numeric(10,4) 的写法**确实会被这条判不合格**（非空断言）",
+          bool(_fm) and int(_fm[0][2]) < 6, f"解析到 {_fm}")
+
     # ── 第 8 组：.JD 平面交点 —— 字段语义不靠"看"，靠几何恒等式**证明** ─────────
     # 为什么值得单列一组：.JD 的 12/10 字段行**没有表头**，字段归属只能靠推。
     # 而 DDL 里 alignment_pi 的注释恰好把两个值标错了（把 A 当切线长、把 Ls 当转角）。
@@ -1816,7 +1832,9 @@ def main() -> int:
     #   ② 有数据的表的行数 —— 精确；其余必须全 0。
     _want = ({"station_sequence", "alignment_pi", "alignment_element",
               "profile_grade_point", "profile_ground_point",
-              "superelev_transition", "roadbed_width"}
+              "superelev_transition", "roadbed_width",
+              # v0.5 新增两张逐桩表：各对应一个段，表名与段名同名
+              "earthwork_section", "roadbed_design_point"}
              | {t for t, _ in di.CTR_ON_CONFLICT})
     check("plan 产出的表集合 = 已实现段对应的表 ∪ .CTR 的 9 张（漏一个键会静默少写一张表）",
           set(counts) == _want,

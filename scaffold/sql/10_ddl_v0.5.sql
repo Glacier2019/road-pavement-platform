@@ -1422,7 +1422,7 @@ CREATE TABLE IF NOT EXISTS earthwork_section (
     id                                bigint       generated always as identity primary key,
     section_id                        bigint       not null references road_section(id),
     station_id                        bigint       not null references station_sequence(id),
-    station_km                             numeric(10,4)    NULL,   -- 第  1 列  桩     号
+    station_km                             numeric(12,6) not null,   -- 第  1 列  桩     号（与全库其余 30 处一致）
     cut_area_m2                            numeric(10,4)    NULL,   -- 第  2 列  挖方面积
     fill_area_m2                           numeric(10,4)    NULL,   -- 第  3 列  填方面积
     center_fill_cut_m                      numeric(10,4)    NULL,   -- 第  4 列  中桩填挖

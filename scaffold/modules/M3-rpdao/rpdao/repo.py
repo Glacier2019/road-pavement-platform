@@ -323,6 +323,13 @@ class GeRepository(DomainRepository):
     #: 逐桩定位列的名字。值为它时，计数要经 `station_sequence` 中转。
     STATION_ANCHOR: str = "station_id"
 
+    #: ⚠ 这张表**不是**「所有可读段」的清单，而是**第一批（v0.3）**那一组 ——
+    #: 它与 `adapters/base.SEGMENTS` 逐条对齐，测试会交叉核对「不多不少」。
+    #: `.CTR`/`.WID`/`.SUP` 与 v0.5 的两张逐桩表**都不在这里**，它们照常可读
+    #: （按 section_id 直接取），只是不走这套「逐桩经 station_sequence 中转」的定位。
+    #: 我一度把 earthwork_section / roadbed_design_point 加了进来，测试当场报
+    #: 「M3 独有 2 段」—— 那条交叉核对正是为了挡住这种「顺手往里加」。
+    #:
     #: 属 DDL v0.4 第二批、**表还没建**的段。与"表已建但 0 行"含义不同：
     #: 前者是 schema 没到，后者是解析器没做。混为一谈会让"为什么只有 L2"
     #: 这个问题得到错误答案。

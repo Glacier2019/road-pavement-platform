@@ -38,6 +38,13 @@ BEGIN;
 --   故用 station_id 外键锚定 station_sequence —— 与 I 节（.CTR）不同：
 --   .CTR 的分段桩号**不是** .STA 桩号序列的子集，所以那边只能存 station_km。
 --   station_km 在这里是**照文件原样存下**的（可追溯），主锚定是 station_id。
+--
+-- ⚠ 精度踩过坑：初版给 earthwork_section.station_km 写了 numeric(10,4)（0.1 m），
+--   而全库其余 30 处 station_km 都是 numeric(12,6)（1 mm）。
+--   这个坑本仓库**踩过一次**——station_local_km 原为 numeric(10,3) 时，
+--   .STA 里相距 0.083 m 的两个桩号都成了 1.660 km（即"第 7 组"测试的由来）。
+--   "对本工程够用"不是标准：本工程 .tf 的桩号是 20 m 一个，0.1 m 确实够，
+--   但下一条路的桩号精度不由本工程决定。已统一为 numeric(12,6) not null。
 
 -- ── J1. earthwork_section 逐桩土方断面（.tf，74 列）─────────────────────────
 -- 教程 §13.9：记录桩号、填挖方断面面积、左右侧坡口坡脚至中桩的距离等。
@@ -50,7 +57,7 @@ CREATE TABLE IF NOT EXISTS earthwork_section (
     id                                bigint       generated always as identity primary key,
     section_id                        bigint       not null references road_section(id),
     station_id                        bigint       not null references station_sequence(id),
-    station_km                             numeric(10,4)    NULL,   -- 第  1 列  桩     号
+    station_km                             numeric(12,6) not null,   -- 第  1 列  桩     号（与全库其余 30 处一致）
     cut_area_m2                            numeric(10,4)    NULL,   -- 第  2 列  挖方面积
     fill_area_m2                           numeric(10,4)    NULL,   -- 第  3 列  填方面积
     center_fill_cut_m                      numeric(10,4)    NULL,   -- 第  4 列  中桩填挖

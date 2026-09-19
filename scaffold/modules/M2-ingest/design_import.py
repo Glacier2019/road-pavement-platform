@@ -35,12 +35,16 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from adapters import geom
+# ★ 列名**从适配器取**，不在这里手抄 —— .tf 有 74 列，手抄一遍就多一个会漂移的真源。
+from adapters.weidi import lj as lj_mod
+from adapters.weidi import tf as tf_mod
 
 # 落库器只写这几张表。白名单是刻意的：**新增映射必须在这里显式登记**，
 # 免得一个 IR 段的增删悄悄改变写入范围。
 LOADABLE_TABLES = ("station_sequence", "alignment_pi", "alignment_element",
                    "profile_grade_point", "profile_ground_point",
-                   "superelev_transition", "roadbed_width")
+                   "superelev_transition", "roadbed_width",
+                   "earthwork_section", "roadbed_design_point")
 
 # 推导值与 .JD 文件值的允许偏差。实测全部 ≤ 3.6×10⁻⁸，此处留三个数量级余量，
 # 但仍远小于任何有工程意义的差（1 mm = 1×10⁻³）。
@@ -348,6 +352,61 @@ def _plan_design_control(ir: Mapping[str, Any], section_id: int) -> dict[str, li
     return out
 
 
+def _plan_earthwork_sections(ir: Mapping[str, Any],
+                             section_id: int) -> list[dict[str, Any]]:
+    """``earthwork_section`` 行（逐桩土方断面，.tf 的真源）。
+
+    ▲ 本表**同时**锚 ``section_id`` 与 ``station_id``：它属于某个路段，又是逐桩数据。
+    与 ``profile_ground_point`` 一样，plan 里只带内部 ``_station_m``，
+    真实 station_id 只有写进 station_sequence 之后才存在（见 :func:`load`）。
+
+    ``station_km`` 是**千米**（表里就是这么定的），IR 里是米 —— 与其余 GE 表同一处换算。
+    ★ 它在这里是**冗余**的（有 station_id 就够定位），保留是为了可追溯：
+    直接看这张表就能读出桩号，不必回 join station_sequence。
+
+    ★ 列名来自 ``tf_mod.COLUMNS`` —— 74 列一个不落地照收，含本工程全为 0 的 44 列。
+    建表原则是「照数据文件的样式，好追溯」，不是"只留有用的"。
+    """
+    out = []
+    for p in ir["segments"].get("earthwork_section") or []:
+        row: dict[str, Any] = {
+            "section_id": section_id,
+            "station_km": round(p["station_m"] / 1000.0, 6),
+            "_station_m": round(p["station_m"], 6),
+            "remark": None,
+        }
+        for _, en in tf_mod.COLUMNS:
+            if en == "station_m":
+                continue
+            row[en] = p.get(en)
+        out.append(row)
+    return out
+
+
+def _plan_roadbed_design_points(ir: Mapping[str, Any],
+                                section_id: int) -> list[dict[str, Any]]:
+    """``roadbed_design_point`` 行（逐桩路基设计断面，.lj 的真源）。
+
+    同 ``_plan_earthwork_sections``：锚 section_id + station_id，内部带 ``_station_m``。
+    列名来自 ``lj_mod.COLUMNS``（24 列，含两个**待考**列 —— 说明书没有对应项，
+    按位置命名、原样照收，不猜也不丢）。
+    """
+    out = []
+    for p in ir["segments"].get("roadbed_design_point") or []:
+        row: dict[str, Any] = {
+            "section_id": section_id,
+            "station_km": round(p["station_m"] / 1000.0, 6),
+            "_station_m": round(p["station_m"], 6),
+            "remark": None,
+        }
+        for en in lj_mod.COLUMNS:
+            if en == "station_m":
+                continue
+            row[en] = p.get(en)
+        out.append(row)
+    return out
+
+
 def _plan_ground_points(ir: Mapping[str, Any]) -> list[dict[str, Any]]:
     """``profile_ground_point`` 行（纵断面**地面线**：逐桩原始地形高程）。
 
@@ -486,6 +545,8 @@ def plan(ir: Mapping[str, Any], *, section_id: int,
         "profile_ground_point": _plan_ground_points(ir),
         "superelev_transition": _plan_superelev_transitions(ir, section_id),
         "roadbed_width": _plan_roadbed_widths(ir, section_id),
+        "earthwork_section": _plan_earthwork_sections(ir, section_id),
+        "roadbed_design_point": _plan_roadbed_design_points(ir, section_id),
     }
     # .CTR 一个段带 9 张表 —— 展开进同一张 tables 字典，键就是**物理表名**，
     # 故 load / verify / 测试都按表名取，不需要知道它们同源。
@@ -774,7 +835,30 @@ def load(ir: Mapping[str, Any], dao: Any, *,
             if tables.get(_t):
                 report["written"][_t] = tx.insert(_t, tables[_t], on_conflict=_oc)
 
-        # ⑨ 批次登记
+        # ⑨ 逐桩土方断面（.tf）与逐桩路基设计断面（.lj）——
+        #    **同时锚 section_id 与 station_id**：既属于某个路段，又是逐桩数据。
+        #    与 ⑤ 地面线同一个道理：把内部 _station_m 换成真实 station_id，
+        #    **查不到就在写之前抛错**，绝不留一条挂空的断面行 ——
+        #    逐桩数据错位不会报任何错，只会让整条路的土方量与路幅断面静默错位。
+        #    on_conflict 用 (section_id, station_id)：与 DDL 的 UNIQUE 完全一致。
+        for _t, _seg in (("earthwork_section", "earthwork_section"),
+                         ("roadbed_design_point", "roadbed_design_point")):
+            if not tables.get(_t):
+                continue
+            _rows = []
+            for row in tables[_t]:
+                sid_of_station = station_id_by_m.get(row["_station_m"])
+                if sid_of_station is None:
+                    raise LoadError(
+                        f"{_seg} 桩号 {row['_station_m']} m 在桩号序列里找不到对应"
+                        f"（section_id={section_id}）—— 本表锚 station_id，错位不报错，"
+                        f"故此处直接拒收")
+                _rows.append({**{k: v for k, v in row.items() if k != "_station_m"},
+                              "station_id": sid_of_station})
+            report["written"][_t] = tx.insert(
+                _t, _rows, on_conflict=("section_id", "station_id"))
+
+        # ⑩ 批次登记
         tx.insert("data_import_batch", [batch], on_conflict=("batch_no",))
 
     return report
