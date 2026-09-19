@@ -64,7 +64,9 @@
         "cross_section",
         "superelev_transition",
         "roadbed_width",
-        "design_control"
+        "design_control",
+        "earthwork_section",
+        "roadbed_design_point"
       ]
     },
     "level": {
@@ -311,6 +313,22 @@
               }
             }
           }
+        },
+        "earthwork_section": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/earthwork_point"
+          },
+          "minItems": 1,
+          "description": "逐桩土方断面（`.tf`）。**逐桩**段：实测 332 行 = `.STA` 桩号序列的 332 个，故落库用 station_id 外键锚定 station_sequence（与 design_control 不同 —— .CTR 的分段桩号不是 .STA 的子集）。"
+        },
+        "roadbed_design_point": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/design_section_point"
+          },
+          "minItems": 1,
+          "description": "逐桩路基设计断面（`.lj`）。**逐桩**段，同 earthwork_section。"
         }
       }
     },
@@ -1275,6 +1293,708 @@
             "null"
           ],
           "description": "文字说明。教程规定地质概况**不超过 128 个汉字字节数**，汉字间可空格但**不能换行**"
+        }
+      }
+    },
+    "earthwork_point": {
+      "description": "逐桩土方断面（纬地 `.tf` 土方数据文件，教程 §13.9）。**一行源数据行 = 一个桩号断面**，共 74 列 —— 列名**逐条来自文件自带的表头**（`.tf` 是唯一自带完整列名的纬地文件），故本定义的 74 个键与源文件 1:1，无一个键是推测的。 ★★ 说明书正文把第 2/3 列写反了：正文写「[桩号][填方面积][挖方面积]」，文件自带表头写「[桩号][挖方面积][填方面积]」。用 `.lj` 的设计标高 vs 地面标高独立判填挖、再比全部 332 行：按文件表头 326/332 吻合、按说明书 6/332 —— **以文件表头为准**。 ⚠ 本工程 74 列里有 **44 列全为 0**（清表/超填/沟面积/路槽 B·C/垫层/路床/培土/包边土/截沟/台阶/挖 1–6 类/填 1–6 类/弃 1–6 类）—— 仍然**照收**，因为建表原则是「照数据文件的样式，好追溯」。",
+      "type": "object",
+      "required": [
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "桩号，单位**米**（源文件原生单位；落库时换算 km）。与 .STA 桩号序列**集合相等**"
+        },
+        "cut_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖方面积」。⚠ 说明书正文与文件自带表头在第 2/3 列上写反了，本定义**以文件表头为准**"
+        },
+        "fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「填方面积」。⚠ 说明书正文与文件自带表头在第 2/3 列上写反了，本定义**以文件表头为准**"
+        },
+        "center_fill_cut_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「中桩填挖」"
+        },
+        "subgrade_left_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「路基左宽」"
+        },
+        "subgrade_right_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「路基右宽」"
+        },
+        "subgrade_edge_left_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「基缘左高」"
+        },
+        "subgrade_edge_right_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「基缘右高」"
+        },
+        "left_slope_toe_offset_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左坡脚距」"
+        },
+        "right_slope_toe_offset_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右坡脚距」"
+        },
+        "left_slope_toe_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左坡脚高」"
+        },
+        "right_slope_toe_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右坡脚高」"
+        },
+        "left_ditch_edge_offset_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左沟缘距」"
+        },
+        "right_ditch_edge_offset_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右沟缘距」"
+        },
+        "left_berm_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左护坡道宽」"
+        },
+        "right_berm_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右护坡道宽」"
+        },
+        "left_ditch_bottom_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左沟底高」"
+        },
+        "right_ditch_bottom_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右沟底高」"
+        },
+        "left_ditch_center_offset_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左沟心距」"
+        },
+        "right_ditch_center_offset_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右沟心距」"
+        },
+        "left_ditch_depth_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左沟深度」"
+        },
+        "right_ditch_depth_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右沟深度」"
+        },
+        "left_land_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左用地宽」"
+        },
+        "right_land_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右用地宽」"
+        },
+        "topsoil_clear_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「清表面积」"
+        },
+        "top_overfill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「顶超面积」"
+        },
+        "left_overfill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左超面积」"
+        },
+        "right_overfill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右超面积」"
+        },
+        "drainage_ditch_flag": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "计排水沟：0/1 标志。源文件列名「计排水沟」"
+        },
+        "left_ditch_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左沟面积填」"
+        },
+        "left_ditch_cut_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左沟面积挖」"
+        },
+        "right_ditch_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右沟面积填」"
+        },
+        "right_ditch_cut_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右沟面积挖」"
+        },
+        "trench_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「路槽面积填」"
+        },
+        "trench_cut_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「路槽面积挖」"
+        },
+        "topsoil_clear_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「清表宽度」"
+        },
+        "topsoil_clear_thickness_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「清表厚度」"
+        },
+        "cut_class_1_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖1类面积」"
+        },
+        "cut_class_2_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖2类面积」"
+        },
+        "cut_class_3_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖3类面积」"
+        },
+        "cut_class_4_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖4类面积」"
+        },
+        "cut_class_5_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖5类面积」"
+        },
+        "cut_class_6_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖6类面积」"
+        },
+        "left_trench_b_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左路槽B」"
+        },
+        "right_trench_b_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右路槽B」"
+        },
+        "left_trench_c_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左路槽C」"
+        },
+        "right_trench_c_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右路槽C」"
+        },
+        "left_bedding_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左垫层」"
+        },
+        "right_bedding_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右垫层」"
+        },
+        "left_subgrade_bed_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左路床」"
+        },
+        "right_subgrade_bed_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右路床」"
+        },
+        "left_earth_shoulder_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左土肩培土」"
+        },
+        "right_earth_shoulder_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右土肩培土」"
+        },
+        "left_edge_wrap_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左包边土」"
+        },
+        "right_edge_wrap_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右包边土」"
+        },
+        "left_side_ditch_backfill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左边沟回填」"
+        },
+        "right_side_ditch_backfill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右边沟回填」"
+        },
+        "left_intercept_ditch_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左截沟填」"
+        },
+        "left_intercept_ditch_cut_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「左截沟挖」"
+        },
+        "right_intercept_ditch_fill_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右截沟填」"
+        },
+        "right_intercept_ditch_cut_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「右截沟挖」"
+        },
+        "bench_cut_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「挖台阶面积」"
+        },
+        "fill_class_1_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「填1类面积」"
+        },
+        "fill_class_2_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「填2类面积」"
+        },
+        "fill_class_3_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「填3类面积」"
+        },
+        "fill_class_4_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「填4类面积」"
+        },
+        "fill_class_5_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「填5类面积」"
+        },
+        "fill_class_6_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「填6类面积」"
+        },
+        "waste_class_1_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「弃1类面积」"
+        },
+        "waste_class_2_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「弃2类面积」"
+        },
+        "waste_class_3_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「弃3类面积」"
+        },
+        "waste_class_4_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「弃4类面积」"
+        },
+        "waste_class_5_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「弃5类面积」"
+        },
+        "waste_class_6_area_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件列名「弃6类面积」"
+        }
+      }
+    },
+    "design_section_point": {
+      "description": "逐桩路基设计断面（纬地 `.lj` 路基设计中间数据文件，教程 §13.6）。**一行 = 一个桩号断面**，实测 24 列。 ★★ 说明书与实测**三处对不上**：(1) 说明书说「每一行共 20 项数据」，实测 **24 列**；(2) 说明书给的列序是「左土路肩 左硬路肩 **左路面 左中分带**」，实测第 6 列 = 0.000（中分带）、第 7 列 = 3.500（路面）—— **写反了**；(3) 第 9、11 列说明书里**没有对应项**（恒 0.000），按对称读法右侧只应有 4 项、实测 6 项，**多插了两个 0.000**，故不猜、按位置命名并标待考。 ★ 它是**可编辑的设计输入**（教程：「此文件在特殊情况时，用户可做少量修改」），不是纯派生量。地面标高/设计标高与 .DMX/.ZDM 重复 —— 为可追溯而照存。",
+      "type": "object",
+      "required": [
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "桩号，单位**米**。与 .STA 桩号序列**集合相等**"
+        },
+        "ground_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 2 列"
+        },
+        "design_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 3 列"
+        },
+        "left_earth_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 4 列"
+        },
+        "left_hard_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 5 列"
+        },
+        "left_median_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 6 列"
+        },
+        "left_lane_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 7 列"
+        },
+        "right_median_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 8 列"
+        },
+        "extra_width_09_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "★**待考**：源文件第 9 列，说明书**没有对应项**（本工程 332 行恒为 0.000）。按对称读法右侧宽度只应有 4 项，实测第 8–13 列却有 6 项（多插了两个 0.000），故不猜、按位置命名"
+        },
+        "right_lane_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 10 列"
+        },
+        "extra_width_11_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "★**待考**：源文件第 11 列，说明书**没有对应项**（本工程 332 行恒为 0.000）。按对称读法右侧宽度只应有 4 项，实测第 8–13 列却有 6 项（多插了两个 0.000），故不猜、按位置命名"
+        },
+        "right_hard_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 12 列"
+        },
+        "right_earth_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "源文件第 13 列"
+        },
+        "elev_diff_01_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 14 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_02_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 15 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_03_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 16 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_04_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 17 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_05_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 18 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_06_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 19 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_07_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 20 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_08_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 21 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_09_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 22 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_10_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 23 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
+        },
+        "elev_diff_11_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "设计高差（源文件第 24 列，**可为负**）。说明书未说个数与排法。实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— 其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP"
         }
       }
     }

@@ -33,7 +33,7 @@ from typing import Any
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
-from . import ctr, dmx, jd, pm, sta, sup, wid, zdm
+from . import ctr, dmx, jd, lj, pm, sta, sup, tf, wid, zdm
 
 VENDOR = "weidi-hintcad"
 
@@ -49,13 +49,16 @@ CAPABILITIES: tuple[str, ...] = (
     "geometry_point",
     "cross_section",
     "design_control",
+    "earthwork_section",
+    "roadbed_design_point",
 )
 
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
 IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_element",
                                 "profile_ground_point", "profile_grade_point",
                                 "superelev_transition", "roadbed_width",
-                                "design_control")
+                                "design_control",
+                                "earthwork_section", "roadbed_design_point")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -71,6 +74,8 @@ _PARSERS: dict[str, Any] = {
     "superelev_transition": sup,
     "roadbed_width": wid,
     "design_control": ctr,
+    "earthwork_section": tf,
+    "roadbed_design_point": lj,
 }
 
 
@@ -133,9 +138,15 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     "profile_ground_point": (".DMX", "纵断面地面线文件"),
     "superelev_transition": (".SUP", "超高过渡数据文件"),
     "roadbed_width": (".WID", "路幅宽度数据文件"),
-    "geometry_point": (".tf", "土方数据文件（逐桩坐标）"),
+    # ⚠ 修正（2026-09，实测）：原写作 (".tf", "土方数据文件（逐桩坐标）") —— **错的**。
+    #   .tf 实测是 74 列**土方数据**（文件自带表头，无任何坐标列），见 tf.py。
+    #   逐桩坐标的来源尚未确认（候选 .GTM / .HDM，留待第 3 步），故先指向 .GTM 并标待考 ——
+    #   而不是继续挂在 .tf 上让"逐桩坐标"永远导不出来（这正是它一直 0 行的原因）。
+    "geometry_point": (".GTM", "三维数模组文件（逐桩坐标来源待考）"),
     "cross_section": (".HDM", "横断面地面线文件"),
     "design_control": (".CTR", "设计参数控制文件"),
+    "earthwork_section": (".tf", "土方数据文件"),
+    "roadbed_design_point": (".lj", "路基设计中间数据文件"),
 }
 
 
@@ -282,6 +293,22 @@ def build_ir(project_dir: str | pathlib.Path, *,
             warns += ctr.check_against_stations(segments["design_control"],
                                                 segments["station_sequence"])
 
+    # ⑧ 逐桩土方断面（.tf）与逐桩路基设计断面（.lj）。
+    #    ⚠ 这两段与 I 节（.CTR）**不同**：它们是**逐桩**文件，实测行数与 .STA 完全相同，
+    #    所以对账比的是**集合相等**（少一个桩号 = 那个断面的数据丢了），
+    #    而不是像 .CTR 那样只比范围（.CTR 的分段桩号本来就不必覆盖全线）。
+    if segments.get("earthwork_section"):
+        warns += tf.check_earthwork(segments["earthwork_section"])
+        if segments.get("station_sequence"):
+            warns += tf.check_against_stations(segments["earthwork_section"],
+                                               segments["station_sequence"])
+
+    if segments.get("roadbed_design_point"):
+        warns += lj.check_design(segments["roadbed_design_point"])
+        if segments.get("station_sequence"):
+            warns += lj.check_against_stations(segments["roadbed_design_point"],
+                                               segments["station_sequence"])
+
     return make_ir(
         vendor=VENDOR,
         origin="file",
@@ -296,4 +323,5 @@ def build_ir(project_dir: str | pathlib.Path, *,
 
 
 __all__ = ["VENDOR", "CAPABILITIES", "IMPLEMENTED", "SEGMENT_FILES", "build_ir",
-           "sta", "jd", "pm", "prj", "dmx", "zdm", "sup", "wid", "ctr"]
+           "sta", "jd", "pm", "prj", "dmx", "zdm", "sup", "wid", "ctr",
+           "lj", "tf"]

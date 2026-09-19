@@ -596,11 +596,16 @@ def main() -> int:
         # 第 4 次变红：加 .WID 时又红了。而这次的答案**仍然是"等级不该动"** ——
         # 超高与路幅宽度都是平纵都具备之后的**设计细节**，不是一级几何；
         # L0–L4 只认平/纵/横（横＝.HDM 横断面地面线，即 cross_section，尚未实现）。
+        # 第 5 次变红：加 .tf（土方断面）与 .lj（路基设计断面）时又红了。
+        # 答案**仍然是"等级不该动"**，而且理由更强：这两张表是**逐桩的设计细节**，
+        # 连"设计线"都不是 —— 它们是从设计线派生出来的土方量与路幅断面。
+        # 一个"加了段就要改等级"的测试才是坏的：等级的定义是平的，实现进度不该动它。
         check("★ 等级 = L3（.ZDM/.DMX 都实现：设计线与地面线同时具备）",
               full["geometry_level"] == "L3"
               and sorted(weidi.IMPLEMENTED)
               == ["alignment_element", "alignment_pi", "design_control",
-                  "profile_grade_point", "profile_ground_point", "roadbed_width",
+                  "earthwork_section", "profile_grade_point", "profile_ground_point",
+                  "roadbed_design_point", "roadbed_width",
                   "station_sequence", "superelev_transition"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
         gpts = full["segments"].get("profile_ground_point", [])
@@ -633,7 +638,8 @@ def main() -> int:
                      if f["parse_status"] == "ok")
               == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
                   "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
-                  "厂商版本 5.84", "厂商版本 6.00"],
+                  "厂商版本 5.84", "厂商版本 6.00", "厂商版本 6.00",
+                  "厂商版本 7.0"],
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
         _vps = full["segments"]["profile_grade_point"]
@@ -749,7 +755,7 @@ def main() -> int:
             check("派生纵坡量级合理（|i| < 20%，超出即说明列错位或推导错）",
                   grades and max(abs(g) for g in grades) < 20.0,
                   f"最大 {max(abs(g) for g in grades):.4f}%")
-        check("台账登记了 10 类文件（含未实现的）", len(full["source"]["files"]) == 10,
+        check("台账登记了 12 类文件（含未实现的）", len(full["source"]["files"]) == 12,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
