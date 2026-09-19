@@ -3,15 +3,15 @@
 ============================ 口径与依据 ============================
 1) **7 域的口径**来自报告第五章（原文）：GE 5 表 / SU 4 表 / RE 2 表 / LO 5 表 /
    WE 1 表 / TE 3 表 / DE 5 表，共 **25 表**核心逻辑视图。
-2) **物理表名**逐个取自 scaffold/sql/10_ddl_v0.4.sql 的 A–I 分组，
-   已在本机 PostgreSQL 实测确认为 53 张基表。
+2) **物理表名**逐个取自 scaffold/sql/10_ddl_v0.5.sql 的 A–I 分组，
+   已在本机 PostgreSQL 实测确认为 55 张基表。
 3) 两边**不是一一对应**，差异是真实存在的，故本文件分成两个字段，
    绝不把"逻辑视图里有"当成"物理表已建"：
 
    · ``tables``     —— 已在物理 DDL 里存在的表（可直接查询）
    · ``logical``    —— 报告逻辑视图里有、但物理 DDL 尚未建的表（查询会报 UnknownTable）
 
-4) 42 张域内物理表 ＋ 11 张跨域支撑表 = **53**，与 DDL 实测数吻合，可作为自检。
+4) 44 张域内物理表 ＋ 11 张跨域支撑表 = **55**，与 DDL 实测数吻合，可作为自检。
    历史：v0.2 = 21 域内 ＋ 11 跨域 = 32；v0.3 = 33 域内 ＋ 11 跨域 = 44。
    自检见 ``tests/contract/test_dao_contract.py``。
 ===================================================================
@@ -54,7 +54,9 @@ DOMAINS: dict[str, Domain] = {
         #   36 个关键字：19 个有数据、17 个为空 —— 这 9 张覆盖**有数据的全部**。
         "slope_segment", "ditch_segment", "standard_cross_section",
         "roadbed_trench", "structure_control", "earthwork_composition",
-        "land_use_width", "extra_fill", "design_control_text"),
+        "land_use_width", "extra_fill", "design_control_text",
+        # ── J 节（v0.5）：逐桩土方断面 / 逐桩路基设计断面（教程 §13.9 / §13.6）──
+        "earthwork_section", "roadbed_design_point"),
         # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
         (),
         "关系库",
@@ -114,10 +116,12 @@ CROSS_TABLES: tuple[str, ...] = (
 # 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）；
 #       v0.3 = 44 表（+GE 域 12 张，契约变更工单 #2 ＋ 纬地教程 §13.5/§13.4 校正）。
 #       v0.4 = 53 表（+I 节 9 张：.CTR 设计参数控制，纬地教程 §13.10）。
+#       v0.5 = 55 表（+J 节 2 张：earthwork_section .tf 土方断面、
+#                       roadbed_design_point .lj 路基设计断面，教程 §13.9/§13.6）。
 #       第二批（横断面/路基土方/构造物）顺延至 v0.5；其中「横断面地面线 .HDM」经确认不做。
 #       （原为 11 张："超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition，
 #         "路幅宽度"已按教程 §13.4 提前落到 v0.3 的 roadbed_width）
-EXPECTED_PHYSICAL_TABLES = 53
+EXPECTED_PHYSICAL_TABLES = 55
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -144,6 +148,7 @@ TABLE_OWNER: dict[str, str] = {
     "slope_segment": "M2", "ditch_segment": "M2", "standard_cross_section": "M2",
     "roadbed_trench": "M2", "structure_control": "M2", "earthwork_composition": "M2",
     "land_use_width": "M2", "extra_fill": "M2", "design_control_text": "M2",
+    "earthwork_section": "M2", "roadbed_design_point": "M2",
     # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
     # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
     # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，

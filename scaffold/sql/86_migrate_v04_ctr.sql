@@ -5,7 +5,7 @@
 --   为什么需要它：compose 只把 sql/*.sql **逐个显式挂载**进
 --   /docker-entrypoint-initdb.d/，而那个目录**只在数据目录为空时执行**。
 --   所以已建好的库不会自动吃到新 DDL —— 必须手工跑这个脚本。
---   全新构建**不需要**它（10_ddl_v0.4.sql 直接建成目标形态）。
+--   全新构建**不需要**它（10_ddl_v0.5.sql 直接建成目标形态）。
 --
 -- 幂等：全部 CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS，
 --       重复执行不报错、不改动已有数据。

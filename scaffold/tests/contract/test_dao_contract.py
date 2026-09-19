@@ -60,7 +60,7 @@ from rpdao import repo as repo_mod  # noqa: E402
 # output/ 是交付物目录、已被 .gitignore 排除，读它会让本测试在干净检出上静默跳过。
 # 历史：本行原为 ROOT.parent/"output"/"路面性能数据库-DDL-v0.2.sql"（重构前的旧位置），
 #       v0.3 修正为真源路径（契约变更工单 #2）。
-DDL_PATH = ROOT / "sql" / "10_ddl_v0.4.sql"
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.5.sql"
 API_APP = ROOT / "modules" / "M6-api" / "app.py"
 
 
