@@ -58,7 +58,7 @@ except ImportError:
 from rpdao.catalog import ALL_TABLES, TABLE_OWNER          # noqa: E402
 
 # 契约② 真源：2026-09-15 由 output/ 搬入 scaffold/sql/（随代码走，因为本测试要读它）
-DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.4.sql"
 
 
 def ddl_unique_keys(table: str) -> list[frozenset[str]]:

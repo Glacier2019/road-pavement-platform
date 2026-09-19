@@ -2,12 +2,18 @@
 
 能力 vs 已实现（**这个区分必须留在代码里，不能只留在文档里**）
 -------------------------------------------------------------------------------
-一套完整的纬地工程（.PRJ〔文件名〕段列了 18 类文件）**有能力**提供 9 个几何段；
-本适配器**已实现 7 段**：`.STA` → `station_sequence`、`.JD` → `alignment_pi`、
+一套完整的纬地工程（.PRJ〔文件名〕段列了 18 类文件）**有能力**提供 10 个几何段；
+本适配器**已实现 8 段**：`.STA` → `station_sequence`、`.JD` → `alignment_pi`、
 `.pm` → `alignment_element`（平面线形单元）、`.DMX` → `profile_ground_point`（纵断面地面线）、
 `.ZDM` → `profile_grade_point`（纵断面设计线）、
 `.SUP` → `superelev_transition`（超高过渡变化点，E(s) 的真源段）、
-`.WID` → `roadbed_width`（路幅宽度分段）。
+`.WID` → `roadbed_width`（路幅宽度分段）、
+`.CTR` → `design_control`（**设计参数控制**，v0.4 新增：边坡/边沟/路槽/构造物等 9 张表）。
+
+`.CTR` 与其余七段的**根本区别**：它不是"固定列数的一批数据"，而是**关键字驱动**的 ——
+36 个关键字各有一套列义（教程 §13.10 定义 18 类格式）。故它一个段带 **9 张表**的载荷，
+而不是一张表。解析器只解析其中**已建表的 9 组**，其余（17 个空关键字 + 教程无定义的
+`ZDMDG`）**登记不解析** —— 不假装懂。
 
 **平纵都齐了，故本工程的几何等级到 L3** —— L3 要求设计线与地面线**同时**具备
 （见 base.py 里那条 any→all 的说明：只给地面线不算"有纵断面设计"）。
@@ -27,7 +33,7 @@ from typing import Any
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
-from . import dmx, jd, pm, sta, sup, wid, zdm
+from . import ctr, dmx, jd, pm, sta, sup, wid, zdm
 
 VENDOR = "weidi-hintcad"
 
@@ -42,12 +48,14 @@ CAPABILITIES: tuple[str, ...] = (
     "roadbed_width",
     "geometry_point",
     "cross_section",
+    "design_control",
 )
 
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
 IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_element",
                                 "profile_ground_point", "profile_grade_point",
-                                "superelev_transition", "roadbed_width")
+                                "superelev_transition", "roadbed_width",
+                                "design_control")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -62,6 +70,7 @@ _PARSERS: dict[str, Any] = {
     "profile_grade_point": zdm,
     "superelev_transition": sup,
     "roadbed_width": wid,
+    "design_control": ctr,
 }
 
 
@@ -126,6 +135,7 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     "roadbed_width": (".WID", "路幅宽度数据文件"),
     "geometry_point": (".tf", "土方数据文件（逐桩坐标）"),
     "cross_section": (".HDM", "横断面地面线文件"),
+    "design_control": (".CTR", "设计参数控制文件"),
 }
 
 
@@ -261,6 +271,17 @@ def build_ir(project_dir: str | pathlib.Path, *,
             warns += wid.check_against_stations(segments["roadbed_width"],
                                                 segments["station_sequence"])
 
+    # ⑦ 设计参数控制：分段桩号越界 + 内部一致性（土石占比和为 100、砌护控制只 0/1、
+    #    同 (side,kind,group_seq) 桩号重复）。
+    #    ⚠ 与 .ZDM/.WID **都不同**：.CTR 的分段桩号**本来就不必覆盖全线** ——
+    #    分段变化只在有变化的地方写一行（本工程 ZTFBP 只写了 5805.421 一行，
+    #    即整条路一个边坡方案）。故只查越界，不查覆盖。
+    if segments.get("design_control"):
+        warns += ctr.check_control(segments["design_control"])
+        if segments.get("station_sequence"):
+            warns += ctr.check_against_stations(segments["design_control"],
+                                                segments["station_sequence"])
+
     return make_ir(
         vendor=VENDOR,
         origin="file",
@@ -275,4 +296,4 @@ def build_ir(project_dir: str | pathlib.Path, *,
 
 
 __all__ = ["VENDOR", "CAPABILITIES", "IMPLEMENTED", "SEGMENT_FILES", "build_ir",
-           "sta", "jd", "pm", "prj", "dmx", "zdm", "sup", "wid"]
+           "sta", "jd", "pm", "prj", "dmx", "zdm", "sup", "wid", "ctr"]

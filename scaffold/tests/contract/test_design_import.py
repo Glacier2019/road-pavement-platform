@@ -44,7 +44,7 @@ from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta, sup, wid, zdm  # no
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.3.schema.json"
-DDL_PATH = ROOT / "sql" / "10_ddl_v0.3.sql"
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.4.sql"
 
 
 def ddl_table_body(table: str) -> str:
@@ -599,9 +599,9 @@ def main() -> int:
         check("★ 等级 = L3（.ZDM/.DMX 都实现：设计线与地面线同时具备）",
               full["geometry_level"] == "L3"
               and sorted(weidi.IMPLEMENTED)
-              == ["alignment_element", "alignment_pi", "profile_grade_point",
-                  "profile_ground_point", "roadbed_width", "station_sequence",
-                  "superelev_transition"],
+              == ["alignment_element", "alignment_pi", "design_control",
+                  "profile_grade_point", "profile_ground_point", "roadbed_width",
+                  "station_sequence", "superelev_transition"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
         gpts = full["segments"].get("profile_ground_point", [])
         check("纵断面地面线 332 条（与桩号条数相同）", len(gpts) == 332, f"实为 {len(gpts)}")
@@ -632,8 +632,8 @@ def main() -> int:
               sorted(f["note"] for f in full["source"]["files"]
                      if f["parse_status"] == "ok")
               == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
-                  "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.84",
-                  "厂商版本 6.00"],
+                  "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
+                  "厂商版本 5.84", "厂商版本 6.00"],
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
         _vps = full["segments"]["profile_grade_point"]
@@ -749,7 +749,7 @@ def main() -> int:
             check("派生纵坡量级合理（|i| < 20%，超出即说明列错位或推导错）",
                   grades and max(abs(g) for g in grades) < 20.0,
                   f"最大 {max(abs(g) for g in grades):.4f}%")
-        check("台账登记了 9 类文件（含未实现的）", len(full["source"]["files"]) == 9,
+        check("台账登记了 10 类文件（含未实现的）", len(full["source"]["files"]) == 10,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
@@ -1059,7 +1059,7 @@ def main() -> int:
           f"实为 {a} / {b}，相距 {round(b - a, 3)} m")
     check("解析器接纳这一对（不因过近而拒绝）", len(ep) == 5, f"实为 {len(ep)} 点")
 
-    ddl_text = (ROOT / "sql" / "10_ddl_v0.3.sql").read_text(encoding="utf-8")
+    ddl_text = (ROOT / "sql" / "10_ddl_v0.4.sql").read_text(encoding="utf-8")
     m = re.search(r"station_local_km\s+numeric\((\d+),\s*(\d+)\)", ddl_text)
     check("DDL 中能取到 station_local_km 的精度声明", bool(m))
     if m:

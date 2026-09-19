@@ -52,7 +52,7 @@
   },
   "definitions": {
     "segment": {
-      "description": "几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对（不另造一套别名）。 v0.2 起含 superelev_transition（超高过渡，E(s) 的真源段）； v0.3 起含 roadbed_width（路幅宽度分段）。",
+      "description": "几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对（不另造一套别名）。 v0.2 起含 superelev_transition（超高过渡，E(s) 的真源段）； v0.3 起含 roadbed_width（路幅宽度分段）。 ⚠ **一处有意的例外**：`design_control`（.CTR 设计参数控制）**不是单张物理表名** —— 它是 **1 段 ↔ 9 表**的**段组**（slope_segment / ditch_segment / standard_cross_section / roadbed_trench / structure_control / earthwork_composition / land_use_width / extra_fill / design_control_text）。为什么破例：.CTR 是**关键字驱动**的文件（教程 §13.10 定义 18 类格式 / 36 个关键字），它的 9 张表在源文件里**同属一个 .CTR**，拆成 9 个段会让「一个文件 → 一个段」的对账关系断掉。其余 7 段仍严格等于表名。",
       "enum": [
         "station_sequence",
         "station_equation",
@@ -63,7 +63,8 @@
         "geometry_point",
         "cross_section",
         "superelev_transition",
-        "roadbed_width"
+        "roadbed_width",
+        "design_control"
       ]
     },
     "level": {
@@ -249,6 +250,67 @@
           },
           "minItems": 1,
           "description": "路幅宽度（.WID）。**一行源数据行 = 一个桩号**（一侧），与 superelev_transition 同形。教程 §13.4 说「数据每两行为一组，说明路基一侧某个桩号区间内的路幅宽度变化情况」——但每一行都有自己的桩号，两行是「这个区间的起、终点」。本段**照原样保留每一行**，不折叠成区间：① GE 域其余逐桩数据表都按桩号寻址，折叠等于另立一套区间寻址；② 组内两行本来就可不同（列 4），折叠必然丢一个值；③ geometry_point 要按桩号取宽度，点查才能直接对齐。"
+        },
+        "design_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "★设计参数控制（.CTR）—— **本段与其余七段形状不同：它是一个对象（9 张表的载荷），不是一个数组**。原因：.CTR 不是「固定列数的一批数据」，而是**关键字驱动**的 —— 36 个关键字各有一套列义（教程 §13.10 定义 18 类格式），一个段自然要带 9 张表。★只解析**已建表的 9 组**；17 个空关键字与教程无定义的 ZDMDG **登记不解析**（它们进 IR 顶层 warnings，不进本对象 —— 本对象 additionalProperties: false，多余键会被拒）。⚠ 本工程实测：边坡 22 行、边沟/排水沟 6 行、标准断面 2、路槽 2、构造物 6、土石成份 1、用地宽度 4；超填与地质/水准点两组为**空**，故其键**不出现**。",
+          "properties": {
+            "slope_segments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/slope_point"
+              }
+            },
+            "ditch_segments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ditch_point"
+              }
+            },
+            "standard_cross_sections": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/standard_cross_section_point"
+              }
+            },
+            "roadbed_trenches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/roadbed_trench_point"
+              }
+            },
+            "structures": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/structure_point"
+              }
+            },
+            "earthwork_compositions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/earthwork_composition_point"
+              }
+            },
+            "land_use_widths": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/land_use_width_point"
+              }
+            },
+            "extra_fills": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/extra_fill_point"
+              }
+            },
+            "design_control_texts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/design_control_text_point"
+              }
+            }
+          }
         }
       }
     },
@@ -671,6 +733,548 @@
             "null"
           ],
           "description": "有附加车道时的项目文件名；源文件写 0（无）时此处为 null"
+        }
+      }
+    },
+    "slope_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 1 类格式：分段终点桩号 + 本段变化组数 + (坡度, 控制坡高, 最大坡高, 砌护控制)×组数。一行 = **一级边坡**；分级放坡时第一级放到最大坡高仍不交地面线就接第二级。★侧别与填挖由**源关键字**决定（ZTFBP=左填 / YTFBP=右填 / ZWFBP=左挖 / YWFBP=右挖），适配器在关键字→(side,kind) 映射表里归一，不靠首字母猜。⚠ 教程：坡度 9999 / −9999 = 垂直向上 / 向下，**是哨兵不是数值**，本段收成 null；坡度为 0 表示从中央水平向外（碎落台/护坡道），此时「最大坡高」列表示**宽度**。",
+      "type": "object",
+      "required": [
+        "side",
+        "slope_kind",
+        "station_m",
+        "group_seq"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "side": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "description": "路基侧别"
+        },
+        "slope_kind": {
+          "enum": [
+            "fill",
+            "cut"
+          ],
+          "description": "填方 fill（源 T）/ 挖方 cut（源 W）"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★分段终点桩号，单位米"
+        },
+        "group_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "本段内第几级边坡（从 1 起）"
+        },
+        "slope_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "坡度简写 m 值（1:m 的 m）。正=向上 / 负=向下 / 0=水平向外 / 9999→null"
+        },
+        "control_height_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "控制坡高（0 = 不控制，一般项目都填 0）"
+        },
+        "max_height_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "最大坡高。★坡度为 0 时此列表示碎落台/护坡道的**宽度**"
+        },
+        "protection": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "砌护控制：0 不砌护 / 1 砌护"
+        }
+      }
+    },
+    "ditch_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 2/3 类格式：分段终点桩号 + 本段变化组数 + (坡度, 坡高, 砌护控制)×组数。一行 = 沟的一个折点。★组数 0 表示**该段不设沟**（本工程排水沟就是 0 组）。侧别/沟型同样由源关键字决定（ZBGXS=左边沟 / YBGXS=右边沟 / ZPSGXS=左排水沟 / YPSGXS=右排水沟）。",
+      "type": "object",
+      "required": [
+        "side",
+        "ditch_kind",
+        "station_m",
+        "group_seq"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "side": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "description": "路基侧别"
+        },
+        "ditch_kind": {
+          "enum": [
+            "side_ditch",
+            "drainage_ditch"
+          ],
+          "description": "边沟 side_ditch / 排水沟 drainage_ditch"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★分段终点桩号，单位米"
+        },
+        "group_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "本段内第几个折点（从 1 起）"
+        },
+        "slope_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "坡度简写 m 值（同边坡约定，9999→null）"
+        },
+        "height_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "坡高（坡度为 0 时表示宽度）"
+        },
+        "protection": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "砌护控制：0 不砌护 / 1 砌护"
+        }
+      }
+    },
+    "standard_cross_section_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 9 类格式：分段终点桩号 + 9 个数值（半幅中分带宽/中分带坡度/中分带高度/行车道宽/行车道坡度/硬路肩宽/硬路肩坡度/土路肩宽/土路肩坡度），一个分段一行。★这张表是 roadbed_width（.WID）的**独立校验源**：本工程两者完全自洽（行车道 3.500、硬路肩 0.750、土路肩 0.750、坡度 2.0/2.0/3.0）。",
+      "type": "object",
+      "required": [
+        "side",
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "side": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "description": "路基侧别"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★分段终点桩号，单位米"
+        },
+        "median_half_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "半幅中分带宽度（0 = 无中央分隔带）"
+        },
+        "median_crossfall_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "中分带横坡（%）"
+        },
+        "median_height_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "中分带高度"
+        },
+        "lane_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "行车道宽度"
+        },
+        "lane_crossfall_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "行车道横坡（%）"
+        },
+        "hard_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "硬路肩宽度"
+        },
+        "hard_shoulder_crossfall_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "硬路肩横坡（%）"
+        },
+        "earth_shoulder_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "土路肩宽度"
+        },
+        "earth_shoulder_crossfall_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "土路肩横坡（%）"
+        }
+      }
+    },
+    "roadbed_trench_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 7 类格式：分段终点桩号 + 4 个路槽深度（中分带/行车道/硬路肩/土路肩，米）。用途：土方计算时按此扣除路槽面积。",
+      "type": "object",
+      "required": [
+        "side",
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "side": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "description": "路基侧别"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★分段终点桩号，单位米"
+        },
+        "median_trench_depth_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "中分带路槽深度"
+        },
+        "lane_trench_depth_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "行车道路槽深度"
+        },
+        "hard_shoulder_trench_depth_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "硬路肩路槽深度"
+        },
+        "earth_shoulder_trench_depth_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "土路肩路槽深度"
+        }
+      }
+    },
+    "structure_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 5/6/15 类格式，三种构造物合成一段：QHSJ 桥 / HDSJ 涵洞 / SUIDAO 隧道。用途：纵断面图/总体图标注，且土方计算时扣除大中桥与隧道土方。★anchor_station_m 是「用于唯一标识的那一个桩号」：涵洞取中心桩号，桥/隧道取起点桩号 —— 三种构造物靠它共用同一个唯一键。⚠ 教程明写 QHSJ/HDSJ 的桩号**可不递增排列**，故不设递增约束。⚠⚠ 教程正文对 QHSJ 只列了 10 项，但**教程自己的示例**与实测文件都是 **11 列**：尾部有 3 个整数而正文只解释了前 2 个。第 3 个（trailing_flag）**原样存下待考**。",
+      "type": "object",
+      "required": [
+        "structure_kind",
+        "anchor_station_m",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "structure_kind": {
+          "enum": [
+            "bridge",
+            "culvert",
+            "tunnel"
+          ],
+          "description": "桥 bridge（QHSJ）/ 涵洞 culvert（HDSJ）/ 隧道 tunnel（SUIDAO）"
+        },
+        "anchor_station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★唯一标识桩号：涵洞=中心桩号；桥/隧道=起点桩号"
+        },
+        "name": {
+          "type": "string",
+          "description": "构造物名称"
+        },
+        "start_station_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "起点桩号（桥/隧道；涵洞为 null）"
+        },
+        "end_station_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "终点桩号（桥/隧道；涵洞为 null）"
+        },
+        "center_station_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "中心桩号（涵洞）；桥的这一列是源文件的「标注桩号」"
+        },
+        "angle_deg": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "与路线夹角（度）"
+        },
+        "span_text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "跨径/跨径说明的**原文串**（如 30+30、1-1.500×2.000、3x12m）。⚠ 教程明确跨径格式含 `+` 与 `×`，**不是纯数值**，故类型是 string 而非 number —— 写成 number 会在第一条实测数据上就炸"
+        },
+        "structure_form": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "主要结构形式（桥用，如「混凝土空心板梁桥」）"
+        },
+        "control_elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "控制标高"
+        },
+        "elev_control_type": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "标高控制类型：0=控制在此标高**以上** / 1=**以下**（仅桥）"
+        },
+        "deck_type": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "桥梁分幅类型：-1 左半幅 / 1 右半幅 / 0 整幅（仅桥）"
+        },
+        "trailing_flag": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "★QHSJ 行尾 3 个整数里的第 3 个。教程正文未定义（正文只列了 2 个尾随整数，教程示例却有 3 个），原样存下待考"
+        }
+      }
+    },
+    "earthwork_composition_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 4 类格式：分段桩号 + 第一类至第六类土（石）所占挖方数量中的百分比。用途：土石方数量计算按此把挖方量分成六类。★六项之和应为 100，但**不设约束**——设计中间稿的百分比可以先不配平。",
+      "type": "object",
+      "required": [
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★分段桩号，单位米"
+        },
+        "pct_1": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "第1类土（石）占挖方数量的百分比（%）"
+        },
+        "pct_2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "第2类土（石）占挖方数量的百分比（%）"
+        },
+        "pct_3": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "第3类土（石）占挖方数量的百分比（%）"
+        },
+        "pct_4": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "第4类土（石）占挖方数量的百分比（%）"
+        },
+        "pct_5": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "第5类土（石）占挖方数量的百分比（%）"
+        },
+        "pct_6": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "第6类土（石）占挖方数量的百分比（%）"
+        }
+      }
+    },
+    "land_use_width_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 17 类格式：桩号 + 填方用地宽度 + 挖方用地宽度。用途：横断面图绘用地界碑；土方文件记录用地宽度以计算用地表、绘用地图。⚠ 与 superelev/roadbed 的「分段常量」**不同**：教程明写分段桩号间用地宽度不等时**按线性渐变计算** —— 本段是**变化点**，两点之间需插值。",
+      "type": "object",
+      "required": [
+        "side",
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "side": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "description": "路基侧别"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★变化点桩号，单位米"
+        },
+        "fill_land_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "填方用地宽度（用地界碑距填方坡脚或排水沟外缘的水平距离）"
+        },
+        "cut_land_width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "挖方用地宽度（用地界碑距挖方坡口或截水沟外边缘的水平距离）"
+        }
+      }
+    },
+    "extra_fill_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 10/11/12 类格式合成一段：ZCHT/YCHT 超宽填筑（桩号+一侧超填水平宽度）、DCHT 顶面超填（桩号+超填厚度）、QCHBT 清除表土（桩号+坡脚外增加宽度+清除表土厚度）。⚠ 本工程这四个关键字**全为空** —— 段会缺省不出现（不是空数组）。",
+      "type": "object",
+      "required": [
+        "fill_kind",
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "side": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "侧别。超宽填筑与顶面超填有侧别；清除表土（QCHBT）左右一起处理，为 null"
+        },
+        "fill_kind": {
+          "enum": [
+            "side_overfill",
+            "top_overfill",
+            "topsoil_clear"
+          ],
+          "description": "超宽填筑 / 顶面超填 / 清除表土"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★分段终点桩号，单位米"
+        },
+        "width_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "水平宽度（超宽填筑的一侧超填宽度；清除表土的坡脚外增加宽度）"
+        },
+        "thickness_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "厚度（顶面超填厚度；清除表土厚度）"
+        }
+      }
+    },
+    "design_control_text_point": {
+      "description": "依据《纬地道路辅助设计系统教程 v5.88》§13.10《设计参数控制数据文件（*.ctr）》。第 13/16 类格式合成一段：DZGK 地质概况（分段终点桩号 + 文字说明）、SHUIZHUNDIAN 水准点（位置桩号 + 名称 + 高程 + 说明）。用途：纵断面绘图标注。⚠ 本工程这两个关键字**全为空**。",
+      "type": "object",
+      "required": [
+        "text_kind",
+        "station_m"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "text_kind": {
+          "enum": [
+            "geology",
+            "benchmark"
+          ],
+          "description": "地质概况 geology（DZGK）/ 水准点 benchmark（SHUIZHUNDIAN）"
+        },
+        "station_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "★分段终点桩号（地质）/ 位置桩号（水准点），单位米"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "名称（水准点用）"
+        },
+        "elev_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "高程（水准点用）"
+        },
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "文字说明。教程规定地质概况**不超过 128 个汉字字节数**，汉字间可空格但**不能换行**"
         }
       }
     }

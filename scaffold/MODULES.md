@@ -55,6 +55,6 @@ M1 → M3 → M4 → M5 → M6 → M8
 | 契约 | 真源 | 承诺方 |
 |---|---|---|
 | ① 报文 | `contracts/topics.yaml` + `messages/*.schema.json` | M2（B 组） |
-| ② 表结构 | `sql/10_ddl_v0.3.sql` | M1（A 组） |
+| ② 表结构 | `sql/10_ddl_v0.4.sql` | M1（A 组） |
 | ③ 数据出口 | `modules/M3-rpdao/` | M3（A 组） |
 | ④ 服务接口 | `modules/*/openapi.json` | M6（D 组） |

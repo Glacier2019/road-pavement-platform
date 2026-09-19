@@ -3,16 +3,16 @@
 ============================ 口径与依据 ============================
 1) **7 域的口径**来自报告第五章（原文）：GE 5 表 / SU 4 表 / RE 2 表 / LO 5 表 /
    WE 1 表 / TE 3 表 / DE 5 表，共 **25 表**核心逻辑视图。
-2) **物理表名**逐个取自 scaffold/sql/10_ddl_v0.3.sql 的 A–H 分组，
-   已在本机 PostgreSQL 实测确认为 42 张基表。
+2) **物理表名**逐个取自 scaffold/sql/10_ddl_v0.4.sql 的 A–I 分组，
+   已在本机 PostgreSQL 实测确认为 53 张基表。
 3) 两边**不是一一对应**，差异是真实存在的，故本文件分成两个字段，
    绝不把"逻辑视图里有"当成"物理表已建"：
 
    · ``tables``     —— 已在物理 DDL 里存在的表（可直接查询）
    · ``logical``    —— 报告逻辑视图里有、但物理 DDL 尚未建的表（查询会报 UnknownTable）
 
-4) 31 张域内物理表 ＋ 11 张跨域支撑表 = **42**，与 DDL 实测数吻合，可作为自检。
-   历史：v0.2 = 21 域内 ＋ 11 跨域 = 32。
+4) 42 张域内物理表 ＋ 11 张跨域支撑表 = **53**，与 DDL 实测数吻合，可作为自检。
+   历史：v0.2 = 21 域内 ＋ 11 跨域 = 32；v0.3 = 33 域内 ＋ 11 跨域 = 44。
    自检见 ``tests/contract/test_dao_contract.py``。
 ===================================================================
 """
@@ -45,7 +45,16 @@ DOMAINS: dict[str, Domain] = {
         # ↓ 第 12 张：路幅宽度。原列在 v0.4 待办，因 section_design_attr.roadway_width_m
         #   是**标量**、而路幅宽度本来就随桩号变（加宽/匝道/交叉口/变速车道），
         #   一个标量装不下分段变化 → 按「存设计输入、导出派生量」提前落地。
-        "roadbed_width"),
+        "roadbed_width",
+        # ↓ v0.4 新增 9 张：设计参数控制文件（.CTR）接入。
+        #   为什么不并进 A 节：A 节是「空间与档案」（几何实体本身），这 9 张是
+        #   **设计控制参数**（边坡/边沟/路槽/构造物等"怎么修"的控制量）—— 两者都由
+        #   .STA 桩号寻址，但性质不同，故 DDL 里单开一节 I。
+        #   依据：纬地教程 v5.88 §13.10（18 类格式 / 36 个关键字）。本工程 .CTR 实测
+        #   36 个关键字：19 个有数据、17 个为空 —— 这 9 张覆盖**有数据的全部**。
+        "slope_segment", "ditch_segment", "standard_cross_section",
+        "roadbed_trench", "structure_control", "earthwork_composition",
+        "land_use_width", "extra_fill", "design_control_text"),
         # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
         (),
         "关系库",
@@ -100,14 +109,15 @@ CROSS_TABLES: tuple[str, ...] = (
     "quality_rule", "mapping_set",
 )
 
-# DDL v0.3 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
+# DDL 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
 # 由 tests/contract/test_ddl_dict_catalog.py 强制核对——不允许各自漂移。
 # 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）；
 #       v0.3 = 44 表（+GE 域 12 张，契约变更工单 #2 ＋ 纬地教程 §13.5/§13.4 校正）。
-#       第二批 9 张（横断面/路基土方/构造物）随 v0.4 落地 → 53 表。
+#       v0.4 = 53 表（+I 节 9 张：.CTR 设计参数控制，纬地教程 §13.10）。
+#       第二批（横断面/路基土方/构造物）顺延至 v0.5；其中「横断面地面线 .HDM」经确认不做。
 #       （原为 11 张："超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition，
 #         "路幅宽度"已按教程 §13.4 提前落到 v0.3 的 roadbed_width）
-EXPECTED_PHYSICAL_TABLES = 44
+EXPECTED_PHYSICAL_TABLES = 53
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -130,6 +140,10 @@ TABLE_OWNER: dict[str, str] = {
     "alignment_pi": "M2", "alignment_element": "M2",
     "profile_grade_point": "M2", "profile_ground_point": "M2", "geometry_point": "M2",
     "superelev_transition": "M2", "roadbed_width": "M2",
+    # v0.4：.CTR 设计参数控制 9 张（同源：都来自设计文件，写入口仍是 M2 数据接入）
+    "slope_segment": "M2", "ditch_segment": "M2", "standard_cross_section": "M2",
+    "roadbed_trench": "M2", "structure_control": "M2", "earthwork_composition": "M2",
+    "land_use_width": "M2", "extra_fill": "M2", "design_control_text": "M2",
     # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
     # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
     # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，
