@@ -40,7 +40,7 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import dmx, jd, pm, prj as prj_mod, sta, sup, wid, zdm  # noqa: E402
+from adapters.weidi import ctr, dmx, jd, pm, prj as prj_mod, sta, sup, wid, zdm  # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.3.schema.json"
@@ -1045,6 +1045,201 @@ def main() -> int:
     check_raises("应拒绝：空文件", "", parser=wid, expect="空文件")
     check("组间空行应通过（教程示例就有）",
           len(wid.parse(_w_ok.replace("[RIGHT]", "\r\n[RIGHT]"), file="x.WID")["rows"]) == 4)
+
+    # ── 第 6e 组：.CTR 设计参数控制解析器（应通过 / 应拒绝两侧）─────────────────
+    #    .CTR 与其余 6 个适配器**结构上不同**：它是**关键字驱动**的，36 个关键字
+    #    各成一类格式，一个文件带 9 张表的载荷。所以"应拒绝"一侧要覆盖两类错：
+    #      ① 文件级 —— 魔数、数据行出现在关键字之前、终止符之后还有数据；
+    #      ② 行级   —— 组数 × 每组项数 ≠ 实际字段数、桩号位出现 9999、列数不符。
+    #    ⚠ 第二类里"组数"最要紧：组数是**第二列**，它决定后面还有多少个数。
+    #      按空格切完直接当下标取，会在"组数变了"的行上**静默错位**——
+    #      读出来的一组数看着都像坡度，但整体错开一位。
+    print("\n第 6e 组  .CTR 设计参数控制解析器（应通过 / 应拒绝两侧）")
+    _ch = "HINTCAD5.83_CTR_SHUJU\r\n"
+
+    def _ctr_kw(kw, *rows):
+        """拼一个「关键字行 + 若干数据行 + 空行」的块（.CTR 用空行分隔块）。"""
+        return kw + "\r\n" + "".join(r + "\r\n" for r in rows) + "\r\n"
+
+    # 正例：每类格式各来一条，覆盖 9 张表里能造出来的全部
+    _c_ok = (_ch
+             # 左填方边坡：桩号 100.000，2 级（坡度/控制坡高/最大坡高/砌护）
+             + _ctr_kw("ZTFBP.DAT", "100.000 2  -1.500 0.000 8.000 0  0.000 0.000 1.500 0")
+             # 右边沟：3 个折点 → 组数 3
+             + _ctr_kw("YBGXS.DAT", "200.000 3  0.500 0.600 1  0.000 0.400 1  0.500 0.600 0")
+             # 标准断面：桩号 + 9 个数值
+             + _ctr_kw("ZBZDM.DAT", "300.000 0.000 2.000 0.000 3.500 2.000 0.750 2.000 0.750 3.000")
+             # 路槽：桩号 + 4 个深度
+             + _ctr_kw("ZLCSD.DAT", "300.000 0.000 0.150 0.150 0.200")
+             # 涵洞：5 列 =「中心桩号 与路线角度 跨径说明 构造物名称 控制标高」
+             # ⚠ 列序与我第一版猜的不同（名称在第 4 列，交角在第 2 列）——
+             #   当时写成「桩号 名称 跨径 交角 类型」，被 _to_float("盖板涵") 当场打回。
+             + _ctr_kw("HDSJ.DAT", "400.000 90.0000 1-1.500×2.000 盖板涵 52.3227")
+             # 土石成份：桩号 + 6 个百分比
+             + _ctr_kw("TFFD.DAT", "500.000 20 60 20 0 0 0")
+             # 用地宽度：桩号 填方宽 挖方宽
+             + _ctr_kw("ZYDK.DAT", "600.000 5.000 6.000")
+             # 清除表土：桩号 增加宽度 厚度
+             + _ctr_kw("QCHBT.DAT", "700.000 0.500 0.300")
+             # 水准点：桩号 名称 高程 说明
+             + _ctr_kw("SHUIZHUNDIAN.DAT", "800.000 BM1 57.262 路基顶")
+             + "XXXX.DAT\r\n")
+    _c = ctr.parse(_c_ok, file="ok.CTR")
+    _cc = _c["control"]
+    check("应通过：厂商版本从魔数取出", _c["vendor_version"] == "5.83", _c["vendor_version"])
+    check("应通过：detect 认得自家魔数", ctr.detect(_c_ok) is True)
+    check("应通过：detect 不认别家的魔数",
+          ctr.detect("HINTCAD5.83_ZDM_SHUJU\r\n") is False)
+    check("应通过：段名/文件类别/载荷键与登记一致",
+          ctr.SEGMENT == "design_control"
+          and weidi.SEGMENT_FILES["design_control"][0] == ".CTR"
+          and weidi.SEGMENT_FILES["design_control"][1] == ctr.FILE_KIND
+          and ctr.PAYLOAD_KEY == "control",
+          f"{ctr.SEGMENT} / {ctr.FILE_KIND} / {ctr.PAYLOAD_KEY}")
+    check("★ 应通过：9 张表各自的条数（由组数展开得出，不是行数）",
+          {k: len(v) for k, v in _cc.items()}
+          == {"slope_segments": 2, "ditch_segments": 3, "standard_cross_sections": 1,
+              "roadbed_trenches": 1, "structures": 1, "earthwork_compositions": 1,
+              "land_use_widths": 1, "extra_fills": 1, "design_control_texts": 1},
+          str({k: len(v) for k, v in _cc.items()}))
+    check("★ 应通过：组数展开后 group_seq 从 1 起递增（同桩号多级）",
+          [r["group_seq"] for r in _cc["slope_segments"]] == [1, 2]
+          and [r["group_seq"] for r in _cc["ditch_segments"]] == [1, 2, 3],
+          str([r["group_seq"] for r in _cc["slope_segments"]]))
+    check("应通过：边坡侧别/填挖由关键字决定（ZTFBP = 左 填）",
+          all(r["side"] == "left" and r["slope_kind"] == "fill"
+              for r in _cc["slope_segments"]))
+    check("应通过：左填方第 1 级坡度 = -1.500，最大坡高 = 8.000",
+          _cc["slope_segments"][0]["slope_ratio"] == -1.5
+          and _cc["slope_segments"][0]["max_height_m"] == 8.0)
+    check("应通过：跨径是 text，`1-1.500×2.000` 原样保住（不是数值）",
+          _cc["structures"][0]["span_text"] == "1-1.500×2.000",
+          repr(_cc["structures"][0]["span_text"]))
+    check("应通过：土石成份 6 项百分比", _cc["earthwork_compositions"][0]["pct_1"] == 20.0
+          and _cc["earthwork_compositions"][0]["pct_6"] == 0.0)
+    check("应通过：终止符 XXXX.DAT 之后不再收数据",
+          ctr.TERMINATOR == "XXXX.DAT" and len(_cc["design_control_texts"]) == 1)
+
+    # ── 应拒绝（文件级）────────────────────────────────────────────────
+    def _reject(txt, why, *, want=None):
+        try:
+            ctr.parse(txt, file="bad.CTR")
+        except SourceInvalid as e:
+            if want and want not in str(e):
+                check(f"应拒绝：{why}", False, f"报错了但话不对：{e}")
+                return
+            check(f"应拒绝：{why}", True, f"已拒绝：{e}")
+            return
+        check(f"应拒绝：{why}", False, "**没有报错** —— 畸形输入被静默接受")
+
+    _reject("", "空文件")
+    _reject("随便一个文本\r\n", "非纬地文件")
+    _reject("HINTCAD5.83_ZDM_SHUJU\r\n", "魔数是 .ZDM 的（张冠李戴）")
+    _reject(_ch + "0.000 1  -1.500 0.000 8.000 0\r\n",
+            "数据行出现在任何关键字之前", want="关键字")
+
+    # ── 应拒绝（行级）★ 这一组才是 .CTR 真正容易读错的地方 ────────────────
+    # ① 组数 × 每组 4 项 ≠ 剩余字段数：声明 2 级却只给了 1 级（少 4 个数）
+    _reject(_ch + _ctr_kw("ZTFBP.DAT", "100.000 2  -1.500 0.000 8.000 0"),
+            "★ 边坡：声明 2 组但只给了 1 组的数（组数 × 4 ≠ 剩余）", want="组数")
+    # ② 多给：声明 1 组却给了 2 组的数
+    _reject(_ch + _ctr_kw("ZTFBP.DAT",
+                          "100.000 1  -1.500 0.000 8.000 0  0.000 0.000 1.500 0"),
+            "★ 边坡：声明 1 组却给了 2 组的数", want="组数")
+    # ③ 边沟每组 3 项，给了 4 项
+    _reject(_ch + _ctr_kw("YBGXS.DAT", "200.000 1  0.500 0.600 1  9"),
+            "★ 边沟：每组应为 3 项，多给了 1 项", want="组数")
+    # ④ 组数为负
+    _reject(_ch + _ctr_kw("YBGXS.DAT", "200.000 -1  0.500 0.600 1"),
+            "边沟：组数为负", want="负")
+    # ⑤ 只有桩号一列，连组数都没有
+    _reject(_ch + _ctr_kw("YBGXS.DAT", "200.000"),
+            "边沟：只有桩号，缺组数", want="两列")
+    # ⑥ ★★ 桩号位出现 9999 —— 9999 是"忽略此数据"的哨兵，而桩号是这行的坐标
+    _reject(_ch + _ctr_kw("ZTFBP.DAT", "9999.000 1  -1.500 0.000 8.000 0"),
+            "★★ 桩号列出现 9999（哨兵只用于坡度/标高列）", want="9999")
+    _reject(_ch + _ctr_kw("HDSJ.DAT", "9999.000 90.0 1-2.000 盖板涵 52.0"),
+            "★★ 构造物：桩号列出现 9999", want="9999")
+    # ⑦ 桩号为负
+    _reject(_ch + _ctr_kw("ZTFBP.DAT", "-1.000 1  -1.500 0.000 8.000 0"),
+            "桩号为负", want="负")
+    # ⑧ 标准断面列数不符（应为「桩号 + 9」共 10 列）
+    _reject(_ch + _ctr_kw("ZBZDM.DAT", "300.000 0.000 2.000 0.000 3.500"),
+            "标准断面：应为「桩号 + 9 个数值」共 10 列，只给了 5 列", want="9 个数值")
+    # ⑨ 非数
+    _reject(_ch + _ctr_kw("ZTFBP.DAT", "abc 1  -1.500 0.000 8.000 0"),
+            "桩号不是数", want="数")
+    # ⑩ 坡度绝对值超上限（SLOPE_ABS_MAX = 100，1:101 显然不是坡度而是列错位）
+    _reject(_ch + _ctr_kw("ZTFBP.DAT", "100.000 1  -150.000 0.000 8.000 0"),
+            "★ 坡度 |1:m| 的 m 超过上限 100（多半是列错位）", want="坡度")
+
+    # ★★ 元测试：上面每一条"应拒绝"都必须**真的靠那条规则**被拒，
+    #    而不是被别的规则顺手拦下。做法：把违规点修好，同一段就应当通过。
+    _fix = _ch + _ctr_kw("ZTFBP.DAT", "100.000 2  -1.500 0.000 8.000 0  0.000 0.000 1.500 0")
+    check("★★ 元测试：把「组数 2 只给 1 组」补成 2 组 → 同一段即通过（证明拒的就是组数）",
+          len(ctr.parse(_fix)["control"]["slope_segments"]) == 2)
+    _fix2 = _ch + _ctr_kw("ZTFBP.DAT", "100.000 1  -1.500 0.000 8.000 0")
+    check("★★ 元测试：把 9999 桩号换成真桩号 → 即通过（证明拒的就是 9999）",
+          ctr.parse(_fix2)["control"]["slope_segments"][0]["station_m"] == 100.0)
+
+    # ── check_control：正例零告警（否则告警就是噪声，人会学会无视它）────────
+    _ctl_warn = ctr.check_control(_cc)
+    check("★ 物理检查：正例零告警（含同桩号多级边坡 —— 这是合法的）",
+          _ctl_warn == [], str(_ctl_warn))
+
+    # ★★ 元测试：证明「同桩号多级」与「同桩号重复」是**可区分**的两种情形。
+    #    这条是**数据库抓到的 bug 反推出来的**：第一版 check_control 的身份签名里
+    #    漏了 group_seq，于是本工程真实的边坡（填方 5 级、挖方 6 级都在同一桩号）
+    #    被报了 **22 条假告警**。恒真的检查比没有检查更糟 —— 它会淹没真告警。
+    #    这里把两件事分开证明：① 多级不报 ② 真重复要报。
+    _dup = {k: [dict(r) for r in v] for k, v in _cc.items()}
+    _dup["slope_segments"].append(dict(_dup["slope_segments"][0]))   # 逐字段相同的两行
+    check("★★ 元测试：把同一级边坡复制一遍 → 必须报重复（证明上面那条不是恒真）",
+          bool(ctr.check_control(_dup)),
+          str(ctr.check_control(_dup)[:2]))
+    # ★ 上面那条的第一版写成 `all(... or True ...)` —— **恒真**，等于没查。
+    #   换成可伪证的形式：让两行在 (side, slope_kind, station_m) 上**撞在一起**，
+    #   只有 group_seq 不同。若身份签名漏了 group_seq，这里必然报重复。
+    _no_group = {(r["side"], r["slope_kind"], r["station_m"]) for r in _cc["slope_segments"]}
+    check("★★ 元测试：两行在「侧别/填挖/桩号」上完全相同、只有 group_seq 不同 → "
+          "仍不报重复（若签名漏了 group_seq 这里必报，就是那 22 条假告警的成因）",
+          len(_cc["slope_segments"]) == 2 and len(_no_group) == 1
+          and ctr.check_control(_cc) == [],
+          f"2 行 → 去掉 group_seq 只剩 {len(_no_group)} 个签名；"
+          f"告警 {ctr.check_control(_cc)[:1]}")
+
+    # ── check_against_stations：范围对账（.CTR 不必覆盖全线，只查越界）────────
+    _sts = [{"station_m": x} for x in (0.0, 100.0, 300.0, 800.0, 1000.0)]
+    check("对账：.CTR 的分段桩号都落在路线范围内 → 不报",
+          ctr.check_against_stations(_cc, _sts) == [],
+          str(ctr.check_against_stations(_cc, _sts)))
+    _out = {k: [dict(r, station_m=2000.0) for r in v] for k, v in _cc.items()}
+    check("★ 对账：桩号越出路线终点 → 必须报（否则会静默挂到别的路段上）",
+          bool(ctr.check_against_stations(_out, _sts)))
+
+    # ── 登记：17 个空关键字 + ZDMDG 必须**登记在册**（不是"忘了")────────────────
+    # ⚠ XXXX.DAT 不在 PARSED_KEYWORDS 里 —— 它是**终止符**不是数据关键字。
+    #   第一版把它也算进去，于是这条断言是"我自己写错了"而不是"代码错了"。
+    check("登记：正例里用到的 9 个数据关键字都在 PARSED_KEYWORDS 里",
+          {"ZTFBP.DAT", "YBGXS.DAT", "ZBZDM.DAT", "ZLCSD.DAT", "HDSJ.DAT",
+           "TFFD.DAT", "ZYDK.DAT", "QCHBT.DAT", "SHUIZHUNDIAN.DAT"}
+          <= set(ctr.PARSED_KEYWORDS),
+          str(sorted(set(ctr.PARSED_KEYWORDS))))
+    check("登记：终止符 XXXX.DAT **不是**数据关键字（它只表示文件结束）",
+          ctr.TERMINATOR not in ctr.PARSED_KEYWORDS)
+    check("★ 登记：教程有定义但本工程为空的关键字在 REGISTERED_NOT_BUILT 里（不建表）",
+          len(ctr.REGISTERED_NOT_BUILT) == 6
+          and {"ZFJBK.DAT", "YFJBK.DAT", "ZJSG.DAT", "YJSG.DAT",
+               "ZFYHP.DAT", "YFYHP.DAT"} == set(ctr.REGISTERED_NOT_BUILT),
+          str(sorted(ctr.REGISTERED_NOT_BUILT)))
+    check("★ 登记：ZDMDG 单列一类（教程全文搜不到，但有 20 行数据）—— 不能混进"
+          "「教程有定义但为空」，那会自相矛盾",
+          set(ctr.UNDOCUMENTED_WITH_DATA) == {"ZDMDG.DAT"},
+          str(sorted(ctr.UNDOCUMENTED_WITH_DATA)))
+    check("登记：教程未定义且本工程也为空的关键字单列一类",
+          {"GONGDIAN.DAT", "BGKZ.DAT", "PZSTDG.DAT", "RAILWAY_SHJG.DAT"}
+          == set(ctr.UNDOCUMENTED),
+          str(sorted(ctr.UNDOCUMENTED)))
 
     # ── 第 7 组：桩号精度 —— 真实数据必须装得进 DDL 声明的精度 ──────────────
     # 本轮实测抓到：.STA 里 1659.917 与 1660.000 相距仅 0.083 m，
