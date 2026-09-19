@@ -137,7 +137,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1
+          "description": "文件名。parse_status=absent 时**允许为空串** —— 源里没有这个文件，它本来就无名可写；台账仍要登记这一条，因为「这个文件不存在」正是「为什么这一段没解析出来」的答案。"
         },
         "kind": {
           "type": "string",

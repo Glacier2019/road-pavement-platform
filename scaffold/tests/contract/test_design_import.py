@@ -721,6 +721,20 @@ def main() -> int:
               sorted(x["segment"] for x in full["gaps"])
               == ["cross_section", "geometry_point"],
               str([x["segment"] for x in full["gaps"]]))
+        # ★ 缺口必须说**真正**的原因，不能只报"适配器没做"：
+        #   geometry_point 的源（.3DR 横断面三维数据文件）本工程**没生成** ——
+        #   源都不在，做不做适配器都导不出东西来，所以是 source_absent 而不是 not_supported。
+        #   cross_section 正相反：.HDM 文件在，只是适配器还没做 → not_supported。
+        #   两者含义不同，混为一谈会让人去写一个根本无源可读的适配器。
+        check("★★ 两个缺口的原因必须分别是 source_absent / not_supported（诊断说真正的原因）",
+              {x["segment"]: x.get("reason") for x in full["gaps"]}
+              == {"geometry_point": "source_absent", "cross_section": "not_supported"},
+              str({x["segment"]: x.get("reason") for x in full["gaps"]}))
+        # ★ .3DR 台账必须登记且标 absent —— "这个文件不存在"正是"这段没解析出来"的答案
+        _dr = [f for f in full["source"]["files"] if f["kind"] == "横断面三维数据文件"]
+        check("★ 缺源也要进台账（name 允许空串，parse_status=absent）",
+              len(_dr) == 1 and _dr[0]["parse_status"] == "absent" and _dr[0]["name"] == "",
+              str(_dr))
 
         vpi = full["segments"].get("profile_grade_point", [])
         check("纵断面设计线 12 个变坡点", len(vpi) == 12, f"实为 {len(vpi)}")

@@ -138,11 +138,18 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     "profile_ground_point": (".DMX", "纵断面地面线文件"),
     "superelev_transition": (".SUP", "超高过渡数据文件"),
     "roadbed_width": (".WID", "路幅宽度数据文件"),
-    # ⚠ 修正（2026-09，实测）：原写作 (".tf", "土方数据文件（逐桩坐标）") —— **错的**。
-    #   .tf 实测是 74 列**土方数据**（文件自带表头，无任何坐标列），见 tf.py。
-    #   逐桩坐标的来源尚未确认（候选 .GTM / .HDM，留待第 3 步），故先指向 .GTM 并标待考 ——
-    #   而不是继续挂在 .tf 上让"逐桩坐标"永远导不出来（这正是它一直 0 行的原因）。
-    "geometry_point": (".GTM", "三维数模组文件（逐桩坐标来源待考）"),
+    # ⚠ 两次修正，记下来免得再走一遍：
+    #   ① 原写作 (".tf", "土方数据文件（逐桩坐标）") —— **错的**。.tf 实测是 74 列
+    #      **土方数据**（文件自带表头，无任何坐标列），见 tf.py。这正是它一直 0 行的原因。
+    #   ② 我一度改成 .GTM 并标"待考" —— **也是错的**。读教程 §13.14 并实测文件头：
+    #      .gtm 魔数是 `HB  HINT40_GROUP_DTM_VER6`，**二进制**，内容是各数模的
+    #      **边界框坐标 + .DTM 路径 + 大小**（实测里读出 534293.6/34.25、537926.6/229.11…），
+    #      即说明书原话「纪录了一个项目中所有已建立数模的边界、路径、大小等信息」——
+    #      它是**索引**，不含逐桩坐标。
+    #   ③ 正解：教程 §13.15 的 **.3DR 横断面三维数据文件**——「由横断面设计绘图时自动生成」、
+    #      「纪录每一断面全三维的相关数据信息」、且**纯文本**，形状正对。
+    #      本工程**没生成**它，故本段自动落 absent（源里没有），不需要特判。
+    "geometry_point": (".3DR", "横断面三维数据文件"),
     "cross_section": (".HDM", "横断面地面线文件"),
     "design_control": (".CTR", "设计参数控制文件"),
     "earthwork_section": (".tf", "土方数据文件"),
@@ -178,7 +185,12 @@ def build_ir(project_dir: str | pathlib.Path, *,
         if not hits:
             files.append({"name": "", "kind": kind, "parse_status": "absent",
                           "note": f"目录内未找到 {suffix} 文件"})
-            reasons[seg] = "source_absent" if seg in IMPLEMENTED else "not_supported"
+            # ⚠ 顺序要紧：**源里没有**这个文件，比"适配器没做"更根本 ——
+            #   源都不在，做不做适配器都导不出东西来。原来写成
+            #   "在 IMPLEMENTED 里才报 source_absent，否则报 not_supported"，
+            #   结果 .3DR（本工程没生成）被报成 not_supported，把真正的原因盖掉了。
+            #   诊断要说的是**真正**的那一个，所以 source_absent 优先。
+            reasons[seg] = "source_absent"
             continue
 
         path = hits[0]
