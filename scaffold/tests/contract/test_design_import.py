@@ -40,7 +40,7 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import ctr, dmx, jd, pm, prj as prj_mod, sta, sup, wid, zdm  # noqa: E402
+from adapters.weidi import ctr, dmx, jd, lj, pm, prj as prj_mod, sta, sup, tf, wid, zdm  # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.3.schema.json"
@@ -1246,6 +1246,228 @@ def main() -> int:
           {"GONGDIAN.DAT", "BGKZ.DAT", "PZSTDG.DAT", "RAILWAY_SHJG.DAT"}
           == set(ctr.UNDOCUMENTED),
           str(sorted(ctr.UNDOCUMENTED)))
+
+    # ── 第 6f 组：.tf 土方数据解析器（应通过 / 应拒绝两侧）────────────────────
+    #    .tf 与其余适配器**结构上不同**：它第 2 行**自带列名**（74 个）。
+    #    本适配器靠它对齐列序 —— 供应商改列序就当场拒绝，而不是按位置静默错位。
+    #    所以"应拒绝"一侧的重点是**表头**，不是数据行。
+    print("\n第 6f 组  .tf 土方数据解析器（应通过 / 应拒绝两侧）")
+    _th = "HINTCAD6.00_TF_SHUJU\r\n"
+
+    def _tf_hdr(names=None):
+        return "//" + "".join("[" + n + "]" for n in (names or tf.EXPECTED_HEADER)) + "\r\n"
+
+    def _tf_row(**over):
+        """造一行 74 列的 .tf 数据。**由 tf.COLUMNS 生成**，不手抄 74 个数。"""
+        vals = {en: "0.000" for _, en in tf.COLUMNS}
+        vals["station_m"] = "100.000"
+        vals["cut_area_m2"] = "12.500"
+        vals["fill_area_m2"] = "0.000"
+        vals["drainage_ditch_flag"] = "1"
+        vals.update({k: str(v) for k, v in over.items()})
+        return "\t".join(vals[en] for _, en in tf.COLUMNS) + '\t""'
+
+    _t_ok = _th + _tf_hdr() + _tf_row() + "\r\n"
+    _t = tf.parse(_t_ok, file="ok.tf")
+    _tp = _t["points"][0]
+    check("应通过：厂商版本从魔数取出", _t["vendor_version"] == "6.00", _t["vendor_version"])
+    check("应通过：detect 认得自家魔数", tf.detect(_t_ok) is True)
+    check("应通过：detect 不认别家的魔数", tf.detect("HINTCAD6.00_LJ_SHUJU\r\n") is False)
+    check("应通过：段名/文件类别/载荷键与登记一致",
+          tf.SEGMENT == "earthwork_section"
+          and weidi.SEGMENT_FILES["earthwork_section"][0] == ".tf"
+          and weidi.SEGMENT_FILES["earthwork_section"][1] == tf.FILE_KIND
+          and tf.PAYLOAD_KEY == "points",
+          f"{tf.SEGMENT} / {tf.FILE_KIND} / {tf.PAYLOAD_KEY}")
+    check("★ 应通过：74 列全部解出，且键集 == 适配器 COLUMNS 的键集",
+          len(_tp) == 74 and set(_tp) == {en for _, en in tf.COLUMNS},
+          f"实为 {len(_tp)} 列")
+    check("★ 应通过：桩号是**米**（IR 约定），不叫 station_km",
+          _tp["station_m"] == 100.0 and "station_km" not in _tp,
+          str({k: v for k, v in _tp.items() if "station" in k}))
+    check("应通过：挖方/填方各归其位（文件表头口径：第 2 列挖、第 3 列填）",
+          _tp["cut_area_m2"] == 12.5 and _tp["fill_area_m2"] == 0.0,
+          f"{_tp['cut_area_m2']} / {_tp['fill_area_m2']}")
+    check("应通过：第 75 列 `\"\"` 被认掉，不算多一列", len(_tp) == 74)
+
+    def _rej(text, tag, want):
+        try:
+            tf.parse(text, file="bad.tf")
+        except SourceInvalid as exc:
+            check(f"应拒绝：{tag}", want in str(exc), str(exc)[:110])
+        else:
+            check(f"应拒绝：{tag}", False, "竟然解析通过了")
+
+    _rej("HINTCAD6.00_ZDM_SHUJU\r\n" + _tf_hdr() + _tf_row() + "\r\n",
+         "魔数不是 .tf", "魔数不匹配")
+    _rej(_th + _tf_row() + "\r\n", "缺第 2 行的列名注释", "列名注释")
+    _rej(_th + _tf_hdr(list(tf.EXPECTED_HEADER)[:-1]) + _tf_row() + "\r\n",
+         "表头列数少一个", "列名个数")
+    # ★★ 这一条最要紧：把第 2/3 列在**表头**上换过来（即说明书正文的写法）——
+    #    表头变了就必须报，否则 74 列会整体按位置静默错位。
+    _sw = list(tf.EXPECTED_HEADER)
+    _sw[1], _sw[2] = _sw[2], _sw[1]
+    _rej(_th + _tf_hdr(_sw) + _tf_row() + "\r\n",
+         "表头第 2/3 列换序（= 说明书正文的写法）", "列名与期望不符")
+    _rej(_th + _tf_hdr() + "\t".join(["0.000"] * 73) + "\r\n",
+         "数据行只有 73 列", "字段数应为 74")
+    _rej(_th + _tf_hdr() + _tf_row(cut_area_m2="abc") + "\r\n",
+         "挖方面积不是数字", "不是合法数字")
+    _rej(_th + _tf_hdr() + _tf_row(station_m="-5.000") + "\r\n",
+         "桩号为负", "桩号为负")
+    _rej("", "空文件", "空文件")
+
+    # ★★ 元测试：把上面被判拒的**逐个改回合法**，必须全部通过 ——
+    #    证明这些"应拒绝"不是靠别的原因顺带拒绝的（非空洞）。
+    check("★★ 元测试：表头列序改回正序 → 必须通过",
+          len(tf.parse(_th + _tf_hdr() + _tf_row() + "\r\n")["points"]) == 1)
+    check("★★ 元测试：第 2/3 列**值**互换（表头不动）→ 不该报错，只是两个数换了位置",
+          (lambda r: r["cut_area_m2"] == 0.0 and r["fill_area_m2"] == 12.5)(
+              tf.parse(_th + _tf_hdr() + _tf_row(cut_area_m2="0.000", fill_area_m2="12.500") + "\r\n")["points"][0]),
+          "表头没变时不该报错 —— 否则这条检查就是在替数据做业务判断")
+
+    # ★ 物理检查：正例零告警；且**必须能响**
+    _tpts = tf.parse(_th + _tf_hdr()
+                     + _tf_row() + "\r\n"
+                     + _tf_row(station_m="200.000", cut_area_m2="3.000") + "\r\n")["points"]
+    check("★ 应通过：正例物理检查零告警", tf.check_earthwork(_tpts) == [],
+          str(tf.check_earthwork(_tpts)[:2]))
+    check("★ 元测试：桩号倒序 → 必须报（非空洞）",
+          len(tf.check_earthwork(list(reversed(_tpts)))) == 1,
+          str(tf.check_earthwork(list(reversed(_tpts)))))
+    check("★ 元测试：挖方面积为负 → 必须报",
+          any("为负" in w for w in tf.check_earthwork([dict(_tpts[0], cut_area_m2=-1.0)])),
+          str(tf.check_earthwork([dict(_tpts[0], cut_area_m2=-1.0)])))
+    check("★ 元测试：计排水沟写 2 → 必须报",
+          any("0/1" in w for w in tf.check_earthwork([dict(_tpts[0], drainage_ditch_flag=2.0)])))
+    # ★★ 反面：半填半挖断面**不该**报 —— 第一版这里写了「填挖不能同时为正」，
+    #    在真实 332 行里报了 16 条假告警（山区半填半挖极常见）。规则已删。
+    check("★★ 半填半挖断面（填挖都为正）→ **不该**报 —— 曾在此报过 16 条假告警",
+          tf.check_earthwork([dict(_tpts[0], cut_area_m2=8.0, fill_area_m2=5.0)]) == [],
+          str(tf.check_earthwork([dict(_tpts[0], cut_area_m2=8.0, fill_area_m2=5.0)])))
+
+    # ★ 与 .STA 对账：逐桩段比**集合相等**
+    _sta2 = [{"station_m": 100.0}, {"station_m": 200.0}]
+    check("★ 应通过：与 .STA 集合相等 → 零告警", tf.check_against_stations(_tpts, _sta2) == [],
+          str(tf.check_against_stations(_tpts, _sta2)))
+    check("★ 元测试：.STA 多一个桩号 → 必须报",
+          any("没有的" in w for w in tf.check_against_stations(_tpts, _sta2 + [{"station_m": 300.0}])))
+    check("★ 元测试：.tf 多一个桩号 → 必须报",
+          any("没有的" in w for w in tf.check_against_stations(_tpts + [{"station_m": 999.0}], _sta2)))
+
+    # ★★ 适配器列名 ↔ DDL 列名 逐条对账（改了适配器不改 DDL 会红）
+    _ddl_txt = (ROOT / "sql" / "10_ddl_v0.5.sql").read_text(encoding="utf-8")
+    _m = re.search(r"CREATE TABLE IF NOT EXISTS earthwork_section\s*\((.*?)\n\);", _ddl_txt, re.S)
+    _ddl_cols = [x.group(1) for x in
+                 re.finditer(r"^\s{4}([a-z_][a-z0-9_]*)\s+(?:bigint|numeric|smallint|text)", _m.group(1), re.M)]
+    _meta = {"id", "section_id", "station_id", "remark", "station_km"}
+    _ddl_data = [c for c in _ddl_cols if c not in _meta]
+    # 桩号在两边**故意不同名**：IR 用 station_m（米，源文件原生单位），
+    # 落库才换算成 station_km。所以对账时两边都排除它，改名本身由下一条断言单独验。
+    _adapter = [en for _, en in tf.COLUMNS if en != "station_m"]
+    check("★★ 适配器 73 列 ↔ DDL earthwork_section 73 列，逐条一致（缺/多都为 0）",
+          sorted(_ddl_data) == sorted(_adapter),
+          f"缺 {sorted(set(_adapter) - set(_ddl_data))} ／ 多 {sorted(set(_ddl_data) - set(_adapter))}")
+    _adapter_all = [en for _, en in tf.COLUMNS]
+    check("★★ DDL 里那列叫 station_km（落库换算），适配器里叫 station_m（IR 约定）",
+          "station_km" in _ddl_cols and "station_m" not in _ddl_cols
+          and "station_m" in _adapter_all and "station_km" not in _adapter_all,
+          f"DDL 有 station_km={('station_km' in _ddl_cols)}／适配器有 station_m={('station_m' in _adapter_all)}")
+
+    # ── 第 6g 组：.lj 路基设计中间数据解析器（应通过 / 应拒绝两侧）──────────────
+    #    .lj **没有**自带表头（与 .tf 相反），只能按位置解析 ——
+    #    所以这里最要紧的"应拒绝"是**列数**：说明书说 20 列、实测 24 列，
+    #    一旦列数变了却照收，24 列会整体错位。
+    print("\n第 6g 组  .lj 路基设计中间数据解析器（应通过 / 应拒绝两侧）")
+    _lh = "HINTCAD7.0_LJ_SHUJU\r\n"
+
+    def _lj_row(**over):
+        vals = {en: "0.000" for en in lj.COLUMNS}
+        vals["station_m"] = "100.000"
+        vals["ground_elev_m"] = "57.262"
+        vals["design_elev_m"] = "57.500"
+        vals["left_lane_width_m"] = "3.500"
+        vals["right_lane_width_m"] = "3.500"
+        vals.update({k: str(v) for k, v in over.items()})
+        return "\t".join(vals[en] for en in lj.COLUMNS)
+
+    _l_ok = _lh + _lj_row() + "\r\n"
+    _l = lj.parse(_l_ok, file="ok.lj")
+    _lp = _l["points"][0]
+    check("应通过：厂商版本从魔数取出", _l["vendor_version"] == "7.0", _l["vendor_version"])
+    check("应通过：detect 认得自家魔数", lj.detect(_l_ok) is True)
+    check("应通过：detect 不认别家的魔数", lj.detect("HINTCAD7.0_TF_SHUJU\r\n") is False)
+    check("应通过：段名/文件类别/载荷键与登记一致",
+          lj.SEGMENT == "roadbed_design_point"
+          and weidi.SEGMENT_FILES["roadbed_design_point"][0] == ".lj"
+          and weidi.SEGMENT_FILES["roadbed_design_point"][1] == lj.FILE_KIND
+          and lj.PAYLOAD_KEY == "points",
+          f"{lj.SEGMENT} / {lj.FILE_KIND} / {lj.PAYLOAD_KEY}")
+    check("★ 应通过：24 列全部解出，且键集 == 适配器 COLUMNS 的键集",
+          len(_lp) == 24 and set(_lp) == set(lj.COLUMNS), f"实为 {len(_lp)} 列")
+    check("★ 应通过：桩号是**米**，不叫 station_km",
+          _lp["station_m"] == 100.0 and "station_km" not in _lp)
+    check("应通过：地面标高/设计标高各归其位",
+          _lp["ground_elev_m"] == 57.262 and _lp["design_elev_m"] == 57.5)
+    check("★ 应通过：11 个高差列在（第 14–24 列）",
+          sum(1 for k in _lp if k.startswith("elev_diff_")) == 11)
+    check("★ 登记：两个待考列单列一类（说明书无对应项，本工程恒 0）",
+          set(lj.UNKNOWN_COLUMNS) == {"extra_width_09_m", "extra_width_11_m"}
+          and all(c in lj.COLUMNS for c in lj.UNKNOWN_COLUMNS),
+          str(lj.UNKNOWN_COLUMNS))
+
+    def _lrej(text, tag, want):
+        try:
+            lj.parse(text, file="bad.lj")
+        except SourceInvalid as exc:
+            check(f"应拒绝：{tag}", want in str(exc), str(exc)[:110])
+        else:
+            check(f"应拒绝：{tag}", False, "竟然解析通过了")
+
+    _lrej("HINTCAD7.0_TF_SHUJU\r\n" + _lj_row() + "\r\n", "魔数不是 .lj", "魔数不匹配")
+    _lrej(_lh + "\t".join(["0.000"] * 23) + "\r\n", "只有 23 列", "字段数应为 24")
+    _lrej(_lh + "\t".join(["0.000"] * 25) + "\r\n", "有 25 列", "字段数应为 24")
+    _lrej(_lh + _lj_row(design_elev_m="abc") + "\r\n", "设计标高不是数字", "不是合法数字")
+    _lrej(_lh + _lj_row(station_m="-1.000") + "\r\n", "桩号为负", "桩号为负")
+    _lrej("", "空文件", "空文件")
+    # ★★ 说明书说 20 列 —— 若真按 20 列收，第 21–24 列会被静默丢掉。这里把
+    #    "20 列也能过"钉死为**必须拒绝**。
+    _lrej(_lh + "\t".join(["0.000"] * 20) + "\r\n",
+          "★ 按说明书写的 20 列 → 必须拒绝（否则 21–24 列静默丢失）", "字段数应为 24")
+
+    # ★ 物理检查
+    _lpts = lj.parse(_lh + _lj_row() + "\r\n"
+                     + _lj_row(station_m="200.000") + "\r\n")["points"]
+    check("★ 应通过：正例物理检查零告警", lj.check_design(_lpts) == [],
+          str(lj.check_design(_lpts)[:2]))
+    check("★ 元测试：桩号倒序 → 必须报（非空洞）",
+          len(lj.check_design(list(reversed(_lpts)))) == 1,
+          str(lj.check_design(list(reversed(_lpts)))))
+    check("★ 元测试：宽度为负 → 必须报",
+          any("为负" in w for w in lj.check_design([dict(_lpts[0], left_lane_width_m=-1.0)])))
+    check("★ 元测试：标高量级离谱（列错位的样子）→ 必须报",
+          any("量级" in w for w in lj.check_design([dict(_lpts[0], design_elev_m=99999.0)])))
+    check("★★ 标高为负但不离谱（如 −50 m 的洼地）→ **不该**报 —— 否则会常响",
+          lj.check_design([dict(_lpts[0], ground_elev_m=-50.0)]) == [],
+          str(lj.check_design([dict(_lpts[0], ground_elev_m=-50.0)])))
+
+    # ★ 与 .STA 对账
+    check("★ 应通过：与 .STA 集合相等 → 零告警",
+          lj.check_against_stations(_lpts, [{"station_m": 100.0}, {"station_m": 200.0}]) == [])
+    check("★ 元测试：.STA 多一个桩号 → 必须报",
+          any("没有的" in w for w in lj.check_against_stations(
+              _lpts, [{"station_m": 100.0}, {"station_m": 200.0}, {"station_m": 300.0}])))
+
+    # ★★ 适配器列名 ↔ DDL 列名 逐条对账
+    _m2 = re.search(r"CREATE TABLE IF NOT EXISTS roadbed_design_point\s*\((.*?)\n\);", _ddl_txt, re.S)
+    _ddl2 = [x.group(1) for x in
+             re.finditer(r"^\s{4}([a-z_][a-z0-9_]*)\s+(?:bigint|numeric|smallint|text)", _m2.group(1), re.M)]
+    _ddl2_data = [c for c in _ddl2 if c not in _meta]
+    _adapter2 = [en for en in lj.COLUMNS if en != "station_m"]
+    check("★★ 适配器 23 列 ↔ DDL roadbed_design_point 23 列，逐条一致（缺/多都为 0）",
+          sorted(_ddl2_data) == sorted(_adapter2),
+          f"缺 {sorted(set(_adapter2) - set(_ddl2_data))} ／ 多 {sorted(set(_ddl2_data) - set(_adapter2))}")
+
 
     # ── 第 7 组：桩号精度 —— 真实数据必须装得进 DDL 声明的精度 ──────────────
     # 本轮实测抓到：.STA 里 1659.917 与 1660.000 相距仅 0.083 m，
