@@ -289,3 +289,84 @@ select r.relname as 表, c.conname as 约束名,
                      'land_use_width', 'extra_fill', 'design_control_text')
  group by r.relname, c.conname
  order by 1;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ⑬ ★★ v0.5 两张逐桩表：土方断面（.tf）与路基设计断面（.lj）
+--    与 I 节（.CTR）**不同**：这两张是**逐桩**表，实测行数与 .STA 桩号序列完全相同，
+--    所以对账比的是**集合相等**（少一个桩号 = 那个断面的数据丢了），
+--    而不是像 .CTR 那样只比范围（.CTR 的分段桩号本来就不必覆盖全线）。
+--    ★ 下面每一条「不一致」查询都**必须返回 0 行**才算通过。
+-- ─────────────────────────────────────────────────────────────────────────────
+
+\echo '── ⑬-1 条数 + station_id 挂载率（三列都必须相等）──'
+select 'earthwork_section' as 表, count(*) as 行数,
+       count(station_id) as 有station_id, count(station_km) as 有station_km,
+       count(distinct station_id) as 不同桩号
+  from earthwork_section where section_id = 6
+union all
+select 'roadbed_design_point', count(*), count(station_id), count(station_km),
+       count(distinct station_id)
+  from roadbed_design_point where section_id = 6;
+
+\echo '── ⑬-2 ★ station_id 是否真指向本行那个桩号（不是随便挂一个）—— 必须 0 行 ──'
+select 'earthwork_section' as 表, e.station_km as 本行桩号,
+       s.station_local_km as station_id指向的桩号
+  from earthwork_section e join station_sequence s on s.id = e.station_id
+ where e.section_id = 6 and abs(s.station_local_km - e.station_km) > 1e-9
+union all
+select 'roadbed_design_point', d.station_km, s.station_local_km
+  from roadbed_design_point d join station_sequence s on s.id = d.station_id
+ where d.section_id = 6 and abs(s.station_local_km - d.station_km) > 1e-9;
+
+\echo '── ⑬-3 ★★ 与 .STA 桩号集合**相等**（逐桩表的核心断言）—— 必须 0 行 ──'
+with sta as (select id from station_sequence where section_id = 6)
+select '桩号序列里有、earthwork_section 里没有' as 问题, count(*) as 个数
+  from sta where id not in (select station_id from earthwork_section where section_id = 6)
+union all
+select 'earthwork_section 里有、桩号序列里没有',
+       count(*) from earthwork_section e where e.section_id = 6 and e.station_id not in (select id from sta)
+union all
+select '桩号序列里有、roadbed_design_point 里没有',
+       count(*) from sta where id not in (select station_id from roadbed_design_point where section_id = 6)
+union all
+select 'roadbed_design_point 里有、桩号序列里没有',
+       count(*) from roadbed_design_point d where d.section_id = 6 and d.station_id not in (select id from sta);
+
+\echo '── ⑬-4 ★ 桩号精度回归：全库 station*_km 列的小数位必须都 ≥ 6（1 mm）—— 必须 0 行 ──'
+--   这一条是**真事故**换来的：初版给 earthwork_section.station_km 写了 numeric(10,4)（0.1 m），
+--   而全库其余 30 处同族列都是 numeric(12,6)。值被舍入，导致 ⑬-2 一度报 39 行"对不上"。
+--   同族列必须同一个标准 —— "对本工程够用"不是标准（本工程 .tf 的桩号是 20 m 一个）。
+select table_name as 表, column_name as 列,
+       numeric_precision || ',' || numeric_scale as 精度
+  from information_schema.columns
+ where column_name ~ 'station.*_km$' and numeric_scale < 6
+   and table_schema = 'public';
+
+\echo '── ⑬-5 落库值抽样：与源文件逐字对得上吗 ──'
+\echo '   .tf 前两行（源文件：0.000 / 5.019 / 0.132 / 0.000 / 1 与 0.020 / 3.440 / 0.555 / 0.142 / 1）'
+select station_km, cut_area_m2, fill_area_m2, center_fill_cut_m, drainage_ditch_flag
+  from earthwork_section where section_id = 6 order by station_km limit 2;
+\echo '   .lj 前两行（源文件：0.000 / 57.262 / 57.262 / 3.500 / 3.500）'
+select station_km, ground_elev_m, design_elev_m, left_lane_width_m, right_lane_width_m
+  from roadbed_design_point where section_id = 6 order by station_km limit 2;
+
+\echo '── ⑬-6 ★ 唯一约束必须含桩号（与 A16/A17/I 节同一条约定）──'
+select r.relname as 表, c.conname as 约束名,
+       array_to_string(array_agg(a.attname order by k.ord), ', ') as 列
+  from pg_constraint c
+  join pg_class r on r.oid = c.conrelid
+  join unnest(c.conkey) with ordinality k(attnum, ord) on true
+  join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+ where c.contype = 'u'
+   and r.relname in ('earthwork_section', 'roadbed_design_point')
+ group by r.relname, c.conname
+ order by 1;
+
+\echo '── ⑬-7 列数核对（J1 74 列数据 + 4，J2 24 列数据 + 4）──'
+select table_name as 表, count(*) as 总列数,
+       count(*) filter (where column_name in ('id','section_id','station_id','remark')) as 元列,
+       count(*) filter (where column_name not in ('id','section_id','station_id','remark')) as 数据列
+  from information_schema.columns
+ where table_name in ('earthwork_section', 'roadbed_design_point')
+ group by table_name order by 1;
