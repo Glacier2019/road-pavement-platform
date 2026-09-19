@@ -205,3 +205,87 @@ select s.id, s.section_name as 路段, l.line_code as 路线编号, l.line_name 
   left join road_line l on l.id = s.line_id
   left join section_design_attr a on a.section_id = s.id
  order by s.id;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ⑩ ★ 设计参数控制（.CTR）—— I 节 9 张表（v0.4 新增）
+--    教程 §13.10：18 类格式 / 36 个关键字。本工程 19 个有数据、17 个为空，
+--    另有一个 ZDMDG.DAT 教程全文搜不到（经确认跳过，只登记不建表）。
+-- ─────────────────────────────────────────────────────────────────────────────
+select 'I1 slope_segment 边坡分段'          as 表, count(*) as 行数 from slope_segment
+union all select 'I2 ditch_segment 边沟/排水沟',    count(*) from ditch_segment
+union all select 'I3 standard_cross_section 标准断面', count(*) from standard_cross_section
+union all select 'I4 roadbed_trench 路槽',          count(*) from roadbed_trench
+union all select 'I5 structure_control 桥涵隧道',    count(*) from structure_control
+union all select 'I6 earthwork_composition 土石成份', count(*) from earthwork_composition
+union all select 'I7 land_use_width 用地宽度',       count(*) from land_use_width
+union all select 'I8 extra_fill 超填/清表(源为空)',  count(*) from extra_fill
+union all select 'I9 design_control_text 地质/水准(源为空)', count(*) from design_control_text
+order by 1;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ⑪ ★★ 交叉验证：.WID（A17）与 .CTR（I3）必须对上
+--    这是这套解析链**最硬的一条证据**：两个来源完全不同的文件
+--    （.wid 是路幅宽度文件、.ctr 是设计参数控制文件，格式与解析器都不同）
+--    在同一组宽度上必须给出同一个数。对不上 ⇒ 两条链里至少一条错了，
+--    而**单看任何一条都看不出来**。
+--
+--    ⚠ 口径必须说准（这里第一版就说过头了）：
+--      · 能对的是 **4 个宽度**，不是"整张表"。
+--      · **横坡对不了** —— roadbed_width 根本没有横坡列（实测 \d roadbed_width 确认）。
+--        所以"横坡 2.0/2.0/3.0 两边一致"是**错的**：那三个数只在 .CTR 里有。
+--      · **列名不一样**（同一个量两处叫法不同，属已知的命名待统一项）：
+--          roadbed_width.median_width_m            ↔ standard_cross_section.median_half_width_m
+--          roadbed_width.half_carriageway_width_m  ↔ standard_cross_section.lane_width_m
+--        硬路肩/土路肩两边同名。
+--    ⚠ 不能按桩号 join：分段桩号本来就不同（.WID 5.701461 / .CTR 5.805421），粒度不同。
+--      .WID 每侧 2 行（同值），.CTR 每侧 1 行 —— 故按 side 聚成一行再比。
+-- ─────────────────────────────────────────────────────────────────────────────
+with w as (
+  select side, max(median_width_m) median, max(half_carriageway_width_m) lane,
+         max(hard_shoulder_width_m) hard, max(earth_shoulder_width_m) earth
+    from roadbed_width group by side),
+     c as (
+  select side, max(median_half_width_m) median, max(lane_width_m) lane,
+         max(hard_shoulder_width_m) hard, max(earth_shoulder_width_m) earth
+    from standard_cross_section group by side)
+select w.side as 侧,
+       w.median as "WID 中分带", c.median as "CTR 中分带",
+       w.lane   as "WID 行车道", c.lane   as "CTR 行车道",
+       w.hard   as "WID 硬路肩", c.hard   as "CTR 硬路肩",
+       w.earth  as "WID 土路肩", c.earth  as "CTR 土路肩"
+  from w join c on c.side = w.side order by 1;
+
+-- 只报"对不上"的 —— 上面那张表人眼看，这张给脚本看（0 行 = 4 个宽度全对上）
+with w as (
+  select side, max(median_width_m) median, max(half_carriageway_width_m) lane,
+         max(hard_shoulder_width_m) hard, max(earth_shoulder_width_m) earth
+    from roadbed_width group by side),
+     c as (
+  select side, max(median_half_width_m) median, max(lane_width_m) lane,
+         max(hard_shoulder_width_m) hard, max(earth_shoulder_width_m) earth
+    from standard_cross_section group by side)
+select w.side as 侧, '宽度不一致' as 问题
+  from w join c on c.side = w.side
+ where w.median is distinct from c.median or w.lane is distinct from c.lane
+    or w.hard   is distinct from c.hard   or w.earth is distinct from c.earth;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ⑫ ★ 关键核查：I 节 9 张表的唯一键**都必须含桩号**（与 A16/A17 同一条约定）
+--    你当初的指正：宽度表/超高表错了，都应该以**桩号**为主键。
+--    I 节沿用同一条约定 —— 下面列出实库里的真实唯一约束，可逐条核对。
+-- ─────────────────────────────────────────────────────────────────────────────
+select r.relname as 表, c.conname as 约束名,
+       array_to_string(array_agg(a.attname order by k.ord), ', ') as 列
+  from pg_constraint c
+  join pg_class r on r.oid = c.conrelid
+  join unnest(c.conkey) with ordinality k(attnum, ord) on true
+  join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+ where c.contype = 'u'
+   and r.relname in ('slope_segment', 'ditch_segment', 'standard_cross_section',
+                     'roadbed_trench', 'structure_control', 'earthwork_composition',
+                     'land_use_width', 'extra_fill', 'design_control_text')
+ group by r.relname, c.conname
+ order by 1;

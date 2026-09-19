@@ -1383,12 +1383,24 @@ def main() -> int:
     )
     planned = di.plan(ir_fx, section_id=1)
     counts = {t: len(r) for t, r in planned["tables"].items()}
-    # 合成 IR 里没有纵断面，故两张新表是 0 行 —— 但仍然必须在 plan 的产出里：
+    # 合成 IR 里没有纵断面/超高/路幅/.CTR，故那些表是 0 行 —— 但仍然必须在 plan 的产出里：
     # 漏掉一个键会让落库阶段静默少写一张表，而不是报错。
-    check("行数：桩号 30 / 交点 1 / 单元 4 / 设计线 0 / 地面线 0 / 超高 0 / 路幅 0",
-          counts == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4,
-                     "profile_grade_point": 0, "profile_ground_point": 0,
-                     "superelev_transition": 0, "roadbed_width": 0},
+    #
+    # ★ 两件事**分开断言**，不合成一个"整份字典相等"：
+    #   ① 表集合 —— 且**推导**出来（已实现段对应的表 ∪ CTR_ON_CONFLICT 里的 9 张），
+    #      不写死清单：每加一段都要回来改一次断言，会诱使人"顺手把新表名填进去"，
+    #      而不是想清楚"这张表该不该被 plan 产出"。
+    #   ② 有数据的表的行数 —— 精确；其余必须全 0。
+    _want = ({"station_sequence", "alignment_pi", "alignment_element",
+              "profile_grade_point", "profile_ground_point",
+              "superelev_transition", "roadbed_width"}
+             | {t for t, _ in di.CTR_ON_CONFLICT})
+    check("plan 产出的表集合 = 已实现段对应的表 ∪ .CTR 的 9 张（漏一个键会静默少写一张表）",
+          set(counts) == _want,
+          f"多出 {sorted(set(counts) - _want)}／缺少 {sorted(_want - set(counts))}")
+    check("行数：有数据的 3 张表正确（桩号 30 / 交点 1 / 单元 4），其余全 0",
+          {t: n for t, n in counts.items() if n}
+          == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4},
           str(counts))
     check("交点来源 = 推导（.JD 作输入被忽略）",
           planned["pi_source"] == "derived" and planned["pi_from_file_ignored"] is True,
@@ -1525,9 +1537,17 @@ def main() -> int:
                     if _kw.arg == "on_conflict" and isinstance(_kw.value, _ast_mod.Tuple):
                         _pairs.append((_n.args[0].value,
                                        tuple(e.value for e in _kw.value.elts)))
-        # ★ 元测试：抠不到东西 = 下面那条检查永远通过（空洞）—— 所以先证明抠得到
-        check("★★ 元测试：能从源码抠出 on_conflict 对（否则下面那条是空洞检查）",
-              len(_pairs) >= 10, f"抠到 {len(_pairs)} 对")
+        # ★ 静态抠源码只抓得到**内联元组**。`load()` 里若把 on_conflict 写成
+        #   循环变量（.CTR 那 9 张表就是这样），静态抠就漏了 —— 实测漏过：
+        #   9 处写成局部变量时本检查只覆盖 12 对，.CTR 的 9 对完全没被比过。
+        #   所以改成：静态抠 + **直接读模块级常量** CTR_ON_CONFLICT，两路合并。
+        _pairs += [(t, tuple(cols)) for t, cols in di.CTR_ON_CONFLICT]
+        # ★ 元测试：抠不到东西 = 下面那条检查永远通过（空洞）—— 所以先证明抠得到。
+        #   下限是**推导出来的**（内联 12 对 + .CTR 9 对 = 21），不是拍脑袋写的数字。
+        _inline = len(_pairs) - len(di.CTR_ON_CONFLICT)
+        check("★★ 元测试：能抠到 on_conflict 对（内联 + 常量两路，否则下面是空洞检查）",
+              _inline >= 12 and len(di.CTR_ON_CONFLICT) == 9 and len(_pairs) == _inline + 9,
+              f"内联 {_inline} 对 + CTR 常量 {len(di.CTR_ON_CONFLICT)} 对 = {len(_pairs)} 对")
         _bad = []
         for _t, _cols in _pairs:
             _crows = dao_e2e.query(
@@ -1582,11 +1602,9 @@ def main() -> int:
 
             # ① 预检：dry_run 必须一行都不写（这就是 M9 导入页"预检"的语义）
             rep = di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch, dry_run=True)
-            check("dry_run 报告计划行数（桩号 30 / 交点 1 / 单元 4 / 超高 0 / 路幅 0）",
-                  rep["planned"] == {"station_sequence": 30, "alignment_pi": 1,
-                                     "alignment_element": 4,
-                                     "profile_grade_point": 0, "profile_ground_point": 0,
-                                     "superelev_transition": 0, "roadbed_width": 0},
+            check("dry_run 报告计划行数（有数据的 3 张表精确，其余全 0）",
+                  {t: n for t, n in rep["planned"].items() if n}
+                  == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4},
                   str(rep["planned"]))
             check("dry_run 后没有批次行",
                   dao_e2e.scalar("SELECT count(*) FROM data_import_batch WHERE batch_no=%(b)s",

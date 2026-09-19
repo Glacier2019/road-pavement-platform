@@ -225,6 +225,129 @@ def _plan_roadbed_widths(ir: Mapping[str, Any], section_id: int) -> list[dict[st
     return out
 
 
+def _plan_design_control(ir: Mapping[str, Any], section_id: int) -> dict[str, list[dict[str, Any]]]:
+    """``.CTR`` 设计参数控制 → **9 张表**的行（I1–I9）。
+
+    与其余 7 个段不同：`.CTR` 是**关键字驱动**的文件，一个段带 9 张表的载荷
+    （教程 §13.10 定义 18 类格式 / 36 个关键字），故这里一次返回 9 个列表。
+
+    ★ 与 A16/A17 同一个锚定方式：``section_id`` + ``station_km``，**键是桩号**。
+      **不挂 station_id 外键** —— .CTR 的分段桩号不是 .STA 桩号序列的子集
+      （实测：ZDMDG 的 20 个桩号里 1.790/2.610/3.130 都不在序列里）。
+
+    ``station_km`` 是**千米**（表里就是这么定的），IR 里是米 —— 与其余 GE 表同一处换算。
+
+    本工程实测各表行数：22 / 6 / 2 / 2 / 6 / 1 / 4 / 0 / 0。
+    后两组（超填、地质/水准点）在源文件里**是空的** —— 空列表不写库，
+      不写 0 行，也不造占位行。
+    """
+    dc = ir["segments"].get("design_control") or {}
+    km = lambda m: None if m is None else round(m / 1000.0, 6)   # noqa: E731
+
+    out: dict[str, list[dict[str, Any]]] = {
+        "slope_segment": [], "ditch_segment": [], "standard_cross_section": [],
+        "roadbed_trench": [], "structure_control": [], "earthwork_composition": [],
+        "land_use_width": [], "extra_fill": [], "design_control_text": [],
+    }
+
+    for r in dc.get("slope_segments") or []:
+        out["slope_segment"].append({
+            "section_id": section_id, "side": r["side"], "slope_kind": r["slope_kind"],
+            "station_km": km(r["station_m"]), "group_seq": r["group_seq"],
+            "slope_ratio": r.get("slope_ratio"),          # 9999（垂直）在解析器里已收成 None
+            "control_height_m": r.get("control_height_m"),
+            "max_height_m": r.get("max_height_m"),
+            "protection": r.get("protection"),
+            "remark": None,
+        })
+
+    for r in dc.get("ditch_segments") or []:
+        out["ditch_segment"].append({
+            "section_id": section_id, "side": r["side"], "ditch_kind": r["ditch_kind"],
+            "station_km": km(r["station_m"]), "group_seq": r["group_seq"],
+            "slope_ratio": r.get("slope_ratio"),
+            "height_m": r.get("height_m"),
+            "protection": r.get("protection"),
+            "remark": None,
+        })
+
+    for r in dc.get("standard_cross_sections") or []:
+        out["standard_cross_section"].append({
+            "section_id": section_id, "side": r["side"], "station_km": km(r["station_m"]),
+            "median_half_width_m": r.get("median_half_width_m"),
+            "median_crossfall_pct": r.get("median_crossfall_pct"),
+            "median_height_m": r.get("median_height_m"),
+            "lane_width_m": r.get("lane_width_m"),
+            "lane_crossfall_pct": r.get("lane_crossfall_pct"),
+            "hard_shoulder_width_m": r.get("hard_shoulder_width_m"),
+            "hard_shoulder_crossfall_pct": r.get("hard_shoulder_crossfall_pct"),
+            "earth_shoulder_width_m": r.get("earth_shoulder_width_m"),
+            "earth_shoulder_crossfall_pct": r.get("earth_shoulder_crossfall_pct"),
+            "remark": None,
+        })
+
+    for r in dc.get("roadbed_trenches") or []:
+        out["roadbed_trench"].append({
+            "section_id": section_id, "side": r["side"], "station_km": km(r["station_m"]),
+            "median_trench_depth_m": r.get("median_trench_depth_m"),
+            "lane_trench_depth_m": r.get("lane_trench_depth_m"),
+            "hard_shoulder_trench_depth_m": r.get("hard_shoulder_trench_depth_m"),
+            "earth_shoulder_trench_depth_m": r.get("earth_shoulder_trench_depth_m"),
+            "remark": None,
+        })
+
+    for r in dc.get("structures") or []:
+        out["structure_control"].append({
+            "section_id": section_id, "structure_kind": r["structure_kind"],
+            "anchor_station_km": km(r["anchor_station_m"]), "name": r["name"],
+            "start_station_km": km(r.get("start_station_m")),
+            "end_station_km": km(r.get("end_station_m")),
+            "center_station_km": km(r.get("center_station_m")),
+            "angle_deg": r.get("angle_deg"),
+            "span_text": r.get("span_text"),             # ★text 不是数值：教程跨径含 + 与 ×
+            "structure_form": r.get("structure_form"),
+            "control_elev_m": r.get("control_elev_m"),
+            "elev_control_type": r.get("elev_control_type"),
+            "deck_type": r.get("deck_type"),
+            # ★教程正文只列了 2 个尾随整数，但教程示例与实测文件都是 3 个 —— 第 3 个待考
+            "trailing_flag": r.get("trailing_flag"),
+            "remark": None,
+        })
+
+    for r in dc.get("earthwork_compositions") or []:
+        out["earthwork_composition"].append({
+            "section_id": section_id, "station_km": km(r["station_m"]),
+            **{f"pct_{k}": r.get(f"pct_{k}") for k in range(1, 7)},
+            "remark": None,
+        })
+
+    for r in dc.get("land_use_widths") or []:
+        out["land_use_width"].append({
+            "section_id": section_id, "side": r["side"], "station_km": km(r["station_m"]),
+            "fill_land_width_m": r.get("fill_land_width_m"),
+            "cut_land_width_m": r.get("cut_land_width_m"),
+            "remark": None,
+        })
+
+    for r in dc.get("extra_fills") or []:
+        out["extra_fill"].append({
+            "section_id": section_id, "side": r.get("side"), "fill_kind": r["fill_kind"],
+            "station_km": km(r["station_m"]),
+            "width_m": r.get("width_m"), "thickness_m": r.get("thickness_m"),
+            "remark": None,
+        })
+
+    for r in dc.get("design_control_texts") or []:
+        out["design_control_text"].append({
+            "section_id": section_id, "text_kind": r["text_kind"],
+            "station_km": km(r["station_m"]), "name": r.get("name"),
+            "elev_m": r.get("elev_m"), "content": r.get("content"),
+            "remark": None,
+        })
+
+    return out
+
+
 def _plan_ground_points(ir: Mapping[str, Any]) -> list[dict[str, Any]]:
     """``profile_ground_point`` 行（纵断面**地面线**：逐桩原始地形高程）。
 
@@ -364,6 +487,9 @@ def plan(ir: Mapping[str, Any], *, section_id: int,
         "superelev_transition": _plan_superelev_transitions(ir, section_id),
         "roadbed_width": _plan_roadbed_widths(ir, section_id),
     }
+    # .CTR 一个段带 9 张表 —— 展开进同一张 tables 字典，键就是**物理表名**，
+    # 故 load / verify / 测试都按表名取，不需要知道它们同源。
+    tables.update(_plan_design_control(ir, section_id))
     return {"tables": tables, "pi_source": pi_source,
             "pi_from_file_ignored": bool(pi_derived) and bool(pi_file)}
 
@@ -479,6 +605,31 @@ def verify(ir: Mapping[str, Any], planned: Mapping[str, Any],
 
 
 # --------------------------------------------------------------------- 落库
+#: ``.CTR`` 的 9 张表 → ``on_conflict`` 目标列。
+#:
+#: ★ **必须是模块级常量**，不能藏在 ``load()`` 里当局部变量：契约测试的
+#: ★★ 对账检查（源码 ``on_conflict`` ↔ 实库 ``pg_constraint``）是**静态**读源码的，
+#: 它抠得到内联元组，抠不到循环里的变量 —— 那 9 对就会**静默漏检**。
+#: 实测确实漏了：9 处写成局部变量时，对账测试只覆盖 12 对（A0–A17 的内联那批），
+#: 而 .CTR 的 9 对完全没被比过。提到模块级后，测试改为直接读本常量，
+#: 覆盖面从 12 对变成 21 对。
+#:
+#: ⚠ 列序必须与 DDL 的 UNIQUE **完全一致**，否则 PG 报
+#:   "no unique or exclusion constraint matching the ON CONFLICT specification"。
+#:   这一条曾经真出过（superelev_transition 用错列序），故有 ★★ 对账测试钉住。
+CTR_ON_CONFLICT: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("slope_segment",           ("section_id", "side", "slope_kind", "station_km", "group_seq")),
+    ("ditch_segment",           ("section_id", "side", "ditch_kind", "station_km", "group_seq")),
+    ("standard_cross_section",  ("section_id", "side", "station_km")),
+    ("roadbed_trench",          ("section_id", "side", "station_km")),
+    ("structure_control",       ("section_id", "structure_kind", "anchor_station_km")),
+    ("earthwork_composition",   ("section_id", "station_km")),
+    ("land_use_width",          ("section_id", "side", "station_km")),
+    ("extra_fill",              ("section_id", "side", "fill_kind", "station_km")),
+    ("design_control_text",     ("section_id", "text_kind", "station_km")),
+)
+
+
 def load(ir: Mapping[str, Any], dao: Any, *,
          section_id: int, batch_no: str,
          source_desc: str | None = None,
@@ -611,7 +762,19 @@ def load(ir: Mapping[str, Any], dao: Any, *,
                 "roadbed_width", tables["roadbed_width"],
                 on_conflict=("section_id", "side", "station_km"))
 
-        # ⑧ 批次登记
+        # ⑧ 设计参数控制（.CTR）9 张表 —— 全部锚 section_id + station_km，键是桩号。
+        #    为什么键里必须带 group_seq（前两张）：同一个桩号下天然有多级边坡/多个沟折点
+        #    （本工程填方 5 级、挖方 6 级、边沟 3 折点），不带就等于把它们折叠成一行。
+        #    为什么 I3 standard_cross_section 也在写：它是 A17 roadbed_width 的**独立校验源**，
+        #    两个来源不同的文件在同一组数上对上，是这套解析链最硬的一条证据。
+        #    ⚠ on_conflict 的列序必须与 DDL 的 UNIQUE 完全一致，否则 PG 报
+        #      "no unique or exclusion constraint matching the ON CONFLICT specification"。
+        #      这一条曾经真出过（superelev_transition 用错列序），故有 ★★ 对账测试钉住。
+        for _t, _oc in CTR_ON_CONFLICT:
+            if tables.get(_t):
+                report["written"][_t] = tx.insert(_t, tables[_t], on_conflict=_oc)
+
+        # ⑨ 批次登记
         tx.insert("data_import_batch", [batch], on_conflict=("batch_no",))
 
     return report
