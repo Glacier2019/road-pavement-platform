@@ -2374,9 +2374,21 @@ def main() -> int:
           and "无路线代码" in planned["tables"]["road_line"][0]["remark"])
     check("12 条空路径的槽位不进 design_file",
           all(f["rel_path"] for f in planned["tables"]["design_file"]))
-    check("2 条无字段号的文件被跳过并给出原因（NOT NULL 无法满足）",
+    # ★ 两条被跳过的文件**原因不同**，不能合成一句（2026-09 查清）：
+    #   .hda 首行 `HINTSOFT_HD_**PRJ**_1045`，有 BEGIN_CUL(涵洞)、桩号+GUID、
+    #        `[涵洞…]` 组名、`2009 100 1 0 5232.274…` 字段号+值 —— 与 .PRJ 同族，
+    #        是**工程数据**，只是 .PRJ 那行没给号 → 这是 .PRJ 的疏漏。
+    #   .cys 首行 `HINTSOFT_HD_**SYS**_1026`，内容是尺寸标注样式(ZDIMAPP)、
+    #        图框([TITLE] 1:[SCALE])、填充图案(ANSI31) —— **软件的系统参数**，
+    #        纬地自己的说明也写它是"安装目录下'系统设置'文件夹中的系统参数.cys"。
+    #        → 它**本就不该进工程台账**，跟字段号无关。
+    check("2 条被跳过的文件，且原因**分别**写对（.hda 是 .PRJ 疏漏 / .cys 是系统参数）",
           len(planned["skipped_files"]) == 2
-          and all("未给字段号" in x for x in planned["skipped_files"]))
+          and any("未给字段号" in x and ".hda" in x for x in planned["skipped_files"])
+          and any("系统参数" in x and ".cys" in x for x in planned["skipped_files"]),
+          str(planned["skipped_files"]))
+    check("★ 元测试：.cys 的跳过理由**不能**只是「未给字段号」（那是 .hda 的理由）",
+          all("未给字段号" not in x for x in planned["skipped_files"] if ".cys" in x))
     check("★ 元测试：design_file 每行都有 file_kind_code（满足 NOT NULL）",
           all(f["file_kind_code"] for f in planned["tables"]["design_file"]))
     # 已实现适配器的后缀才给 ok。加 .DMX/.ZDM 后从 3 个变 5 个 —— 这条断言当时

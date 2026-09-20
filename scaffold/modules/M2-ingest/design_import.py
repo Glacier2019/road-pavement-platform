@@ -931,6 +931,12 @@ _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
 #    .tsf   文件头 `.Standard Jet DB` —— **Microsoft Access 数据库**，不是文本
 #  → 这些**不是"适配器还没写"**，是"按现有手段读不了"。两者混为一谈会让人去写
 #    一个永远写不出来的适配器。故单列一类，并在 parse_note 里写清实测依据。
+#: **软件自身的参数**文件（不是工程数据）→ 为什么。这类文件即使出现在工程目录里，
+#  也不该进 design_file 台账 —— 它们描述的是"软件怎么画图"，不是"这条路是什么"。
+_SYSTEM_PARAM_SUFFIX = {
+    ".cys": "软件系统参数（图层／标注样式／图框／填充图案，首行 HINTSOFT_HD_SYS_*）",
+}
+
 _BLOCKED_SUFFIX = {
     ".gtm":   "二进制数模组索引（魔数 HINT40_GROUP_DTM_VER6），非文本",
     ".bdm":   "魔数行后为 zlib 压缩的二进制结构，需专有工具",
@@ -1061,7 +1067,25 @@ def _plan_design_files(prj: Mapping[str, Any],
             # `design_file.file_kind_code` 是 NOT NULL，而实测 .PRJ 里
             # 「涵洞数据文件(*.hda)」「涵洞系统参数文件(*.cys)」两行**没有键号**。
             # 编一个码就是造假，故跳过并上报。
-            skipped.append(f"{f['kind_name']}（.PRJ 未给字段号，无法满足 NOT NULL）")
+            #
+            # ★ 但这两行的**原因不同**，不能合成一句（2026-09 查清）：
+            #   · .cys —— 首行 `HINTSOFT_HD_**SYS**_1026`，内容是尺寸标注样式(ZDIMAPP)、
+            #     图框([TITLE] 1:[SCALE])、填充图案(ANSI31)…… **软件的系统参数**，
+            #     不是工程数据。纬地自己的说明也写：「参数设置文件：即安装目录下
+            #     '系统设置'文件夹中的'系统参数.cys'，记录着图层等控制参数数据」。
+            #     → 它**本就不该进工程台账**，与字段号无关。
+            #   · .hda —— 首行 `HINTSOFT_HD_**PRJ**_1045`、有 `BEGIN_CUL`(涵洞)、
+            #     桩号 + GUID、`[涵洞…]` 组名、`2009 100 1 0 5232.274…` 字段号+值
+            #     —— 与 .PRJ **同族**，是**工程数据**，只是 .PRJ 那行没给号。
+            #     → 这是 .PRJ 的疏漏，将来给了号就该进来。
+            _suffix = ("." + f["kind_name"].rsplit(".", 1)[-1].rstrip(")").lower()
+                       if "." in f["kind_name"] else "")
+            if _suffix in _SYSTEM_PARAM_SUFFIX:
+                skipped.append(
+                    f"{f['kind_name']}（{_SYSTEM_PARAM_SUFFIX[_suffix]}—— "
+                    "本就不属于工程台账，与字段号无关）")
+            else:
+                skipped.append(f"{f['kind_name']}（.PRJ 未给字段号，无法满足 NOT NULL）")
             continue
         declared = _basename(rel)
         suffix = ("." + declared.rsplit(".", 1)[-1].lower()) if declared and "." in declared else ""
