@@ -212,23 +212,65 @@ def load_domains() -> tuple[dict[str, list[str]], dict[str, list[str]]]:
 # ────────────────────────────────────────────────────────────
 # 值 = (来源文件列表, 现状说明)；现状：now=现有表可装 / new=需新建 / gap=平台不适用
 WEIDI_SOURCE: dict[str, tuple[list[str], str]] = {
-    "road_line": ([".PRJ 总项目"], "now"),
-    "road_section": ([".PRJ 项目分段"], "now"),
-    "structure_layer": ([".BDM 标准断面", ".HDMSJ 断面设计"], "now"),
-    "monitor_cross_section": ([".STA 桩号序列"], "now"),   # v0.3 已在册（原误标 new）
-    "geometry_point": ([".JD 交点", ".pm 平面线形", ".STA 桩号", ".ZDM 纵断面", ".SUP 超高", ".WID 路幅宽度"], "now"),  # v0.3 批次一已落地
+    # ── .PRJ 项目定义（301–316 分段字段 + 项目头）─────────────────────
+    "design_project":      ([".PRJ 项目头"], "now"),
+    "road_line":           ([".PRJ 路线名称"], "now"),
+    "road_section":        ([".PRJ 301/302 起终点桩号"], "now"),
+    "section_design_attr": ([".PRJ 303–316 分段设计属性"], "now"),
+    "design_file":         ([".PRJ 文件台账"], "now"),
+    # ── 逐桩与线形 ────────────────────────────────────────────────────
+    #    ★ 这张表与 scaffold/modules/M2-ingest/adapters/weidi/__init__.py
+    #      的 SEGMENT_FILES 是**一一对应**的；改这里必须同时改那里。
+    "station_sequence":     ([".STA 桩号序列"], "now"),
+    "alignment_pi":         ([".JD 平面交点"], "now"),
+    "alignment_element":    ([".pm 平面线形"], "now"),
+    "profile_grade_point":  ([".ZDM 纵断面设计"], "now"),
+    "profile_ground_point": ([".DMX 纵断面地面线"], "now"),
+    "superelev_transition": ([".SUP 超高过渡"], "now"),
+    "roadbed_width":        ([".WID 路幅宽度"], "now"),
+    "earthwork_section":    ([".tf 土方数据"], "now"),
+    "roadbed_design_point": ([".lj 路基设计中间数据"], "now"),
+    # ── .CTR 设计参数控制（一个文件 → 9 张表）──────────────────────────
+    "design_control_text":    ([".CTR 设计参数控制"], "now"),
+    "structure_control":      ([".CTR 设计参数控制"], "now"),
+    "ditch_segment":          ([".CTR 设计参数控制"], "now"),
+    "slope_segment":          ([".CTR 设计参数控制"], "now"),
+    "land_use_width":         ([".CTR 设计参数控制"], "now"),
+    "extra_fill":             ([".CTR 设计参数控制"], "now"),
+    "earthwork_composition":  ([".CTR 设计参数控制"], "now"),
+    "roadbed_trench":         ([".CTR 设计参数控制"], "now"),
+    "standard_cross_section": ([".CTR 设计参数控制"], "now"),
+    # ── 有源、但**结构上读不了**（故本工程这张表是空的）──────────────
+    #    写在图上是**结论**：不是"忘了做"，是"做不到"。
+    "geometry_point":   ([".3DR 横断面三维 —— 本工程未导出此文件"], "now"),
+    "structure_layer":  ([".BDM/.HDMSJ 标准断面 —— 均为二进制，parse_status=blocked"], "now"),
 }
+# ⚠ monitor_cross_section **有意不列**：它是**监测**断面，不是纬地设计数据。
+#   旧版把它标成「源：.STA 桩号序列」是**错的** —— .STA 是桩号序列，填的是
+#   station_sequence，跟监测断面没关系。删掉是对的，不是漏掉。
 
-# 纬地有、但平台 DDL 完全没有对应表的数据（设计期成果，属另一个库）
+# ⚠⚠ 这里**曾经**有两行 "cross_section" 和 "retaining_wall" —— **是我写错的**：
+#    它俩是 `derive_level` 里的**段名**（.HDM 横断面 / .dq 挡墙），
+#    **不是表名**，DDL 里根本没有这两张表。
+#    本函数（node_html）是按**表名**取标注的，写段名进去永远匹配不上 →
+#    图上看不见，于是"核对"这一步才发现。已挪进下面的 WEIDI_ORPHAN。
+#    ★ 教训：段名 ≠ 表名。段是"解析出来的东西"，表是"存下去的地方"，
+#      两者**不是一一对应**：.HDM 解析得出 cross_section 段，但平台没建对应的表。
+
+# ⚠ 本表**曾经**列着「横断面地面线 / 土方与调配 / 路基中间数据」说平台"完全没有对应表" ——
+#   那是 v0.3（42 表）时代的结论，**早就过期了**：cross_section / earthwork_section /
+#   roadbed_design_point 三张表在 v0.4/v0.5 都已建。现在只剩**真正没有对应表**的：
 WEIDI_ORPHAN = [
-    ("横断面地面线", ".HDM / .HDMSJ", "逐桩地面线测点（平距/高差）"),
-    ("土方与调配", ".tf / .tsf", "填挖方量、土石方调配"),
-    ("结构物", ".dq / .hda / .cys", "挡墙、涵洞"),
-    ("三维数模", ".DTM / .gtm", "地形三角网"),
-    ("路基中间数据", ".lj", "逐桩路基设计高程/宽度"),
+    # ★ 段名 ≠ 表名：下面这两项在 M2 里**能解析**（有段），但平台**没建表**，
+    #   所以它们连"空表"都算不上 —— 数据解析出来就丢了。这是**真缺口**。
+    ("横断面地面线", ".HDM", "能解析出 cross_section 段，但 DDL **没有对应的表** → 解析完就丢"),
+    ("挡墙", ".dq / .dqd", "同上：无表。且 .dq 是定长二进制、.dqd 本工程未导出 → 双重的做不了"),
+    ("三维数模", ".DTM / .gtm", "地形三角网 —— 二进制，结构上读不了"),
+    ("标准断面二进制", ".BDM / .HDMSJ", "与 .DTM 同族二进制；.BDM 是 zlib 压缩后截断"),
+    ("土石方调配库", ".tsf", "Microsoft Access 数据库（Standard Jet DB），需专有工具"),
+    ("涵洞数据", ".hda", "与 .PRJ 同族的工程数据，但 .PRJ 未给它字段号 → 无法建档案"),
+    ("软件系统参数", ".cys", "首行 HINTSOFT_HD_SYS_* —— 描述**软件怎么画图**，不是路是什么，不该进台账"),
 ]
-
-
 # ────────────────────────────────────────────────────────────
 # 4. 生成 Graphviz DOT
 # ────────────────────────────────────────────────────────────
