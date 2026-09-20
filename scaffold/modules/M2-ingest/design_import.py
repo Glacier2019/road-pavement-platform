@@ -474,6 +474,9 @@ def _plan_pi_from_elements(ir: Mapping[str, Any],
             "section_id": section_id,
             "pi_seq": p["seq"],
             "pi_type": "JD",
+            # ★交点桩号：.JD 里本来就有（f10[0]），**不是纯派生量** —— 这里写派生值，
+            #   verify() 拿它与文件里的对账（两条路独立，实测差 ≤2.4e-8 m）。
+            "station_km": round(p["station_m"] / 1000.0, 6),
             "x_coord": round(p["x"], 6),
             "y_coord": round(p["y"], 6),
             "radius_m": p["radius_m"],
@@ -488,8 +491,11 @@ def _plan_pi_from_elements(ir: Mapping[str, Any],
             "deflection_deg": p["deflection_deg"],
             "external_m": p["external_m"],
             # 内部字段（下划线开头，落库前剔除，不入表）：
-            #   交点桩号 = ZH + 切线长，是**派生量**，故 DDL 里没有它的列；
-            #   但验算要用，所以在这里带上。
+            #   _station_m 是**派生值**（ZH + 切线长），verify ② 拿它与 .JD 的
+            #   station_m 逐条对质（两条路独立，实测差 ≤2.4e-8 m）。
+            #   ⚠ 原注释写「交点桩号是派生量，故 DDL 里没有它的列」—— **前提是错的**：
+            #   .JD 本来就给了它（f10[0]）。落库写的是 station_km（见上），
+            #   这里保留 _station_m 是因为对质用米、入库用公里，两处单位不同。
             "_station_m": p["station_m"],
             "_feat_stations_m": list(p["feat_stations_m"]),
             "_source": "derived",
@@ -507,6 +513,8 @@ def _plan_pi_from_file(ir: Mapping[str, Any], section_id: int) -> list[dict[str,
             "section_id": section_id,
             "pi_seq": len(out) + 1,
             "pi_type": p.get("pi_type") or "JD",
+            "station_km": (round(p["station_m"] / 1000.0, 6)
+                           if p.get("station_m") is not None else None),
             "x_coord": round(p["x"], 6),
             "y_coord": round(p["y"], 6),
             "radius_m": p.get("radius_m"),

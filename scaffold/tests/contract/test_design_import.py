@@ -1885,6 +1885,39 @@ def main() -> int:
     check("元测试：也不写已删除的 curvature_1pm",
           not any("curvature_1pm" in r for r in planned["tables"]["alignment_element"]))
 
+    # ★★ 交点桩号必须落库，且与 .JD 文件里的值逐条对上。
+    #   原注释写「交点桩号 = ZH + 切线长，是派生量，故 DDL 里没有它的列」——
+    #   **前提是错的**：.JD 第 3 列「本点桩号」本来就给了它（jd.py 的 f10[0] 早在读，
+    #   只是没往下传）。"可派生"不等于"源里没有"：源里给了却不存，就永远没有第二个值可比，
+    #   而这张表也是全库唯一没有桩号列的几何表。
+    # ⚠ 容差不能用 TOL_COORD_M(1e-6 m)：station_km 以**公里**存 numeric(12,6)，
+    #   即存储粒度是 1 mm —— 比 1e-6 m 还粗 1000 倍。拿比存储精度更细的容差去比，
+    #   报的是"公里→米往返的舍入"，不是几何错误（实测 fixture 上差 1.36 µm）。
+    #   取半个存储粒度（0.5 mm）才是这条断言真正能保证的东西。
+    _KM_STORE_TOL_M = 0.5e-3
+    _pi = planned["tables"]["alignment_pi"]
+    check("★ alignment_pi 每行都有 station_km（不再只有内部 _station_m）",
+          bool(_pi) and all(r.get("station_km") is not None for r in _pi),
+          str([r.get("station_km") for r in _pi][:4]))
+    _jdp = {p_["seq"]: p_ for p_ in (ir_fx["segments"].get("alignment_pi") or [])}
+    _diffs = []
+    for _r in _pi:
+        _f = _jdp.get(_r["pi_seq"])
+        if _f is None:
+            _diffs.append((_r["pi_seq"], "文件里没有同号控制点")); continue
+        _d = abs(_r["station_km"] * 1000.0 - _f["station_m"])
+        if _d > _KM_STORE_TOL_M:
+            _diffs.append((_r["pi_seq"], _d))
+    check("★★ station_km 与 .JD 的「本点桩号」逐条吻合（两条独立路径对账）",
+          not _diffs, str(_diffs))
+    # ★ 元测试：把 station_km 改错，上面那条必须响 —— 否则它是空的
+    _bad = [dict(r) for r in _pi]
+    _bad[0]["station_km"] = (_bad[0]["station_km"] or 0) + 0.5
+    _hit = [r for r in _bad
+            if abs(r["station_km"] * 1000.0 - _jdp[r["pi_seq"]]["station_m"]) > _KM_STORE_TOL_M]
+    check("★ 元测试：桩号改错 0.5 km 时对账会响（上面那条不是空的）",
+          len(_hit) == 1, f"响了 {len(_hit)} 条")
+
     # ★ 更强的一条：**每一个非下划线开头**的键都必须是该表真实存在的列。
     #   这挡住了三件事：内部字段漏剔除、列名拼错、DDL 改名后落库器没跟上。
     for table, rows in planned["tables"].items():

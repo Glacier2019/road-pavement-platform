@@ -399,6 +399,12 @@ CREATE TABLE IF NOT EXISTS alignment_pi (
     section_id         bigint NOT NULL REFERENCES road_section(id),
     pi_seq             smallint NOT NULL,                 -- 交点序号（.JD 交点个数=10）
     pi_type            varchar(16) NOT NULL,              -- QD 起点 / ZD 终点 / JD 交点
+    station_km         numeric(12,6),                     -- ★交点桩号（.JD 第 3 列「本点桩号」，原始量）
+                                                          --   原注释写「交点桩号 = ZH + 切线长，是派生量，
+                                                          --   故 DDL 里没有它的列」—— **前提是错的**：
+                                                          --   .JD 本来就给了它（f10[0]），实测 8/8 与派生值
+                                                          --   吻合（差 ≤2.4e-8 m，纯浮点噪声）。两条路互相
+                                                          --   独立，正好用来对账（见 verify 的一致性检查）。
                                                           --   沿用源文件写法（.JD 里就写 QD/ZD）。
                                                           --   同域 element_type 用英文，此处例外是**故意的**
     x_coord            numeric(16,6),                     -- 交点大地坐标 X（两切线求交，派生）

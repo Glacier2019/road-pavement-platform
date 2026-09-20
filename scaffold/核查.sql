@@ -370,3 +370,34 @@ select table_name as 表, count(*) as 总列数,
   from information_schema.columns
  where table_name in ('earthwork_section', 'roadbed_design_point')
  group by table_name order by 1;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ⑭ ★ v0.5：alignment_pi 补 station_km（交点桩号）
+--    原注释称「交点桩号 = ZH + 切线长，是派生量，故 DDL 里没有它的列」——
+--    **前提是错的**：.JD 第 3 列「本点桩号」本来就给了它（jd.py 的 f10[0] 早在读）。
+--    "可派生"不等于"源里没有"：源里给了却不存，就永远没有第二个值可比。
+-- ─────────────────────────────────────────────────────────────────────────────
+
+\echo '── ⑭-1 每个交点都有桩号（必须 0 行空值）──'
+select pi_seq, pi_type, station_km
+  from alignment_pi where section_id = 6 and station_km is null order by pi_seq;
+
+\echo '── ⑭-2 交点桩号必须落在线路范围内且严格递增 —— 必须 0 行 ──'
+with r as (select start_station_km as s, end_station_km as e from road_section where id = 6)
+select a.pi_seq, a.station_km as 本点桩号, b.station_km as 下一点桩号
+  from alignment_pi a join alignment_pi b
+    on b.section_id = a.section_id and b.pi_seq = a.pi_seq + 1
+ where a.section_id = 6 and b.station_km <= a.station_km
+union all
+select pi_seq, station_km, null from alignment_pi, r
+ where section_id = 6 and (station_km < r.s or station_km > r.e);
+
+-- ⑭-3 ★ 跨源对账**不在 SQL 里做**（说清楚为什么，免得下一个人来补一条假的）
+--   真正的对账是「落库的交点桩号」vs「.JD 文件第 3 列『本点桩号』」——
+--   而 **.JD 不在库里**（它是导入的源，不是表），SQL 拿不到另一边，
+--   在这里硬写只能写出一条**恒真**的检查（那就是最糟的那种）。
+--   所以这条对账落在 tests/contract/test_design_import.py：
+--     ★★ station_km 与 .JD 的「本点桩号」逐条吻合（两条独立路径对账）
+--   外加一条元测试（把桩号改错 0.5 km，断言必须响），证明它不是空的。
+--   实测本工程 8/8 吻合，差 6e-9 ~ 2.4e-8 m（纯浮点噪声）。
