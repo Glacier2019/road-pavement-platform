@@ -2383,12 +2383,47 @@ def main() -> int:
     # 变红是对的（它抓住了行为变化）。103/104 是不是 .DMX/.ZDM 已从库里核实：
     #   103 = 毕设.DMX         104 = 纵断面设计拟合.ZDM
     # 107 = .SUP、106 = .WID 均已从库里核实（design_file.file_kind_code ↔ 文件名）
-    check("parse_status 只对已实现适配器的后缀给 ok（实测 7 个）",
+    # 7 → 10：补进 .CTR(108)/.lj(110)/.tf(111) 三个**早已实现却漏登记**的后缀。
+    # 这条断言变红是对的 —— 它又一次抓住了行为变化。
+    check("parse_status 只对已实现适配器的后缀给 ok（实测 10 个）",
           sorted(f["file_kind_code"] for f in planned["tables"]["design_file"]
                  if f["parse_status"] == "ok")
-          == ["101", "102", "103", "104", "106", "107", "109"],
+          == ["101", "102", "103", "104", "106", "107", "108", "109", "110", "111"],
           str([f["file_kind_code"] for f in planned["tables"]["design_file"]
                if f["parse_status"] == "ok"]))
+
+    # ★★ 四态必须分得开 —— 把「读不了」和「还没写」混成一句，会让人去写一个
+    #    永远写不出来的适配器（.gtm/.BDM/.HDMSJ 就是这种）。
+    #
+    #    ⚠ 这里必须**喂一个真目录**：上面那次 plan_project(project_dir=None)
+    #    根本没看磁盘，此时报 absent 就是撒谎（「没去看」≠「看了没有」）。
+    #    所以下面造一个临时目录，按真实后缀各放一个空文件 —— 测的是
+    #    **分类逻辑**，不是文件内容。
+    import tempfile
+    with tempfile.TemporaryDirectory() as _td:
+        for _suf in (".gtm", ".BDM", ".HDMSJ", ".HDM", ".dq"):
+            (pathlib.Path(_td) / ("x" + _suf)).write_bytes(b"")
+        _p2 = di.plan_project(po, project_dir=_td)
+    _st = {f["file_kind_code"]: f["parse_status"]
+           for f in _p2["tables"]["design_file"]}
+    check("★ 二进制源记 blocked（.gtm 115 / .BDM 120 / .HDMSJ 121）",
+          (_st.get("115"), _st.get("120"), _st.get("121")) == ("blocked", "blocked", "blocked"),
+          str({k: _st.get(k) for k in ("115", "120", "121")}))
+    check("★ 文件不在磁盘上记 absent（.3DR 118）", _st.get("118") == "absent", str(_st.get("118")))
+    check("★ 有源、可解析、只是没写适配器的才记 pending（.HDM 105 / .dq 114）",
+          (_st.get("105"), _st.get("114")) == ("pending", "pending"),
+          str({k: _st.get(k) for k in ("105", "114")}))
+    check("★ blocked 的 parse_note 必须写明实测依据（不是一句「读不了」）",
+          all("不可解析" in f["parse_note"] for f in planned["tables"]["design_file"]
+              if f["parse_status"] == "blocked"))
+
+    # ★★ 钉住：**凡是 adapters/weidi 里 IMPLEMENTED 的段，其后缀必须在
+    #    _IMPLEMENTED_SUFFIX 里**。这张表是手抄的，就会漂 —— .ctr/.tf/.lj
+    #    就是这样漂成 pending 的。让测试来钉，而不是靠记性。
+    _seg2suf = {v: k for k, v in di._IMPLEMENTED_SUFFIX.items()}
+    _missing = sorted(seg for seg in weidi.IMPLEMENTED if seg not in _seg2suf)
+    check("★★ 元测试：IMPLEMENTED 的每个段都在 _IMPLEMENTED_SUFFIX 里（表不会漂）",
+          not _missing, f"漏了 {_missing}")
     attr = planned["tables"]["section_design_attr"][0]
     check("section_design_attr 的 12 个属性都来自 .PRJ（不是猜的）",
           attr["road_grade"] == "二级公路" and attr["design_speed_kmh"] == 60

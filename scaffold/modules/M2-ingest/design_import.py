@@ -910,10 +910,34 @@ ARCHIVE_TABLES = ("design_project", "road_line", "road_section",
                   "section_design_attr", "design_file")
 
 #: 已实现适配器的后缀 → 该文件可解析。用于 design_file.parse_status。
+#  ⚠ 这张表曾漏掉 .ctr/.tf/.lj 三个**已经实现**的后缀，导致它们被标成 pending
+#  （"适配器尚未实现"）—— 表是手抄的，就会漂。所以下面有一条测试钉住：
+#  **凡是 adapters/weidi 里 IMPLEMENTED 的段，其后缀必须在这张表里**。
 _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
                        ".pm": "alignment_element", ".prj": "design_project",
                        ".dmx": "profile_ground_point", ".zdm": "profile_grade_point",
-                       ".sup": "superelev_transition", ".wid": "roadbed_width"}
+                       ".sup": "superelev_transition", ".wid": "roadbed_width",
+                       ".ctr": "design_control", ".tf": "earthwork_section",
+                       ".lj": "roadbed_design_point"}
+
+#: **存在、但结构上解不开**的后缀 → 为什么。parse_status 记 "blocked"。
+#  逐个实测过文件头，不是猜的：
+#    .gtm   魔数 `HB  HINT40_GROUP_DTM_VER6`，之后即二进制（数模组索引）
+#    .bdm   第 1 行 `HB  HINTCAD5.84_HDMSJ_SHUJU`，**之后是 zlib 流**（实测偏移 16 起，
+#           解出 53903 字节二进制结构；且流被截断，eof=False）
+#    .hdmsj 第 1 行与 .bdm **逐字节相同**（同一个魔数），之后同样是二进制
+#           —— 两个不同用途的文件共用一个魔数，光看魔数分不开，必须看后缀
+#    .dtm   二进制数模（三维地形模型本体）
+#    .tsf   文件头 `.Standard Jet DB` —— **Microsoft Access 数据库**，不是文本
+#  → 这些**不是"适配器还没写"**，是"按现有手段读不了"。两者混为一谈会让人去写
+#    一个永远写不出来的适配器。故单列一类，并在 parse_note 里写清实测依据。
+_BLOCKED_SUFFIX = {
+    ".gtm":   "二进制数模组索引（魔数 HINT40_GROUP_DTM_VER6），非文本",
+    ".bdm":   "魔数行后为 zlib 压缩的二进制结构，需专有工具",
+    ".hdmsj": "与 .bdm 共用魔数，其后为二进制结构，需专有工具",
+    ".dtm":   "二进制三维数模本体，非文本",
+    ".tsf":   "Microsoft Access 数据库（.Standard Jet DB），需 ODBC/Jet 引擎",
+}
 
 
 def _basename(rel_path: str | None) -> str | None:
@@ -1018,10 +1042,12 @@ def _plan_design_files(prj: Mapping[str, Any],
                        *, project_dir: Any = None) -> tuple[list[dict], list[str]]:
     """``[文件名]`` → ``design_file`` 行。返回值第二项是被跳过的（附原因）。"""
     on_disk: dict[str, str] = {}
+    scanned = False
     if project_dir is not None:
         import pathlib
         d = pathlib.Path(project_dir)
         if d.is_dir():
+            scanned = True
             for p in d.iterdir():
                 if p.is_file():
                     on_disk.setdefault(p.suffix.lower(), p.name)
@@ -1043,11 +1069,24 @@ def _plan_design_files(prj: Mapping[str, Any],
         note = None
         if suffix in _IMPLEMENTED_SUFFIX:
             status, note = "ok", f"适配器已实现（{_IMPLEMENTED_SUFFIX[suffix]}）"
+        elif suffix in _BLOCKED_SUFFIX:
+            # ★ 与 pending 分开：这不是"还没写适配器"，是"按现有手段读不了"。
+            status, note = "blocked", f"结构上不可解析：{_BLOCKED_SUFFIX[suffix]}"
         else:
             status, note = "pending", "适配器尚未实现该段解析"
-        if actual is None:
-            note = (note or "") + "｜目录内未找到该后缀的文件"
-        elif actual != declared:
+        if scanned and actual is None:
+            # ★ 只有**确实去看过**（给了 project_dir 且目录存在）才能说 absent。
+            #   「没去看」和「看了没有」是两件事 —— 前者报 absent 就是撒谎。
+            #   四态含义各不同，混成一句会让人去写一个永远写不出来的适配器：
+            #     ok      = 适配器已实现
+            #     blocked = 存在，但结构上读不了（二进制／需专有工具）
+            #     pending = 有源、可解析，只是适配器还没写
+            #     absent  = **去看过了，源里根本没有这个文件**
+            status = "absent"
+            # 说明**整个换掉**，不能把上面那句「适配器尚未实现」接在后面 ——
+            # 那样会自相矛盾（文件都不在，还谈什么适配器）。
+            note = "目录内未找到该后缀的文件（工程声明了槽位，导出时未带上）"
+        elif actual is not None and actual != declared:
             note = (note or "") + f"｜实际磁盘文件名 {actual}（工程声明的是 {declared}，导出时改过名）"
         rows.append({
             "file_kind_code": code,
