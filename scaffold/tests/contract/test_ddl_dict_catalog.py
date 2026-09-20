@@ -156,6 +156,37 @@ def main() -> int:
         check("数据字典存在且可解析", False, f"未找到或解析为空：{DICT_PATH}")
         return 1
 
+    # ── 0) DDL 文件本身 ────────────────────────────────────────────────
+    #
+    # ★★ 这一节是为一个**真实发生过的错**加的，不是假设。
+    #
+    # 背景：本套件的**每一个**测试都把 DDL 文件名**写死**成
+    # `10_ddl_v0.5.sql`（DDL_PATH 常量）。所以当仓库里同时躺着第二个
+    # `10_ddl_v0.6.sql` 时，**没有任何测试会去看它** —— 它对全部断言完全隐形。
+    #
+    # 真实案例：v0.5 那一版曾把 DDL 改名成 v0.6（准备升版），`git add` 进去了；
+    # 后来决定"留在 v0.5、只写迁移脚本"，**磁盘上改回了 v0.5，但 v0.6 已留在 git 里**
+    # —— 于是仓库里多了一个被跟踪的幽灵文件：
+    #     · 文件名写 v0.6
+    #     · 文件头写 v0.5
+    #     · 内容 55 张表，**没有 K 节**（是加 cross_section_ground_point 之前的快照）
+    # 危险在于：谁要找 DDL，看到 `10_ddl_v0.6.sql` 会打开它，拿到
+    # **55 张表、少一张**的结果 —— 一个看起来更"新"、其实更旧的错误答案。
+    #
+    # 所以这里钉两件事：**只能有一个 DDL 文件**，且**文件名版本必须等于文件头版本**。
+    print("\n=== 0) DDL 文件本身：唯一，且文件名版本 == 文件头版本 ===")
+    _ddl_files = sorted((ROOT / "sql").glob("10_ddl_v*.sql"))
+    check("sql/ 下只有一个 10_ddl_v*.sql（多出来的那个对所有测试隐形）",
+          len(_ddl_files) == 1,
+          f"找到 {[p.name for p in _ddl_files]}"
+          f" —— 若非本测试引用的那个，请确认它不是改名残留的幽灵" if len(_ddl_files) != 1 else "")
+    _head = DDL_PATH.read_text(encoding="utf-8")[:2000]
+    _hm = re.search(r"—\s*DDL\s+(v[0-9][0-9.]*)\s*$", _head, re.M)
+    _nm = re.search(r"10_ddl_(v[0-9][0-9.]*)\.sql$", DDL_PATH.name)
+    check("DDL 文件名版本 == 文件头版本（改名残留会让两者不一致）",
+          bool(_hm and _nm) and _hm.group(1) == _nm.group(1),
+          f"文件名 {_nm.group(1) if _nm else '?'} vs 文件头 {_hm.group(1) if _hm else '未找到'}")
+
     print("\n=== 1) 三处数量一致 ===")
     check("DDL 表数 == catalog 表数", len(dd) == len(cat),
           f"{len(dd)} vs {len(cat)}" if len(dd) != len(cat) else "")
