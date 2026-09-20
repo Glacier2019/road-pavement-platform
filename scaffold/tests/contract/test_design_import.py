@@ -639,10 +639,26 @@ def main() -> int:
         # 答案**仍然是"等级不该动"**，而且理由更强：这两张表是**逐桩的设计细节**，
         # 连"设计线"都不是 —— 它们是从设计线派生出来的土方量与路幅断面。
         # 一个"加了段就要改等级"的测试才是坏的：等级的定义是平的，实现进度不该动它。
-        check("★ 等级 = L3（.ZDM/.DMX 都实现：设计线与地面线同时具备）",
-              full["geometry_level"] == "L3"
+        # ★★ 第 6 次变红 —— 但**与前 5 次性质相反**，所以答案也相反。
+        #
+        # 前 5 次（加 .CTR / .SUP / .WID / .tf / .lj）红的时候，答案都是"等级不该动"：
+        #   那些段是**逐桩的设计细节**（超高/宽度/土方/路幅断面），
+        #   它们**不在** _LEVEL_RULES 的任何一条里 —— 实现了也不改变"平纵横齐不齐"。
+        #   所以那时改等级才是错的：等级的定义是平的，实现进度不该动它。
+        #
+        # 这次（加 .HDM 横断面地面线）**反过来**：
+        #   `cross_section` **就是 L4 的定义本身** —— _LEVEL_RULES 里写着
+        #   ("L4", ("cross_section",), "any")。它一直没实现，所以本工程一直封顶在 L3，
+        #   base.py 那句注释也一直写着「L4 …当前数据源拿不到，故本工程最高到 L3」。
+        #   .HDM 适配器落地后，L4 的**必要条件**第一次被满足 —— 等级**该动**。
+        #
+        # 判据（写给下一次红的人）：**看那个段在不在 _LEVEL_RULES 里**。
+        #   在  → 等级该动，改这条断言，并说明是定义内的段被实现了；
+        #   不在 → 等级不该动，是"顺手加了段"，改断言等于把测试改坏。
+        check("★ 等级 = L4（cross_section 就是 L4 的定义，.HDM 落地后第一次满足）",
+              full["geometry_level"] == "L4"
               and sorted(weidi.IMPLEMENTED)
-              == ["alignment_element", "alignment_pi", "design_control",
+              == ["alignment_element", "alignment_pi", "cross_section", "design_control",
                   "earthwork_section", "profile_grade_point", "profile_ground_point",
                   "roadbed_design_point", "roadbed_width",
                   "station_sequence", "superelev_transition"],
@@ -677,6 +693,7 @@ def main() -> int:
                      if f["parse_status"] == "ok")
               == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
                   "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
+                  "厂商版本 5.83",   # ← .HDM 横断面地面线（v0.5 K 节）
                   "厂商版本 5.84", "厂商版本 6.00", "厂商版本 6.00",
                   "厂商版本 7.0"],
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
@@ -756,18 +773,24 @@ def main() -> int:
               _n_bad == len(_turned) and len(_turned) > 0,
               f"抹平后 {_n_bad} 个线元终点方位角不符；右转且带曲率的线元共 {len(_turned)} 个"
               f"（右转共 {sum(1 for _e in _els if _e['turn_flag'] == -1)} 个，其中直线不受影响）")
-        check("缺口只剩 2 项（平纵都齐了）",
-              sorted(x["segment"] for x in full["gaps"])
-              == ["cross_section", "geometry_point"],
+        # ★ v0.5 K 节起缺口从 2 项降到 1 项：cross_section 的 .HDM 适配器做完了。
+        #   剩下 geometry_point 一项，且它的原因**不是**"没做适配器"——
+        #   见下面那条（source_absent：.3DR 源文件本工程根本没生成）。
+        check("缺口只剩 1 项（平纵横全齐，只剩一个无源的 .3DR）",
+              sorted(x["segment"] for x in full["gaps"]) == ["geometry_point"],
               str([x["segment"] for x in full["gaps"]]))
-        # ★ 缺口必须说**真正**的原因，不能只报"适配器没做"：
-        #   geometry_point 的源（.3DR 横断面三维数据文件）本工程**没生成** ——
-        #   源都不在，做不做适配器都导不出东西来，所以是 source_absent 而不是 not_supported。
-        #   cross_section 正相反：.HDM 文件在，只是适配器还没做 → not_supported。
-        #   两者含义不同，混为一谈会让人去写一个根本无源可读的适配器。
-        check("★★ 两个缺口的原因必须分别是 source_absent / not_supported（诊断说真正的原因）",
+        # ★★ 缺口必须说**真正**的原因，不能只报"适配器没做"。这条判据在
+        #    cross_section 被关掉**之后**反而更重要了：原先两项一对比就看得出区别
+        #    （一个有源、一个无源），现在只剩一项，**没有对照物了** ——
+        #    如果哪天有人把 reason 统一写成 not_supported，光看这一项看不出错。
+        #    所以这里显式钉死：唯一剩下的这项必须是 source_absent。
+        #    geometry_point 的源（.3DR 横断面三维数据文件）本工程**没生成** ——
+        #    源都不在，做不做适配器都导不出东西来。
+        #    对照：cross_section 之前是 not_supported（.HDM 文件在、只是适配器没做），
+        #    现在它已被实现、不再出现在 gaps 里 —— 而**正是它的存在**证明了两者含义不同。
+        check("★★ 剩下的唯一缺口原因必须是 source_absent（不是 not_supported）",
               {x["segment"]: x.get("reason") for x in full["gaps"]}
-              == {"geometry_point": "source_absent", "cross_section": "not_supported"},
+              == {"geometry_point": "source_absent"},
               str({x["segment"]: x.get("reason") for x in full["gaps"]}))
         # ★ .3DR 台账必须登记且标 absent —— "这个文件不存在"正是"这段没解析出来"的答案
         _dr = [f for f in full["source"]["files"] if f["kind"] == "横断面三维数据文件"]
@@ -1887,7 +1910,11 @@ def main() -> int:
               "profile_grade_point", "profile_ground_point",
               "superelev_transition", "roadbed_width",
               # v0.5 新增两张逐桩表：各对应一个段，表名与段名同名
-              "earthwork_section", "roadbed_design_point"}
+              "earthwork_section", "roadbed_design_point",
+              # v0.5 K 节：★这张**表名与段名不同名** —— 段是 cross_section，
+              # 表是 cross_section_ground_point。上面那句"表名与段名同名"对 .tf/.lj 成立，
+              # 对 .HDM 不成立，所以它单独列在这里并说明。
+              "cross_section_ground_point"}
              | {t for t, _ in di.CTR_ON_CONFLICT})
     check("plan 产出的表集合 = 已实现段对应的表 ∪ .CTR 的 9 张（漏一个键会静默少写一张表）",
           set(counts) == _want,
@@ -2435,11 +2462,13 @@ def main() -> int:
     #   103 = 毕设.DMX         104 = 纵断面设计拟合.ZDM
     # 107 = .SUP、106 = .WID 均已从库里核实（design_file.file_kind_code ↔ 文件名）
     # 7 → 10：补进 .CTR(108)/.lj(110)/.tf(111) 三个**早已实现却漏登记**的后缀。
+    # 10 → 11：.HDM(105) —— 它是**最后一个**"有源、可解析、只是适配器没写"的段，
+    #          v0.5 K 节把适配器做掉了，于是它从 pending 变成 ok。
     # 这条断言变红是对的 —— 它又一次抓住了行为变化。
-    check("parse_status 只对已实现适配器的后缀给 ok（实测 10 个）",
+    check("parse_status 只对已实现适配器的后缀给 ok（实测 11 个）",
           sorted(f["file_kind_code"] for f in planned["tables"]["design_file"]
                  if f["parse_status"] == "ok")
-          == ["101", "102", "103", "104", "106", "107", "108", "109", "110", "111"],
+          == ["101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111"],
           str([f["file_kind_code"] for f in planned["tables"]["design_file"]
                if f["parse_status"] == "ok"]))
 
@@ -2465,8 +2494,40 @@ def main() -> int:
     # ⚠ .dq 一度被我按"文本"放在这一条里 —— **错了**（只看前 32 字节只看到魔数行）。
     #   实测第 2 行起是裸二进制，5 行正好 386 字节 → 定长记录的结构化二进制；
     #   纬地官方亦说明交换格式是 .dqd，「无需转为 dq 格式」。故它归 blocked，不归 pending。
-    check("★ 有源、可解析、只是没写适配器的才记 pending（.HDM 105）",
-          _st.get("105") == "pending", str(_st.get("105")))
+    # ★★ .HDM(105) 从 pending 变 ok —— 四态里**最后一个 pending 被关掉了**。
+    #    这条断言原先叫「有源、可解析、只是没写适配器的才记 pending（.HDM 105）」，
+    #    它红的原因是**状态转移本身**，正是它该红的时候。
+    check("★ .HDM(105) 适配器落地后记 ok（原为 pending：有源、可解析、只是没写）",
+          _st.get("105") == "ok", str(_st.get("105")))
+    # ★★ 四态里 pending 在本工程**清空了** —— 但这不是删断言的理由。
+    #    四态的含义一个字没变，只是本工程每个声明的槽位现在都有归宿了：
+    #      ok      = 适配器已实现（11 个）
+    #      blocked = 存在，但结构上读不了（4 个：.gtm/.dq/.BDM/.HDMSJ）
+    #      absent  = 去看过了，源里根本没有（1 个：.3DR）
+    #      pending = 有源、可解析，只是适配器还没写（0 个）
+    #    ⚠ 这条断言会红有两种原因，**必须分清楚**（和上面 L3→L4 那条同一个道理）：
+    #      ① 有人加了个新槽位、还没来得及写适配器 → pending 是**对的**，改这条断言，
+    #         并在注释里写明新槽位是什么；
+    #      ② 有人加了个新槽位却**忘了归类**（既不在 _IMPLEMENTED_SUFFIX 也不在
+    #         _BLOCKED_SUFFIX）→ 它会被静默当成 pending，看着像"还没做"，
+    #         其实可能是"根本读不了"或"早就实现了"。这种情况**不许改断言**，
+    #         要去把它归类。
+    #    区分办法：看那个新后缀在 _IMPLEMENTED_SUFFIX / _BLOCKED_SUFFIX 里有没有。
+    #    ★ 数一下这个临时目录场景下的真实分布（**不是**真工程的分布，别混）：
+    #      临时目录里只放了 5 个空文件（.gtm/.BDM/.HDMSJ/.HDM/.dq），其余槽位磁盘上没有：
+    #        ok      1  = 105（.HDM —— 唯一"存在且实现了"的）
+    #        blocked 4  = 114(.dq) / 115(.gtm) / 120(.BDM) / 121(.HDMSJ)
+    #        absent 11  = 其余 11 个槽位（含 118 .3DR）
+    #        pending 0
+    #      这比"真工程里的分布"更适合测四态：**同一轮里 ok/blocked/absent 各有代表**，
+    #      三种含义当场分得开 —— 而 pending 恰好没有代表（本工程已无未实现的段）。
+    _pen = [f for f in _p2["tables"]["design_file"] if f["parse_status"] == "pending"]
+    check("★★ 同一轮里四态分得开：ok 1 / blocked 4 / absent 11 / pending 0",
+          (sum(1 for f in _p2["tables"]["design_file"] if f["parse_status"] == "ok"),
+           sum(1 for f in _p2["tables"]["design_file"] if f["parse_status"] == "blocked"),
+           sum(1 for f in _p2["tables"]["design_file"] if f["parse_status"] == "absent"),
+           len(_pen)) == (1, 4, 11, 0),
+          f"pending={[f['file_kind_code'] for f in _pen]}")
     check("★★ .dq 必须记 blocked —— 它看着像文本，其实是定长二进制记录",
           _st.get("114") == "blocked", str(_st.get("114")))
     check("★ blocked 的 parse_note 必须写明实测依据（不是一句「读不了」）",

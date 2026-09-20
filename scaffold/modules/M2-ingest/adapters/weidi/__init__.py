@@ -33,7 +33,7 @@ from typing import Any
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
-from . import ctr, dmx, jd, lj, pm, sta, sup, tf, wid, zdm
+from . import ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, wid, zdm
 
 VENDOR = "weidi-hintcad"
 
@@ -58,7 +58,13 @@ IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_e
                                 "profile_ground_point", "profile_grade_point",
                                 "superelev_transition", "roadbed_width",
                                 "design_control",
-                                "earthwork_section", "roadbed_design_point")
+                                "earthwork_section", "roadbed_design_point",
+                                # v0.5 K 节：.HDM 横断面地面线。★它一直在 CAPABILITIES 里，
+                                # 但不在 IMPLEMENTED 里 —— 即"声明支持、其实没解析器"。
+                                # 这个状态是**故意允许**的（CAPABILITIES 是能力清单，
+                                # IMPLEMENTED 是真做了的清单，两者不同才如实反映进度），
+                                # 但本工程有 .HDM 文件，长期停在"没解析器"就是静默丢数据。
+                                "cross_section")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -76,6 +82,7 @@ _PARSERS: dict[str, Any] = {
     "design_control": ctr,
     "earthwork_section": tf,
     "roadbed_design_point": lj,
+    "cross_section": hdm,
 }
 
 
@@ -320,6 +327,19 @@ def build_ir(project_dir: str | pathlib.Path, *,
         if segments.get("station_sequence"):
             warns += lj.check_against_stations(segments["roadbed_design_point"],
                                                segments["station_sequence"])
+
+    # ⑨ 横断面地面线（.HDM）与桩号序列对账。
+    #    ⚠ 与 ②（.DMX）**结论不同**，别照抄：`.DMX` 与 `.STA` 实测逐条相同
+    #    （332 = 332），那边"条数不等"就是**错**；`.HDM` 实测是 333 vs 332 ——
+    #    **多一个 5701.461 是正常的**（测量断面比设计桩号多一个加密点很常见）。
+    #    所以 hdm.check_against_stations 不把"条数不等"当错误，只报事实 + 方向：
+    #      · .HDM 有、.STA 无 → 正常（加密断面），但要说清有几个；
+    #      · .STA 有、.HDM 无 → 更可疑：桩号序列里有断面没测。
+    #    正因为 .HDM 不 ⊂ .STA，cross_section_ground_point 才直接带 station_km
+    #    而不是锚 station_id —— 这条对账的存在是为了**解释**那个设计，不是为了拦截。
+    if segments.get("cross_section") and segments.get("station_sequence"):
+        warns += hdm.check_against_stations(segments["cross_section"],
+                                            segments["station_sequence"])
 
     return make_ir(
         vendor=VENDOR,

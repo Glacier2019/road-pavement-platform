@@ -429,6 +429,38 @@ def _plan_ground_points(ir: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _plan_cross_section_points(ir: Mapping[str, Any],
+                               section_id: int) -> list[dict[str, Any]]:
+    """``cross_section_ground_point`` 行（横断面**地面线**测点：`.HDM` 逐点摊平）。
+
+    ★★ 与 :func:`_plan_ground_points` 的**关键差异**，别照抄那边：
+       `profile_ground_point` 锚 ``station_id``，所以 plan 里带内部 ``_station_m``，
+       落库时在 `load` 里换成真实 id。
+       **本表不锚 station_id** —— `.HDM` 实测 333 个断面 vs `station_sequence` 332 个
+       （多一个 5701.461），**不是子集**，换不出 id 来。
+       所以这里直接带 ``station_km``，落库时**不需要任何 id 解析**，也没有"挂空"风险。
+       这也正是它和 `.CTR`/`.SUP`/`.WID` 同类（直接带桩号）的原因。
+
+    嵌套载荷 → 扁平行：一个断面 → 左右两侧 → 每侧若干测点，摊成一行一个测点。
+    ``seq_no`` 从 1 起、与文件中的测量顺序一致；**每侧点数不落列**（那是 COUNT(*) 派生量）。
+    """
+    out: list[dict[str, Any]] = []
+    for sec in ir["segments"].get("cross_section") or []:
+        # IR 里是**米**（源文件原生单位），落库换算成 km —— 与全库 station*_km 一致。
+        station_km = round(sec["station_m"] / 1000.0, 6)
+        for side, pts in (("L", sec["left"]), ("R", sec["right"])):
+            for i, pt in enumerate(pts, start=1):
+                out.append({
+                    "section_id": section_id,
+                    "station_km": station_km,
+                    "side": side,
+                    "seq_no": i,
+                    "offset_m": round(pt["offset_m"], 4),
+                    "elev_diff_m": round(pt["elev_diff_m"], 4),
+                })
+    return out
+
+
 def _plan_elements(ir: Mapping[str, Any], section_id: int) -> list[dict[str, Any]]:
     """``alignment_element`` 行。**`curvature_1pm` 不再写入** —— 该列已随工单 #3 删除，
     κ 由 ``radius_start_m``/``radius_end_m`` 表达（缓和曲线单元的 κ 不是常数，一列装不下）。
@@ -561,6 +593,9 @@ def plan(ir: Mapping[str, Any], *, section_id: int,
         "roadbed_width": _plan_roadbed_widths(ir, section_id),
         "earthwork_section": _plan_earthwork_sections(ir, section_id),
         "roadbed_design_point": _plan_roadbed_design_points(ir, section_id),
+        # v0.5 K 节：.HDM 横断面地面线。★与上面那些不同，本表**不做 station_id 中转**
+        # （见 _plan_cross_section_points），所以它是这里唯一"plan 完就能直接写"的逐桩表。
+        "cross_section_ground_point": _plan_cross_section_points(ir, section_id),
     }
     # .CTR 一个段带 9 张表 —— 展开进同一张 tables 字典，键就是**物理表名**，
     # 故 load / verify / 测试都按表名取，不需要知道它们同源。
@@ -822,6 +857,17 @@ def load(ir: Mapping[str, Any], dao: Any, *,
             report["written"]["profile_ground_point"] = tx.insert(
                 "profile_ground_point", ground_rows, on_conflict=("station_id",))
 
+        # ⑤b 横断面地面线测点：**不做 station_id 中转**，直接写。
+        #     `.HDM` 不是 `station_sequence` 的子集（333 vs 332，多 5701.461），
+        #     换不出 station_id —— 故本表直接带 station_km。
+        #     对比 ⑤：那边查不到就抛 LoadError（因为锚错了会静默错位）；
+        #     这边**没有可锚错的 id**，风险由 UNIQUE(section_id, station_km, side, seq_no)
+        #     与解析器的"3 行一组 + 点数自校验"兜住。
+        if tables["cross_section_ground_point"]:
+            report["written"]["cross_section_ground_point"] = tx.insert(
+                "cross_section_ground_point", tables["cross_section_ground_point"],
+                on_conflict=("section_id", "station_km", "side", "seq_no"))
+
         # ⑥ 超高过渡变化点：锚 section_id，与其余 GE 表相同。
         #    六个横坡的 None 是**源文件 9999「忽略此数据」**，原样写 NULL，不填 0
         #    （见 _plan_superelev_transitions 的说明：填 0 会把"不约束"变成
@@ -924,7 +970,15 @@ _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
                        ".dmx": "profile_ground_point", ".zdm": "profile_grade_point",
                        ".sup": "superelev_transition", ".wid": "roadbed_width",
                        ".ctr": "design_control", ".tf": "earthwork_section",
-                       ".lj": "roadbed_design_point"}
+                       ".lj": "roadbed_design_point",
+                       # v0.5 K 节。★★ 这里填的是**段名** `cross_section`，不是表名
+                       # `cross_section_ground_point` —— 我第一版就填成了表名，被下面那条
+                       # 钉子当场抓住（"漏了 ['cross_section']"）。
+                       # 对照 `.ctr`：值是 `design_control`（段），而它落的 9 张表叫
+                       # slope_segment/ditch_segment/… —— 段名 ≠ 表名，这张表按**段**索引。
+                       # 这已经是本会话第二次栽在同一个混淆上（第一次在 ER 图脚本里，
+                       # 把段名写进了按表名索引的 WEIDI_SOURCE）。两次都是测试抓的。
+                       ".hdm": "cross_section"}
 
 #: **存在、但结构上解不开**的后缀 → 为什么。parse_status 记 "blocked"。
 #  逐个实测过文件头，不是猜的：
