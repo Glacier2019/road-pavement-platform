@@ -2418,13 +2418,18 @@ def main() -> int:
         _p2 = di.plan_project(po, project_dir=_td)
     _st = {f["file_kind_code"]: f["parse_status"]
            for f in _p2["tables"]["design_file"]}
-    check("★ 二进制源记 blocked（.gtm 115 / .BDM 120 / .HDMSJ 121）",
-          (_st.get("115"), _st.get("120"), _st.get("121")) == ("blocked", "blocked", "blocked"),
-          str({k: _st.get(k) for k in ("115", "120", "121")}))
+    check("★ 二进制源记 blocked（.gtm 115 / .dq 114 / .BDM 120 / .HDMSJ 121）",
+          (_st.get("115"), _st.get("114"), _st.get("120"), _st.get("121"))
+          == ("blocked", "blocked", "blocked", "blocked"),
+          str({k: _st.get(k) for k in ("115", "114", "120", "121")}))
     check("★ 文件不在磁盘上记 absent（.3DR 118）", _st.get("118") == "absent", str(_st.get("118")))
-    check("★ 有源、可解析、只是没写适配器的才记 pending（.HDM 105 / .dq 114）",
-          (_st.get("105"), _st.get("114")) == ("pending", "pending"),
-          str({k: _st.get(k) for k in ("105", "114")}))
+    # ⚠ .dq 一度被我按"文本"放在这一条里 —— **错了**（只看前 32 字节只看到魔数行）。
+    #   实测第 2 行起是裸二进制，5 行正好 386 字节 → 定长记录的结构化二进制；
+    #   纬地官方亦说明交换格式是 .dqd，「无需转为 dq 格式」。故它归 blocked，不归 pending。
+    check("★ 有源、可解析、只是没写适配器的才记 pending（.HDM 105）",
+          _st.get("105") == "pending", str(_st.get("105")))
+    check("★★ .dq 必须记 blocked —— 它看着像文本，其实是定长二进制记录",
+          _st.get("114") == "blocked", str(_st.get("114")))
     check("★ blocked 的 parse_note 必须写明实测依据（不是一句「读不了」）",
           all("不可解析" in f["parse_note"] for f in planned["tables"]["design_file"]
               if f["parse_status"] == "blocked"))
