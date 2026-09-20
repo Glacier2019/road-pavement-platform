@@ -49,7 +49,13 @@ grafanadata/
 # 唯一例外见 scaffold/sql/：契约②的真源 DDL 与数据字典**必须**随代码走，
 # 因为 compose 要挂载它建库、契约测试要读它比对，它们不是"成果"而是"契约"。
 output/
-docpipe/
+# ⚠ git 规则：父目录被排除后**无法**再单独放行其中的文件。
+#   所以要用「先全排、再放行目录、再全排、最后放行文件」这条链，
+#   否则 !docpipe/scripts/gen_er_weidi.py 是**无效**的（实测 check-ignore 仍报 ignored）。
+docpipe/*
+!docpipe/scripts/
+docpipe/scripts/*
+!docpipe/scripts/gen_er_weidi.py
 
 # work/ 只提交各目录的 README（说明"这个目录干嘛的"），
 # 里面学生的实验脚本/造数记录/草稿全部忽略，避免合并冲突。
