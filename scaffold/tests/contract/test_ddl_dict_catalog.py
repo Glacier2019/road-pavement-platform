@@ -223,6 +223,38 @@ def main() -> int:
     # 故意查一个不存在的表名，解析器应不会"认为它存在"
     check("解析器不虚报表存在", "no_such_table_xyz" not in dd and "no_such_table_xyz" not in dt)
 
+    print("\n=== 7) 命名统一（丁-2）：同一物理量的等价关系必须写在注释里 ===")
+    # 丁-2 定的是「不改列名，改注释」。那么**注释就是唯一载体** ——
+    # 它要是没写、或写错，这个决定就等于没做。故在此钉住。
+    def _has(text: str, *needles: str) -> bool:
+        return all(n in text for n in needles)
+
+    check("★ alignment_pi.x_coord 的注释写明与 alignment_element.start_x 同量",
+          _has(txt, "alignment_pi.x_coord", "alignment_element.start_x")
+          or re.search(r"comment on column alignment_pi\.x_coord is\s*'[^']*"
+                       r"alignment_element\.start_x", txt, re.I | re.S) is not None)
+    check("★ 两个同名 median_width_m 的注释**互相**提到对方（同名必须写明同量）",
+          len(re.findall(r"comment on column (?:section_design_attr|roadbed_width)\.median_width_m",
+                         txt, re.I)) == 2
+          and "roadbed_width.median_width_m" in txt
+          and "section_design_attr.median_width_m" in txt)
+    # ★ 谓词抽出来，好让元测试**真的把它跑在篡改过的文本上** ——
+    #   只断言"篡改后的文本与原文不同"是**假证明**（那说明不了检查会失败）。
+    _half_ok = lambda t: _has(t, "median_half_width_m", "半幅", "2 倍")  # noqa: E731
+    check("★★ median_half_width_m 的注释必须点明「半幅」，且点明与全宽列**差 2 倍**",
+          _half_ok(txt),
+          "半幅/全宽混用会差 2 倍，是本组唯一会出真数错的隐患")
+
+    # 非空转证明：把关键词从 DDL 里抹掉，**同一个谓词**必须变红。
+    # 一个永远不会失败的检查，比没有检查更糟。
+    _m1 = txt.replace("半幅", "XX")
+    _m2 = txt.replace("2 倍", "XX")
+    check("元测试：抹掉「半幅」后 _half_ok 确实为假（证明它不是恒真）",
+          _m1 != txt and not _half_ok(_m1))
+    check("元测试：抹掉「2 倍」后 _half_ok 确实为假（每个关键词都是必需的）",
+          _m2 != txt and not _half_ok(_m2))
+    check("元测试：原文下 _half_ok 为真（证明它不是恒假）", _half_ok(txt))
+
     print("\n" + "=" * 74)
     print(f"通过 {PASS} ｜ 失败 {FAIL}")
     print("=" * 74)

@@ -130,7 +130,7 @@
 --                             A12 加 NOT NULL/UNIQUE(section_id, element_seq)。
 --                             库尚无真实数据（GE 域为空表运行），重建即可；无需迁移脚本。
 --                       回滚：git revert 工单 #3；live 库删卷重建
---                       未做（留给 v0.4 定）：x_coord/y_coord 与 start_x/start_y 的命名统一
+--                       已定（丁-2，2026-09）：**不改列名，改注释** —— 见文末「命名统一」块
 --                 修订：按《纬地道路辅助设计系统教程 v5.88》第十三章校正 GE 域超高相关实体
 --                       起因：读教程 13.4/13.5 逐列定义，发现 A15 的两列**与源文件对不上**——
 --                         · 教程 13.4：*.wid 的 7 列是「起终点桩号、中央分隔带宽度、半侧路面宽度、
@@ -1590,3 +1590,49 @@ comment on column roadbed_design_point.elev_diff_01_m is
   '高差 1（文件第 14 列，可为负）。说明书未说个数与排法。'
   '实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— '
   '其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP。';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 命名统一（丁-2，2026-09 定）：**不改列名，改注释**
+--
+-- 背景：同一物理量在不同表里叫法不一致。评估过两条路 ——
+--   甲 真改名：要同时改 DDL、数据字典、全仓 SQL、下游 DAO/接口，波及面大；
+--   乙 只改注释：在库里把"这两个名字说的是同一个量"写下来。
+-- 选乙。理由：真正会出事的是**含义没写清**，不是名字不同；改名救不了含义，
+-- 注释能。而 `median_width_m` 那种**差 2 倍**的隐患（见下 ②）尤其如此 ——
+-- 它的危险来自"看不出是全宽还是半宽"，改名字同样看不出。
+-- ⚠ 本块只加注释，**不动任何列名、不改任何精度**。
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ① 坐标列：三处同一个量（大地坐标，米）
+--    实测三列类型一致，均为 numeric(16,6)；语义均为"平面/大地坐标"。
+comment on column alignment_pi.x_coord is
+  '交点大地坐标 X（米）。★与 alignment_element.start_x、geometry_point.x_coord **同量同名异**：'
+  '都是大地坐标 X，只是所属表不同（交点／线元／逐桩点）。丁-2 决定不改名，在此写明等价关系。';
+comment on column alignment_pi.y_coord is
+  '交点大地坐标 Y（米）。★与 alignment_element.start_y、geometry_point.y_coord 同量（见 x_coord 注释）。';
+comment on column alignment_element.start_x is
+  '线元起点大地坐标 X（米）。★与 alignment_pi.x_coord、geometry_point.x_coord 同量 —— '
+  '本表用 start_/end_ 前缀是因为一个线元有两个点，不是另一个物理量。';
+comment on column alignment_element.start_y is
+  '线元起点大地坐标 Y（米）。★与 alignment_pi.y_coord、geometry_point.y_coord 同量。';
+
+-- ② 中分带/中间带宽度：**两个表各有一个 median_width_m**，必须写清
+--    实测来源不同：
+--      section_design_attr.median_width_m ← .PRJ 字段 310「中间带」= 0.00（**项目级设置**）
+--      roadbed_width.median_width_m      ← .WID 逐桩路幅宽度        = 0.000（**逐桩值**）
+comment on column section_design_attr.median_width_m is
+  '中间带（中央分隔带）宽度 m，来自 **.PRJ 字段 310「中间带」**（实测 0.00）。'
+  '★★ 与 roadbed_width.median_width_m **同名**：指的是**同一个物理量**，但来源不同 —— '
+  '本列是**项目级设置**（全线一个值），那一列是 **.WID 的逐桩值**。两者本工程均为 0（二级公路无中分带）。'
+  '⚠ 两列**精度不同**（本列 numeric(6,2)＝1 cm，那一列 numeric(6,3)＝1 mm）。'
+  '查过 .PRJ 与教程，**没有依据说明这个差异是刻意的**，故如实记录为待考，不编理由。'
+  '跨表搬运这两列时请注意精度，别静默截断。';
+comment on column roadbed_width.median_width_m is
+  '中央分隔带宽度 m（0 = 无中央分隔带），来自 **.WID**，**逐桩值**。'
+  '★★ 与 section_design_attr.median_width_m 同名同量、来源不同（见那一列的注释，含精度差异警告）。';
+comment on column standard_cross_section.median_half_width_m is
+  '半幅中分带宽度 m（0 = 无中央分隔带）。'
+  '★★ **注意「半幅」二字**：这是 **1/2** 的中间带宽度，与 section_design_attr.median_width_m、'
+  'roadbed_width.median_width_m（都是**全宽**）**不是同一个量，数值差 2 倍**。'
+  '本表是标准横断面库（本工程 0 行）。跨表引用前务必确认要的是全宽还是半宽。';
