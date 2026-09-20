@@ -28,7 +28,7 @@ DDL = ROOT / "scaffold" / "sql" / "10_ddl_v0.5.sql"
 #: 当前 DDL 版本标签（只用于图上的文字与下面的自洽断言）。
 DDL_VERSION = "v0.5"
 #: 期望表数。v0.3=42 → v0.4=53 → v0.5=55。
-EXPECTED_TABLES = 55
+EXPECTED_TABLES = 56
 CATALOG = ROOT / "scaffold" / "modules" / "M3-rpdao" / "rpdao" / "catalog.py"
 OUT = ROOT / "output"
 
@@ -218,6 +218,11 @@ WEIDI_SOURCE: dict[str, tuple[list[str], str]] = {
     "road_section":        ([".PRJ 301/302 起终点桩号"], "now"),
     "section_design_attr": ([".PRJ 303–316 分段设计属性"], "now"),
     "design_file":         ([".PRJ 文件台账"], "now"),
+    # v0.5 K 节：★★ 键必须是**表名** cross_section_ground_point，不是**段名**
+    #   cross_section —— 这张表是"段名 ≠ 表名"的第一个实例（段是 cross_section，
+    #   表是 cross_section_ground_point）。原先本字典里混进过两个段名
+    #   （cross_section / retaining_wall），下面 main() 里那条断言就是为它们加的。
+    "cross_section_ground_point": ([".HDM 横断面地面线"], "now"),
     # ── 逐桩与线形 ────────────────────────────────────────────────────
     #    ★ 这张表与 scaffold/modules/M2-ingest/adapters/weidi/__init__.py
     #      的 SEGMENT_FILES 是**一一对应**的；改这里必须同时改那里。
@@ -261,10 +266,18 @@ WEIDI_SOURCE: dict[str, tuple[list[str], str]] = {
 #   那是 v0.3（42 表）时代的结论，**早就过期了**：cross_section / earthwork_section /
 #   roadbed_design_point 三张表在 v0.4/v0.5 都已建。现在只剩**真正没有对应表**的：
 WEIDI_ORPHAN = [
-    # ★ 段名 ≠ 表名：下面这两项在 M2 里**能解析**（有段），但平台**没建表**，
-    #   所以它们连"空表"都算不上 —— 数据解析出来就丢了。这是**真缺口**。
-    ("横断面地面线", ".HDM", "能解析出 cross_section 段，但 DDL **没有对应的表** → 解析完就丢"),
-    ("挡墙", ".dq / .dqd", "同上：无表。且 .dq 是定长二进制、.dqd 本工程未导出 → 双重的做不了"),
+    # ★ 段名 ≠ 表名：下面这一项在 M2 里**能解析**（有段），但平台**没建表**，
+    #   所以它连"空表"都算不上 —— 数据解析出来就丢了。这是**真缺口**。
+    #   第 4 个字段（可选）= "如果哪天建了表，表会叫什么"。留空 = 连表名都没定。
+    #   它的唯一作用就是让上面那条断言能在**缺口被补上时**响 —— 挡墙这张一旦建了
+    #   名为 retaining_wall 的表，断言立刻红，逼人把它挪进 WEIDI_SOURCE。
+    ("挡墙", ".dq / .dqd", "能解析出 retaining_wall 段，但 DDL 没有对应的表 → 解析完就丢。"
+                        "且 .dq 是定长二进制、.dqd 本工程未导出 → 双重的做不了",
+     "retaining_wall"),
+    # ⚠ 「横断面地面线（.HDM）」原先在这张表里，v0.5 K 节建了
+    #   cross_section_ground_point 之后**它就不该在这儿了** —— 已移到 WEIDI_SOURCE。
+    #   这个迁移正是下面那条断言要守的东西：本表里的每一项都必须是"DDL 里真的没有表"。
+    #   忘了移 → 图会上说"解析完就丢"，而库里其实躺着 2215 行。
     ("三维数模", ".DTM / .gtm", "地形三角网 —— 二进制，结构上读不了"),
     ("标准断面二进制", ".BDM / .HDMSJ", "与 .DTM 同族二进制；.BDM 是 zlib 压缩后截断"),
     ("土石方调配库", ".tsf", "Microsoft Access 数据库（Standard Jet DB），需专有工具"),
@@ -439,6 +452,34 @@ def main() -> None:
         f"表数应为 {EXPECTED_TABLES}（{DDL_VERSION}），实为 {len(tables)}"
     assert total_tabs == EXPECTED_TABLES, \
         f"域分组合计应为 {EXPECTED_TABLES}，实为 {total_tabs}"
+
+    # ★★ 段名 ≠ 表名：WEIDI_SOURCE 的每个键都必须是 DDL 里**真实存在的表**。
+    #
+    # 这条断言是为一个**真实发生过的错**加的，不是假设：
+    #   WEIDI_SOURCE 原先混进了 "cross_section" 与 "retaining_wall" 两个**段名**。
+    #   它们是 M2 能解析的"段"，但平台**没有同名的表**
+    #   （表叫 cross_section_ground_point；挡墙那张根本没建）。
+    #   混进来之后 node_html() 里的 WEIDI_SOURCE.get(tname) **永远取不到**，
+    #   于是图上那些表就静默地少了「◀纬地」标注 —— **不报错，只是少标**，
+    #   而"少标"看起来和"这张表确实不来自纬地"一模一样。
+    #
+    # ⚠ 这条断言只查**方向一**（键 ⊆ 表）。反方向（表 ⊆ 键）不查，因为
+    #   WEIDI_SOURCE 本来就只收录"来自纬地的表"，DDL 里多数表与纬地无关。
+    _bad_src = sorted(set(WEIDI_SOURCE) - set(tables))
+    assert not _bad_src, \
+        f"WEIDI_SOURCE 里有 DDL 中不存在的键（把**段名**当成**表名**写进来了？）：{_bad_src}"
+
+    # ★★ 反方向的钉子：WEIDI_ORPHAN 里的每一项都必须是"DDL 里**真的**没有表"。
+    #   这条守的是**过期的缺口描述** —— 缺口被补上之后忘了从这张表里挪走，
+    #   图就会继续说"解析完就丢"，而库里其实已经有数据了。
+    #   真实案例：.HDM 在 v0.5 K 节建表并落了 2215 行，而它当时还留在这张表里。
+    #   判据：ORPHAN 条目的第 3 段文字里提到的**段名**，在 DDL 里不许有同名表 ——
+    #   但段名与表名不同名（正是本脚本的主题），所以这里改用**人工声明的表名**：
+    #   第 4 个字段（可选）写明"如果建了表，表会叫什么"。留空表示"连表名都没定"。
+    _orphan_tabs = [o[3] for o in WEIDI_ORPHAN if len(o) > 3 and o[3]]
+    _bad_orph = sorted(set(_orphan_tabs) & set(tables))
+    assert not _bad_orph, \
+        f"WEIDI_ORPHAN 里声明为'无表'的项，DDL 里其实有表（缺口已补，该挪进 WEIDI_SOURCE）：{_bad_orph}"
 
     # 图1：全景
     # 文件名带上实际表数 —— 原先写死 "42表"，DDL 到 v0.5（55 表）后
