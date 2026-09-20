@@ -149,6 +149,12 @@ def _plan_grade_points(ir: Mapping[str, Any], section_id: int) -> list[dict[str,
             "grade_in_pct": p.get("grade_in_pct"),
             "grade_out_pct": p.get("grade_out_pct"),
             "grade_len_m": p.get("grade_len_m"),
+            # 错台（教程 §13.3 的 .ZDM 第 4/5 列）。DDL 里这两列**早就有**，
+            # 注释也写对了 —— 但 planner 此前**没往下带**，数据就丢在落库之前。
+            # 全 0 是正常值（一般公路主线没有错台），不是缺值，故原样写 0。
+            "offset_station_km": (round(p["offset_station_m"] / 1000.0, 6)
+                                  if p.get("offset_station_m") is not None else None),
+            "offset_elev_m": p.get("offset_elev_m"),
         })
     return out
 

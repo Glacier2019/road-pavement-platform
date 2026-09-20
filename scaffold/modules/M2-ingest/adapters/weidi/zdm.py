@@ -14,13 +14,26 @@
 数据行是它的实际内容，两者必须相等。`.STA`/`.DMX` 都没有这一行，
 只能靠外部对账；这个有，就别浪费。
 
-第 4、5 个字段含义未知
+第 4、5 个字段 = 标高错台（含义已由教程 §13.3 确定，不再是"未知"）
 -------------------------------------------------------------------------------
-实测 12 行里这两列**全部为 0**（`0.000` 与 `0.00000000`）。样本里全是 0 的列
-既证明不了含义，也证伪不了含义 —— 所以本解析器**不猜**：把它们按原名
-`field4_raw`/`field5_raw` 收进 IR，并在出现非 0 值时**告警**（不是拒绝）。
-理由是：全 0 时它们是"没信息"，非 0 时是"有信息但含义未知" ——
-后者若被静默丢弃，就是丢了一份我们看不懂但确实存在的设计数据。
+这两列一度按"含义未知"处理（`field4_raw`/`field5_raw`），理由是实测 12 行
+**全为 0**，样本里恒为 0 的列既证明不了也证伪不了含义。
+
+**但教程 §13.3 写得很清楚**（说明书正文，不是猜）：
+  「第三行开始每行中前三项数据分别为变坡点桩号，变坡点的设计标高，竖曲线的
+    半径（第一个变坡点和最后一个变坡点只能为 0）。其中**最后两项**数据是针对
+    互通立交匝道上出现**标高错台**现象而设置的，分别表示**标高错台位置的桩号**
+    及**错台的标高差值**（向上错开输正值，向下为负值，单位为米）。如果没有错台
+    现象或当前项目为一般公路主线时，这两项数据**同时输为 0** 即可。」
+
+所以：
+  · 第 4 项 = 错台位置桩号（米）        → `offset_station_m`
+  · 第 5 项 = 错台标高差（米，上正下负）→ `offset_elev_m`
+  · **全 0 不是"没信息"，而是"本项目没有错台"** —— 本工程是一般公路主线，
+    正是教程所说的全 0 情形。原来的"告警"是把**正常**当异常报，已删除。
+
+附带得到一条**免费的不变量**：教程说首末变坡点的竖曲线半径**只能为 0**
+（竖曲线不能伸出路线之外）。本文件首末恰为 0，故据此**拒绝**非 0 的首末半径。
 
 竖曲线几何是**派生**的
 -------------------------------------------------------------------------------
@@ -61,6 +74,10 @@ RADIUS_MAX_M = 1.0e7
 #: 数据行的字段数。多一列少一列都说明格式与预期不符，宁可拒绝也不猜列义。
 FIELD_COUNT = 5
 
+#: 错台标高差上限（米）。错台是匝道上几厘米级的标高突变，取 1 m 已是"大得不合理"，
+#: 用来抓第 4/5 列错位（那两列一旦串位，数值会完全不像错台）。
+OFFSET_ELEV_MAX_M = 1.0
+
 
 def detect(text: str) -> bool:
     """格式探测：这个文件像不像纬地 `.ZDM`？只认魔数，不靠扩展名。"""
@@ -72,7 +89,7 @@ def parse(text: str, *, file: str | None = None) -> dict[str, Any]:
     """解析 `.ZDM` → ``{"vendor_version": "5.83", "points": [...]}``
 
     ``points`` 每项：``{vpi_seq, station_m, elevation_m, vertical_curve_radius_m,
-    field4_raw, field5_raw}``（后两个是含义未知的原始列，见模块 docstring）。
+    offset_station_m, offset_elev_m}``（后两个是标高错台，见模块 docstring）。
 
     校验策略与 `.STA`/`.DMX` 一致：**宁可拒绝，不要猜。**
     设计高程直接决定填挖方与路面结构厚度，读错一列不会报错，只会让整条路的设计
@@ -132,8 +149,8 @@ def parse(text: str, *, file: str | None = None) -> dict[str, Any]:
         station_m = _f(0, "桩号")
         elevation_m = _f(1, "设计高程")
         radius_m = _f(2, "竖曲线半径")
-        f4 = _f(3, "第 4 列（含义未知）")
-        f5 = _f(4, "第 5 列（含义未知）")
+        offset_station_m = _f(3, "错台位置桩号")
+        offset_elev_m = _f(4, "错台标高差")
 
         if station_m < 0:
             raise SourceInvalid(f"桩号为负：{station_m}", file=file, line_no=i)
@@ -153,13 +170,29 @@ def parse(text: str, *, file: str | None = None) -> dict[str, Any]:
                 f"桩号未严格递增：{points[-1]['station_m']} → {station_m}"
                 f"（同桩号的两个变坡点无法解释）", file=file, line_no=i)
 
+        # 错台：教程 §13.3 说"没有错台现象或当前项目为一般公路主线时，这两项
+        # 同时输为 0"。两个 0 是**正常**（本项目就是这样），不是缺值。
+        # 但"一个 0 一个非 0"自相矛盾 —— 错台要么有桩号有高差，要么都没有。
+        if (offset_station_m == 0.0) != (offset_elev_m == 0.0):
+            raise SourceInvalid(
+                f"错台两列只有一项为 0（桩号 {offset_station_m} / 高差 {offset_elev_m}）"
+                f"—— 错台要么有位置有高差，要么都没有，半截数据无法解释",
+                file=file, line_no=i)
+        if offset_station_m < 0:
+            raise SourceInvalid(f"错台位置桩号为负：{offset_station_m}", file=file, line_no=i)
+        if abs(offset_elev_m) > OFFSET_ELEV_MAX_M:
+            raise SourceInvalid(
+                f"错台标高差 {offset_elev_m} m 超出合理区间 "
+                f"[{-OFFSET_ELEV_MAX_M}, {OFFSET_ELEV_MAX_M}]（疑似列错位）",
+                file=file, line_no=i)
+
         points.append({
             "vpi_seq": len(points) + 1,
             "station_m": station_m,
             "elevation_m": elevation_m,
             "vertical_curve_radius_m": radius_m,
-            "field4_raw": f4,
-            "field5_raw": f5,
+            "offset_station_m": offset_station_m,
+            "offset_elev_m": offset_elev_m,
         })
 
     # 自带计数行是一件礼物：拿它对自己的内容，不对外部文件。
@@ -170,6 +203,17 @@ def parse(text: str, *, file: str | None = None) -> dict[str, Any]:
     if len(points) < 2:
         raise SourceInvalid(f"变坡点不足 2 个（实为 {len(points)} 个），构不成纵断面",
                             file=file)
+
+    # ★ 教程 §13.3：「竖曲线的半径（第一个变坡点和最后一个变坡点**只能为 0**）」
+    #   —— 竖曲线不能伸出路线之外，首末变坡点只能是一侧切线。这不是"没写"，
+    #   是**规定必须为 0**；非 0 说明文件与规范不符（或列错位），宁可拒绝。
+    for p in (points[0], points[-1]):
+        if p["vertical_curve_radius_m"] != 0.0:
+            raise SourceInvalid(
+                f"{'首' if p is points[0] else '末'}个变坡点（桩号 "
+                f"{p['station_m']}）的竖曲线半径应为 0（教程 §13.3），"
+                f"实为 {p['vertical_curve_radius_m']}",
+                file=file)
 
     return {"vendor_version": version, "points": points}
 
@@ -209,10 +253,6 @@ def derive_grades(points: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], l
         else:
             p["grade_len_m"] = r * abs(p["grade_out_pct"] - p["grade_in_pct"]) / 100.0
 
-        for col in ("field4_raw", "field5_raw"):
-            if p[col]:
-                warn.append(f"变坡点 {p['vpi_seq']} 的 {col} = {p[col]}（样本里该列恒为 0，"
-                            f"含义未知，不可静默丢弃，请人工确认）")
     return points, warn
 
 
