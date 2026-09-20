@@ -2302,6 +2302,154 @@ def main() -> int:
                 _fail.append('清理失败：' + str(_cleanup_failed))
             print(f"  （已清理：路段 {sec_id} / 批次 {batch}）")
 
+    # ── 第 12b 组：.lj 的 11 个高差列 ↔ .SUP 的逐桩横坡（交叉验证）──────────
+    #
+    # ★ 这一组是 .lj 解析器 docstring 里那句「它们能反过来校验 .SUP」的兑现 ——
+    #   原文写着「（这一条留给契约测试，尚未做。）」，这里把它做了。
+    #
+    # 关系（实测 332/332 行成立，容差由源精度推出，见下）：
+    #
+    #     elev_diff_{i+1} − elev_diff_i = −σ · 宽度_i · 横坡_i / 100
+    #
+    #   其中 σ = +1（左半幅）/ −1（右半幅）。**σ 是必须的** —— .SUP 里左右两侧
+    #   的横坡用的是同一套符号（正常路拱两侧都写 −2.00），而高差是「离开旋转轴
+    #   就下降」，所以右半幅要翻号。漏掉 σ 时 332 行**全部**不符（最大差 0.14）。
+    #
+    #   10 个增量依次是：
+    #     左土路肩 / 左硬路肩 / 左中分带 / 左行车道 / （0）/（0）
+    #     右行车道 / 右中分带 / 右硬路肩 / 右土路肩
+    #   中间两个 0 是左右中分带（本工程宽 0）。**宽度取自 .lj 自己那一行**，
+    #   横坡取自 .SUP —— 两个文件互相印证，谁也没抄谁。
+    #
+    # 为什么容差是 2e-4：.SUP 的横坡只有**两位小数**（0.01%），乘最大宽度 3.5 m
+    #   得 3.5 × 0.005% = 1.75e-4；.lj 的高差是四位小数，半 ULP 5e-5。
+    #   取两者之和的量级 2e-4。实测最大残差 7.3e-5，远在界内 —— 也就是说
+    #   剩下的差**全是两处源文件的舍入**，不是模型不对。
+    print("\n" + "=" * 74)
+    print("第 12b 组  .lj 的 11 个高差列 ↔ .SUP 逐桩横坡（交叉验证，打真库）")
+    print("=" * 74)
+    try:
+        from rpdao.write import WriteDao as _WDx                  # noqa: PLC0415
+        _dao_x = _WDx(pg_dsn() or "", app_name="contract-test-12b")
+        _dao_x.open()
+    except Exception as exc:                                      # noqa: BLE001
+        SKIP[0] += 1
+        print(f"  ⊘ 跳过：{type(exc).__name__}: {str(exc)[:90]}")
+    else:
+        try:
+            _lj = _dao_x.query("""
+                select station_km,
+                       left_earth_shoulder_width_m l_es, left_hard_shoulder_width_m l_hs,
+                       left_lane_width_m l_ln, left_median_width_m l_md,
+                       right_median_width_m r_md, right_lane_width_m r_ln,
+                       right_hard_shoulder_width_m r_hs, right_earth_shoulder_width_m r_es,
+                       elev_diff_01_m e1, elev_diff_02_m e2, elev_diff_03_m e3,
+                       elev_diff_04_m e4, elev_diff_05_m e5, elev_diff_06_m e6,
+                       elev_diff_07_m e7, elev_diff_08_m e8, elev_diff_09_m e9,
+                       elev_diff_10_m e10, elev_diff_11_m e11
+                  from roadbed_design_point order by station_km""")
+            _sup = _dao_x.query("""
+                select station_km, earth_shoulder_left_pct p_es_l, hard_shoulder_left_pct p_hs_l,
+                       lane_left_pct p_ln_l, lane_right_pct p_ln_r,
+                       hard_shoulder_right_pct p_hs_r, earth_shoulder_right_pct p_es_r
+                  from superelev_transition order by station_km""")
+        finally:
+            _dao_x.close()
+
+        if not _lj or not _sup:
+            SKIP[0] += 1
+            print(f"  ⊘ 跳过：库里没有 .lj/.SUP 数据（roadbed_design_point={len(_lj)}，"
+                  f"superelev_transition={len(_sup)}）")
+        else:
+            import bisect as _bisect
+
+            _PCT = ["p_es_l", "p_hs_l", "p_ln_l", "p_ln_r", "p_hs_r", "p_es_r"]
+            _seq = [{"km": float(r["station_km"]),
+                     **{c: (None if r[c] is None else float(r[c])) for c in _PCT}} for r in _sup]
+            _kms = [x["km"] for x in _seq]
+
+            def _slope(col: str, km: float, *, carry: bool = False) -> float:
+                """取 km 处的横坡。
+
+                9999 → NULL。语义是「**跳过**」——横坡渐变穿过这个控制点继续走，
+                所以在它两侧的控制点之间**线性插值**。（仓库另一处断言已钉住
+                「跳过 ≠ 沿用上值」；这里 carry=True 就是那个错误的做法，留给变异用。）
+                """
+                if km <= _kms[0]:
+                    for x in _seq:
+                        if x[col] is not None:
+                            return x[col]
+                    return 0.0
+                i = _bisect.bisect_right(_kms, km + 1e-9) - 1
+                j = i
+                while j >= 0 and _seq[j][col] is None:
+                    j -= 1
+                k = i + 1
+                while k < len(_seq) and _seq[k][col] is None:
+                    k += 1
+                if j < 0 and k >= len(_seq):
+                    return 0.0
+                if j < 0:
+                    return _seq[k][col]
+                if k >= len(_seq) or carry:
+                    return _seq[j][col]
+                x0, x1 = _kms[j], _kms[k]
+                y0, y1 = _seq[j][col], _seq[k][col]
+                return y0 if x1 == x0 else y0 + (y1 - y0) * (km - x0) / (x1 - x0)
+
+            # (宽度列, 横坡列, σ)   σ=+1 左半幅 / −1 右半幅
+            _SPEC = [("l_es", "p_es_l", 1), ("l_hs", "p_hs_l", 1),
+                     ("l_md", "p_ln_l", 1), ("l_ln", "p_ln_l", 1),
+                     (None, None, 1), (None, None, 1),
+                     ("r_ln", "p_ln_r", -1), ("r_md", "p_ln_r", -1),
+                     ("r_hs", "p_hs_r", -1), ("r_es", "p_es_r", -1)]
+            _E = ["e%d" % i for i in range(1, 12)]
+            _TOL = 2e-4        # 见上面的推导：3.5m × 0.01% + 四位小数半 ULP
+
+            def _scan(*, flip_right: bool = False, carry: bool = False,
+                      drop_sigma: bool = False) -> tuple[int, float]:
+                """返回 (不符行数, 最大残差)。三个开关供变异用。"""
+                n_bad, worst = 0, 0.0
+                for r in _lj:
+                    km = float(r["station_km"])
+                    inc = [float(r[_E[i + 1]]) - float(r[_E[i]]) for i in range(10)]
+                    exp = []
+                    for w, c, sg in _SPEC:
+                        if w is None:
+                            exp.append(0.0)
+                            continue
+                        s = _slope(c, km, carry=carry)
+                        eff = 1 if drop_sigma else sg
+                        if flip_right and sg < 0:
+                            eff = -eff
+                        exp.append(-eff * float(r[w]) * s / 100.0)
+                    d = max(abs(a - b) for a, b in zip(inc, exp))
+                    worst = max(worst, d)
+                    if d > _TOL:
+                        n_bad += 1
+                return n_bad, worst
+
+            _bad, _worst = _scan()
+            check(f"★ .lj 的 11 个高差列可由 .SUP 逐桩横坡 + .lj 宽度复现"
+                  f"（{len(_lj)} 行全对，容差 {_TOL:g}）",
+                  _bad == 0, f"不符 {_bad} 行，最大残差 {_worst:.3e}")
+
+            # ── 变异：证明上面那条不是摆设 ────────────────────────────────
+            _b1, _w1 = _scan(flip_right=True)
+            check("★★ 元测试：右半幅不翻号 → 大量不符（σ 不是摆设）",
+                  _b1 > len(_lj) // 2, f"翻号后不符 {_b1}/{len(_lj)} 行，最大残差 {_w1:.3e}")
+            _b2, _w2 = _scan(drop_sigma=True)
+            check("★★ 元测试：整个丢掉 σ（左右都不翻）→ 也必须不符",
+                  _b2 > 0, f"丢 σ 后不符 {_b2}/{len(_lj)} 行，最大残差 {_w2:.3e}")
+            _b3, _w3 = _scan(carry=True)
+            check("★ 元测试：9999 按「沿用上值」而不是「插值穿过」→ 超高段必须不符",
+                  _b3 > 0, f"沿用上值后不符 {_b3}/{len(_lj)} 行，最大残差 {_w3:.3e}")
+            _lc = sum(1 for r in _lj
+                      if abs(_slope("p_ln_l", float(r["station_km"])) -
+                             _slope("p_ln_l", float(r["station_km"]), carry=True)) > 1e-9)
+            check("★ 元测试：确实存在插值≠沿用的桩号（否则上一条是空断言）",
+                  _lc > 0, f"{_lc}/{len(_lj)} 个桩号上两种读法不同")
+
     # ── 第 13 组：纬地 .PRJ 总项目文件（项目档案，不是几何段）──────────────
     print("\n第 13 组  纬地 .PRJ 总项目文件：项目档案 + 分段属性 + 文件台账")
     prj_raw = PRJ_FIXTURE.read_bytes()
