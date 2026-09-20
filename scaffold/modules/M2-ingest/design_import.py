@@ -931,14 +931,29 @@ def _default_desc(ir: Mapping[str, Any]) -> str:
 
 def _batch_remark(ir: Mapping[str, Any], planned: Mapping[str, Any],
                   verdict: Mapping[str, Any]) -> str:
-    """批次的备注：几何等级 / 交点来源 / 缺口与告警。
+    """批次的备注：**导入当时**的几何等级 / 交点来源 / 缺口与告警。
 
     ⚠ 几何等级与缺口**没有独立列可放** —— ``data_import_batch`` 是采集批次表，
     不含这几个字段。放在 remark 里意味着**不可查询**（只能看全文）。
     若以后要按等级挑批次，需要给该表加工单加列；此处不擅自扩表。
+
+    ★★ 「**导入当时**」这四个字是后加的，加它是因为一个**真实发生过的误读**：
+      毕设路段有两条批次 ——
+        id=8   WEIDI-BS-2026-09-17  备注「几何等级 L3｜…缺口 not_supported×1」
+        id=155 WEIDI-BS-2026-09-HDM 备注「几何等级 L4｜…缺口 source_absent×1」
+      两条都对：8 是 .HDM 适配器**还没写**时导的（当时确实 L3，缺口确实叫
+      not_supported），155 是写完 .HDM 之后导的（L4）。
+      但 8 那句原文只写「几何等级 L3」，**读起来像当前状态** —— 而它早就不是了。
+      这正是本会话反复出现的同一形状：**一个看起来权威的过期断言**。
+
+    ★ 等级是**派生量**，不该存（见契约⑤ README「推导得出，不允许外部传入」）。
+      所以补救不是加列，而是**说清这个数字的时点**。要拿**当前**等级有两条路：
+        · M3 ``GeRepository`` 现算（``rpdao/repo.py`` 的 completeness.geometry_level）；
+        · 或由 ``design_file.parse_status = 'ok'`` 反推段集合再 ``derive_level()``。
+      两者都以「当前库里有什么」为准，不受本备注的时点影响。
     """
     gaps = ir.get("gaps") or []
-    parts = [f"几何等级 {ir.get('geometry_level')}",
+    parts = [f"导入当时几何等级 {ir.get('geometry_level')}",
              f"交点来源 {planned['pi_source']}"]
     if gaps:
         by_reason: dict[str, int] = {}

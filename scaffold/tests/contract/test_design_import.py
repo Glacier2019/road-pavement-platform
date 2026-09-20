@@ -81,6 +81,10 @@ REAL_DIR = ROOT.parent / "docpipe" / "materials" / "纬地工程项目文件"
 
 PASS = 0
 FAIL = 0
+# ★ 用**列表**而不是整数：三处 ⊘ 跳过里有一处在函数内部，`SKIP += 1` 会把它
+#   变成那个函数的**局部变量**（UnboundLocalError: referenced before assignment）。
+#   改用可变对象就不必逐个函数加 `global` —— 这个坑我在同一次改动里就踩到了。
+SKIP = [0]    # 跳过（环境不具备，不是通过）—— 必须在汇总里显形，否则会读成"全绿"
 
 
 def pg_dsn() -> str | None:
@@ -2068,6 +2072,7 @@ def main() -> int:
         if not dao_e2e.ping():                     # ping 按设计吞异常只回真假，故必须显式判它
             raise RuntimeError("ping 失败（DSN 或库不可达）")
     except Exception as exc:                       # noqa: BLE001
+        SKIP[0] += 1
         print(f"  ⊘ 跳过：{type(exc).__name__}: {str(exc)[:90]}")
         print("    需要时：uv run --with psycopg[binary] --with jsonschema --with pyyaml <本文件>")
     else:
@@ -2176,7 +2181,15 @@ def main() -> int:
             check("批次已登记（source_type=file）",
                   dao_e2e.scalar("SELECT source_type FROM data_import_batch WHERE batch_no=%(b)s",
                                  {"b": batch}) == "file")
-            check("批次备注含几何等级", "几何等级 L2" in remark, remark[:90])
+            # ★★ 必须钉住「**导入当时**」这四个字，不能只钉「几何等级 L2」。
+            #   因为「导入当时几何等级 L2」**包含**「几何等级 L2」—— 只钉后者的话，
+            #   两种写法都会绿，等于没钉。
+            #   为什么这四个字重要：批次备注记的是**那一批导进来时**的等级快照，
+            #   不是当前等级。毕设路段就有活例子 —— id=8 写「导入当时几何等级 L3」、
+            #   id=155 写「…L4」，**两条都对**（中间 .HDM 适配器才写完）。
+            #   旧措辞「几何等级 L3」读起来像当前状态，而它早就不是了。
+            check("批次备注含几何等级，且写明是**导入当时**的快照",
+                  "导入当时几何等级 L2" in remark, remark[:90])
             check("批次备注说明了交点来源是**推导**", "交点来源 derived" in remark, remark[:90])
 
             # ③ 生成列由**数据库**算出，不是客户端编的
@@ -2388,6 +2401,7 @@ def main() -> int:
               ro["project"] == pj and ro["segments"] == po["segments"]
               and ro["files"] == po["files"] and ro["unmapped"] == po["unmapped"])
     else:
+        SKIP[0] += 1
         print("  ⊘ 跳过：真实 .PRJ 不在（docpipe/ 是 gitignored）")
 
     # ---- 应拒绝侧 ----
@@ -2588,6 +2602,7 @@ def main() -> int:
         if not d14.ping():
             d14 = None
     except Exception as exc:                                  # noqa: BLE001
+        SKIP[0] += 1
         print(f"  ⊘ 跳过 ensure_project 的真库用例：{type(exc).__name__}: {str(exc)[:80]}")
     if d14 is None:
         pass
@@ -2643,7 +2658,16 @@ def main() -> int:
         d14.close()
 
     print("\n" + "=" * 74)
-    print(f"通过 {PASS} ｜ 失败 {FAIL}")
+    print(f"通过 {PASS} ｜ 失败 {FAIL} ｜ 跳过 {SKIP[0]}")
+    if SKIP[0]:
+        # ★★ 跳过必须显形。原因：契约⑤ 的**第 12 组（落库器端到端）**依赖 psycopg，
+        #   而 `run_contract_tests.sh` 给本套件的依赖集里**没有** psycopg ——
+        #   于是那 25 条断言（含"批次备注必须写明导入当时"）在总运行器下**从未执行**，
+        #   而汇总只说"通过 489 ｜ 失败 0"，读起来和全绿一模一样。
+        #   这不是"跳过就等于没问题"：**空转不是通过**。
+        #   正确做法是给本套件补上 psycopg（已同步改 run_contract_tests.sh）；
+        #   这一行是兜底 —— 万一将来又在别的环境下缺依赖，得能一眼看见。
+        print(f"⚠ 有 {SKIP[0]} 处因环境不具备而**跳过** —— 跳过不等于通过，请确认这不是漏装依赖")
     print("=" * 74)
     if FAIL == 0:
         print("\n结论：契约⑤ 的 IR 结构、能力/实得/缺口自洽性、等级推导、落库器，")

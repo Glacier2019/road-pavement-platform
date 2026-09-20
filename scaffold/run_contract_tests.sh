@@ -24,6 +24,13 @@ export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PWD/../.uvpython}"
 
 PY_DEPS=(--with jsonschema --with pyyaml --with pydantic)
 DAO_DEPS=(--with "psycopg[binary,pool]==3.2.3")
+# ★★ PYDAO = PY 依赖 + psycopg。
+#   加它是因为一个**真实发生过的漏跑**：`design-导入` 原先标的是 `PY`，
+#   而 PY_DEPS 里没有 psycopg —— 于是契约⑤ 的第 12 组（落库器端到端，
+#   含"批次备注必须写明导入当时"等 25 条断言）在总运行器下**从未执行**，
+#   汇总却只说"通过 489 ｜ 失败 0"，和全绿读起来一模一样。
+#   实测：不装 psycopg → 通过 489；装了 → 通过 514。差的 25 条就是它们。
+PYDAO_DEPS=("${PY_DEPS[@]}" --with "psycopg[binary,pool]==3.2.3")
 API_DEPS=(--with fastapi==0.115.6 --with httpx --with "psycopg[binary,pool]==3.2.3")
 # M9 集成面：要 fastapi+httpx 起 TestClient，还要 pyyaml 读模块登记表；
 # 它**不需要** psycopg —— M9 不直连库（这正是 test_console.py 第 1 组钉的事）。
@@ -40,7 +47,7 @@ TESTS=(
   "m5-m10|M5–M10 模块产出契约（诊断/映射/养护/登记/工单）|M5–M10|PY|tests/contract/test_module_contracts.py"
   "m3-写权|契约③写入侧：表级写权守卫（应通过/应拒绝两侧）+ M2 不绕契约|M2/M3|PY|tests/contract/test_write_guard.py"
   "m1-表数|契约②：DDL ↔ 数据字典 ↔ catalog 三处表数一致|M1/M3|PY|tests/contract/test_ddl_dict_catalog.py"
-  "design-导入|契约⑤：设计导入 IR + 纬地 .STA/.JD/.pm 适配器 + 落库器（应通过/应拒绝两侧）|M2|PY|tests/contract/test_design_import.py"
+  "design-导入|契约⑤：设计导入 IR + 纬地适配器 + 落库器（应通过/应拒绝两侧）|M2|PYDAO|tests/contract/test_design_import.py"
   "m9-集成面|M9 集成面：页面只经 /gw 取数、不直连库、转发的边界（应通过/应拒绝两侧）|M9|CONSOLE|tests/contract/test_console.py"
 )
 
@@ -58,7 +65,7 @@ if [[ "${1:-}" == "--list" ]]; then
 fi
 
 FILTER="${1:-}"
-pass=0; fail=0; skipped=0; failed_names=()
+pass=0; fail=0; skipped=0; matched=0; failed_names=()
 
 printf '%-12s %-8s %s\n' "契约" "模块" "结果"
 echo "---------------------------------------------------------------"
@@ -66,6 +73,7 @@ echo "---------------------------------------------------------------"
 for t in "${TESTS[@]}"; do
   IFS='|' read -r name desc mod deps file <<<"$t"
   [[ -n "$FILTER" && "$name" != *"$FILTER"* ]] && continue
+  ((matched++))
 
   if [[ ! -f "$file" ]]; then
     printf '%-12s %-8s %s\n' "$name" "$mod" "跳过（文件不存在）"
@@ -74,6 +82,7 @@ for t in "${TESTS[@]}"; do
 
   case "$deps" in
     PY)  dep_args=("${PY_DEPS[@]}") ;;
+    PYDAO) dep_args=("${PYDAO_DEPS[@]}") ;;
     DAO) dep_args=("${DAO_DEPS[@]}") ;;
     API) dep_args=("${API_DEPS[@]}") ;;
     CONSOLE) dep_args=("${CONSOLE_DEPS[@]}") ;;
@@ -93,6 +102,33 @@ done
 
 echo "---------------------------------------------------------------"
 echo "通过 $pass ｜ 失败 $fail ｜ 跳过 $skipped"
+
+# ★★ 「一个都没跑」不是「全部通过」。
+#
+# 加这两条是因为**它们真的骗过我一次**：我用
+#     ./run_contract_tests.sh test_design_import
+# 去验证一条新加的钉子会不会响，脚本回「通过 0 ｜ 失败 0 ｜ 跳过 0」
+# 紧跟着一句「全部通过 ✓」—— 我据此认为"钉子没响"，其实是**根本没跑**。
+# 原因是过滤器按**套件名**子串匹配（上面 --list 里的 `design-导入`），
+# 而我传的是**文件名**。写错一个字，零匹配，全绿。
+#
+# 这正是一路在守的那条线：**空转不是通过**。一个永远不会失败的检查，
+# 比没有检查更糟 —— 因为它会让人以为已经检查过了。
+if (( matched == 0 )); then
+  echo "✗ 没有任何套件匹配过滤器：'${FILTER}'"
+  echo "  可用套件名（用 ./run_contract_tests.sh --list 看全）："
+  for t in "${TESTS[@]}"; do
+    IFS='|' read -r _n _d _m _p _f <<<"$t"
+    printf '    %s\n' "$_n"
+  done
+  echo "  ⚠ 注意：过滤器匹配的是**套件名**，不是测试文件名。"
+  exit 1
+fi
+if (( pass == 0 && fail == 0 )); then
+  echo "✗ 匹配到 $matched 个套件，但一个都没能跑（全部跳过？）—— 不能算通过"
+  exit 1
+fi
+
 if (( fail > 0 )); then
   echo "失败项：${failed_names[*]}"
   echo
