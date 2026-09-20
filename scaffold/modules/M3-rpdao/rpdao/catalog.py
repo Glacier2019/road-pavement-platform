@@ -56,7 +56,14 @@ DOMAINS: dict[str, Domain] = {
         "roadbed_trench", "structure_control", "earthwork_composition",
         "land_use_width", "extra_fill", "design_control_text",
         # ── J 节（v0.5）：逐桩土方断面 / 逐桩路基设计断面（教程 §13.9 / §13.6）──
-        "earthwork_section", "roadbed_design_point"),
+        "earthwork_section", "roadbed_design_point",
+        # ── K 节（v0.5 后补）：逐桩横断面地面线测点（教程 §13.8）──
+        #    原记录「经确认不做」，2026-09 用户改判为要做。理由与定性无关：
+        #    M2 的 .HDM 解析器**能**解析出 cross_section 段，而平台没有对应的表，
+        #    解析出来的数据没有地方存 ——「段能解析、表不存在」= 静默丢数据。
+        #    表名照内容走：内容实测是**外业测量**的地面线（高差 −31 ~ +23 m），
+        #    与 profile_ground_point（← .DMX 纵断面地面线）一纵一横同构。
+        "cross_section_ground_point"),
         # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
         (),
         "关系库",
@@ -121,7 +128,7 @@ CROSS_TABLES: tuple[str, ...] = (
 #       第二批（横断面/路基土方/构造物）顺延至 v0.5；其中「横断面地面线 .HDM」经确认不做。
 #       （原为 11 张："超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition，
 #         "路幅宽度"已按教程 §13.4 提前落到 v0.3 的 roadbed_width）
-EXPECTED_PHYSICAL_TABLES = 55
+EXPECTED_PHYSICAL_TABLES = 56
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -149,6 +156,7 @@ TABLE_OWNER: dict[str, str] = {
     "roadbed_trench": "M2", "structure_control": "M2", "earthwork_composition": "M2",
     "land_use_width": "M2", "extra_fill": "M2", "design_control_text": "M2",
     "earthwork_section": "M2", "roadbed_design_point": "M2",
+    "cross_section_ground_point": "M2",   # v0.5 K 节：.HDM 横断面地面线，同源（设计文件）
     # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
     # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
     # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，

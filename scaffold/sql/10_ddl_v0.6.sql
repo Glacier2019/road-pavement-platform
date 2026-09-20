@@ -43,10 +43,9 @@
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE slope_segment, ditch_segment,
 --                       standard_cross_section, roadbed_trench, structure_control,
 --                       earthwork_composition, land_use_width, extra_fill, design_control_text;
---   v0.5（本版）  56 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张
+--   v0.5（本版）  55 表：v0.4 全部保留（未改一列）＋ 新开 J 节「逐桩土方与路基设计断面」2 张
 --                       J1 earthwork_section        逐桩土方断面（.tf，**74 列**）
 --                       J2 roadbed_design_point     逐桩路基设计断面（.lj，**24 列**）
---                       K1 cross_section_ground_point 逐桩横断面地面线测点（.HDM）★后补，见下
 --                 依据：纬地教程 v5.88 §13.9（土方数据文件）、§13.6（路基设计中间数据）。
 --                 ★★ 建表原则（用户明确要求）：**照数据文件的样式，好追溯** ——
 --                       文件里有的列全建（.tf 74 列里 44 列本工程全 0 也建）、
@@ -64,17 +63,11 @@
 --                       .STA 桩号序列的 332 个。I 节（.CTR）不能，因为 .CTR 的
 --                       分段桩号**不是** .STA 桩号序列的子集。
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE earthwork_section,
---                       roadbed_design_point, cross_section_ground_point;
---                 迁移：已存在的库执行 sql/86_migrate_v04_ctr.sql、87_migrate_v05_lj_tf.sql、
---                       88_migrate_v05_pi_station.sql、89_migrate_v05_hdm.sql（均幂等）
---                 ★★ K1 的来历（一条**被推翻的"不做"**）：
---                       本行原写「其中「横断面地面线（.HDM）」经确认**不做**（用户指示）」。
---                       2026-09 用户改判为**要做** —— 理由与定性无关：M2 的 .HDM 解析器
---                       **能**解析出 cross_section 段，而平台**没有对应的表**，
---                       解析出来的数据没有地方存，**解析完就丢**。
---                       「段能解析、表不存在」= 静默丢数据，比明说"不做"更糟。
---                       定性（横断面**地面线**／外业测量，非设计面）有三份独立证据，
---                       见 K 节抬头 —— 名称照内容走：cross_section_ground_point。
+--                       roadbed_design_point;
+--                 迁移：已存在的库执行 sql/86_migrate_v04_ctr.sql（幂等）
+--                 待办：第二批（横断面/路基土方/构造物）顺延至 v0.5
+--                       说明：原 v0.3 待办写"随 v0.4"，但 v0.4 位次让给了 .CTR（教程 §13.10）。
+--                             其中「横断面地面线（.HDM）」经确认**不做**（2026-xx-xx 用户指示）。
 --   v0.3          44 表：v0.2 全部保留 ＋ 第一批 10 张新表（GE 域完整化）
 --                       ＋ A16 superelev_transition 超高过渡（原列在 v0.4 待办，提前落地）
 --                       ＋ A17 roadbed_width 路幅宽度（原列在 v0.4 待办，提前落地）
@@ -1597,81 +1590,6 @@ comment on column roadbed_design_point.elev_diff_01_m is
   '高差 1（文件第 14 列，可为负）。说明书未说个数与排法。'
   '实测可用 .CTR 的横坡按宽度累计复现，但仅 204/332 行吻合 —— '
   '其余 128 行是超高段，故这组列编码的是**逐桩真实横坡**，可反过来校验 .SUP。';
-
-
--- ═══════════════════════════════════════════════════════════════════════════
--- K. 逐桩横断面地面线（.HDM）
--- ═══════════════════════════════════════════════════════════════════════════
--- 依据：纬地教程 v5.88 §13.8「横断面地面线数据文件（*.hdm）」。
---   首句原文：「此文件记录**外业横断面测量**的成果数据。」
---   格式：首行版本串（本工程为 HINTCAD5.83_HDM_SHUJU），其后**每三行**一个桩号断面 ——
---         第 1 行 = 中桩号，第 2 行 = 左侧，第 3 行 = 右侧；
---         每行开头是该侧**总点数**，随后是各测点「相对于前一测点的平距、高差」。
---
--- ★★ 定性（三份独立证据一致）：这是**外业测量**得到的地面线，不是设计面。
---    横断面**设计**成果在 .tf（§13.9）里，已由 J1 earthwork_section 承接。
---      (1) 教程 §13.8 首句「此文件记录外业横断面测量的成果数据」；
---      (2) 本工程文件名「052201341刘其立道路毕设横断面地面线文件.HDM」；
---      (3) 文件内容实测 2215 个测点，高差 −30.994 ~ +22.976 m、39.6% 的测点
---          |高差| > 2 m —— 这是**地形起伏**的量级，路基设计面的填挖高差不会如此。
---
--- ★★ 与 .DMX 的关系：.DMX 是**纵**断面地面线，本表是**横**断面地面线，同族不同剖面。
---    .DMX 已由 profile_ground_point 承接（扁平表、station_id 外键）。
---    本表**故意不照抄**它的两处做法，各有实测依据：
---      ① 不用 station_id 外键 —— 实测 .HDM 有 333 个断面、station_sequence 只有 332 个，
---         .HDM 多一个 5701.461，**不是子集**。故照 I/J 节里 .CTR/.SUP/.WID 的规矩
---         直接带 station_km。（J 节能用 station_id，因为 .tf/.lj 正好 332 行。）
---      ② 不建父表 —— 一个桩号有左右两侧、每侧若干测点，看似三层，但
---         (section_id, station_km, side, seq_no) 一个四元组就能唯一定位一个测点；
---         父表能提供的信息（每侧几个点）是 COUNT(*) 派生量，按仓库铁律不落列。
---
--- ★ 只存**增量**：文件给的是「相对前一测点的平距/高差」，这里原样存。
---    累积平距、累积高差、各测点绝对高程都是**派生量**，不落列。
---
--- 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE cross_section_ground_point;
--- 迁移：已存在的库执行 sql/89_migrate_v05_hdm.sql（幂等）
--- ⚠ 变更史：本文件第 70 行原记录写着「横断面地面线（.HDM）经确认**不做**」。
---    2026-09 用户改判为**要做**。改判的理由与定性无关：M2 的 .HDM 解析器**能**解析出
---    cross_section 段，而平台**没有对应的表** —— 解析出来的数据没有地方存，解析完就丢。
---    「段能解析、表不存在」= 静默丢数据，这比明说"不做"更糟。
--- ═══════════════════════════════════════════════════════════════════════════
-
-CREATE TABLE IF NOT EXISTS cross_section_ground_point (
-    id           bigint        generated always as identity primary key,
-    section_id   bigint        not null references road_section(id),
-    station_km   numeric(12,6) not null,   -- 精度标准 1 mm，与全库其余 32 处 station*_km 一致
-    side         char(1)       not null check (side in ('L','R')),
-    seq_no       smallint      not null,   -- 该侧第几个测点，从 1 起
-    offset_m     numeric(10,4) not null,   -- 相对**前一测点**的平距（文件原样）
-    elev_diff_m  numeric(10,4) not null,   -- 相对**前一测点**的高差（文件原样，上正下负）
-    remark       text,
-    constraint uq_cross_section_ground_point unique (section_id, station_km, side, seq_no)
-);
-
-comment on table cross_section_ground_point is
-  '逐桩横断面地面线测点（纬地 .HDM，教程 §13.8）。一个桩号左右两侧各若干测点，一行一个测点。'
-  '★这是**外业测量**的地面线，不是设计面（三份证据见本文件 K 节抬头）。'
-  '★只存文件给的**增量**（相对前一测点的平距/高差）；累积值与绝对高程是派生量，不落列。'
-  '★不用 station_id 外键：实测 .HDM 有 333 个断面而 station_sequence 只有 332 个'
-  '（多 5701.461），不是子集，故照 .CTR/.SUP/.WID 的规矩直接带 station_km。';
-
-comment on column cross_section_ground_point.station_km is
-  '断面中桩号（.HDM 每三行里的第 1 行），单位 km，numeric(12,6) = 1 mm。'
-  '本工程实测 333 个断面，范围 0.000 ~ 5.805421 km。';
-
-comment on column cross_section_ground_point.side is
-  'L = 左侧（每三行的第 2 行），R = 右侧（第 3 行）。教程 §13.8 原文：'
-  '「第二行和第三行分别记录左侧和右侧横断面的数据」。';
-
-comment on column cross_section_ground_point.offset_m is
-  '相对**前一测点**的平距 m（文件原样，**非累积值**）。第一个测点的"前一测点"是中桩。'
-  '实测 2215 个测点：平距 0.019 ~ 50.000 m，中位 12.389 m。累积平距是派生量。';
-
-comment on column cross_section_ground_point.elev_diff_m is
-  '相对**前一测点**的高差 m（文件原样，上正下负，**非累积值**）。'
-  '实测 −30.994 ~ +22.976 m，中位 0.075 m；39.6% 的测点 |高差| > 2 m —— '
-  '这个量级正是"地形起伏"，也是判定本文件是**地面线**而非设计面的依据之一。'
-  '累积高差与各测点绝对高程都是派生量，不落列。';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════

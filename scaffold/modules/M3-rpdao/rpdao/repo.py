@@ -318,6 +318,11 @@ class GeRepository(DomainRepository):
         "profile_grade_point": ("profile_grade_point", "section_id"),
         "profile_ground_point": ("profile_ground_point", "station_id"),
         "geometry_point":      ("geometry_point",      "station_id"),
+        # ↓ v0.5 K 节新增。★锚定列是 **section_id 而不是 station_id**：
+        #   .HDM 实测 333 个断面，station_sequence 只有 332 个（多一个 5701.461），
+        #   **不是子集**，所以 cross_section_ground_point 直接带 station_km，
+        #   不走「逐桩经 station_sequence 中转」那套。计数因此与 .CTR/.SUP/.WID 同类。
+        "cross_section":       ("cross_section_ground_point", "section_id"),
     }
 
     #: 逐桩定位列的名字。值为它时，计数要经 `station_sequence` 中转。
@@ -330,10 +335,18 @@ class GeRepository(DomainRepository):
     #: 我一度把 earthwork_section / roadbed_design_point 加了进来，测试当场报
     #: 「M3 独有 2 段」—— 那条交叉核对正是为了挡住这种「顺手往里加」。
     #:
-    #: 属 DDL v0.4 第二批、**表还没建**的段。与"表已建但 0 行"含义不同：
+    #: 属 DDL 某批次、**表还没建**的段。与"表已建但 0 行"含义不同：
     #: 前者是 schema 没到，后者是解析器没做。混为一谈会让"为什么只有 L2"
     #: 这个问题得到错误答案。
-    SEGMENTS_NOT_BUILT: tuple[str, ...] = ("cross_section",)
+    #:
+    #: ★ v0.5 K 节起**清空** —— 最后一条 cross_section 已建表
+    #:   （cross_section_ground_point，见 89_migrate_v05_hdm.sql），
+    #:   故它已挪进上面的 SEGMENT_ANCHOR。
+    #:   ⚠ 但 **L4 仍然到不了** —— 这次变的是**原因**，不是结论：
+    #:     改之前：schema 没到（表不存在）
+    #:     改之后：解析器没做（表在，但 .HDM 适配器还没写，0 行）
+    #:   这个区别正是本类返回里 missing_not_built / missing_no_data 分开报的意义。
+    SEGMENTS_NOT_BUILT: tuple[str, ...] = ()
 
     @classmethod
     def count_sql(cls, seg: str) -> str:

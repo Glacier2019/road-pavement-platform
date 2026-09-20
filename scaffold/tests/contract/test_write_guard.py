@@ -185,12 +185,40 @@ def main() -> int:
     # 起因：SKELETON-GUIDE.md 长期写着「21 张可写 / 11 张只读」——那是 v0.2（32 表）时代的
     # 旧值，之后加了 10 张 GE 表却没人回头改它。**文档里的硬编码数字就是下一个漂移源**，
     # 所以把它钉成断言：改了 TABLE_OWNER 不改这句，本测试立刻红。
-    guide = ROOT / "SKELETON-GUIDE.md"
-    if guide.exists():
-        m = re.search(r"（(\d+) 张可写 / (\d+) 张只读）", guide.read_text(encoding="utf-8"))
-        ok = bool(m) and int(m.group(1)) == len(TABLE_OWNER) and int(m.group(2)) == len(readonly)
-        check("SKELETON-GUIDE.md 的写权数字与 catalog 一致", ok,
-              f"文档 {m.group(0) if m else '未找到'} ／ 实际 {len(TABLE_OWNER)} 可写 {len(readonly)} 只读")
+    # ⚠ 2026-09 扩展：原先只钉 SKELETON-GUIDE.md 一份。
+    #   contracts/design-import/README.md 里那句同样硬编码了数字，**却没有任何测试看着** ——
+    #   结果它从 39 连漂两轮（v0.4/v0.5 的 11 张表落地后没人回来改）到实测 51 才被发现。
+    #   那句旁边还写着「文档硬编码数字是下一个漂移源」—— 写在没人看着的文档里，
+    #   就只是一句自我安慰。故这里改成**扫全部列出的文档**。
+    DOCS_WITH_COUNT = (
+        "SKELETON-GUIDE.md",
+        "contracts/design-import/README.md",
+    )
+    found = 0
+    for rel in DOCS_WITH_COUNT:
+        f = ROOT / rel
+        if not f.exists():
+            check(f"{rel} 存在（它被本测试钉着，删了要显式改这里）", False, "文件不存在")
+            continue
+        # ⚠ 两处细节，都是踩过才写下的：
+        #   ① **不要带括号**。SKELETON-GUIDE 写成「（51 张可写 / 5 张只读）」，
+        #      而 design-import/README 写成「**51 张可写 / 5 张只读**」—— 数字在括号外。
+        #      带括号的 regex 只认前者，后者报"未找到该句式"，看着像没写、其实是写法不同。
+        #   ② **用 findall 而不是 search**。这两份文档里都留着**历史数字**
+        #      （"21/11"、"37→38"、"38→39"），search 只取第一处，取到旧的就白钉了。
+        #      要求**每一处**都对：写新数字时漏改旧的那句，这里立刻红。
+        hits = re.findall(r"(\d+) 张可写\s*/\s*(\d+) 张只读", f.read_text(encoding="utf-8"))
+        if hits:
+            found += 1
+        bad = [h for h in hits if (int(h[0]), int(h[1])) != (len(TABLE_OWNER), len(readonly))]
+        check(f"{rel} 的写权数字与 catalog 一致（每一处都要对）",
+              bool(hits) and not bad,
+              f"命中 {len(hits)} 处" + (f"，其中不符 {bad}" if bad else "，全部一致")
+              if hits else "未找到该句式")
+    # 非空转保证：如果哪天有人把句式改掉（regex 再也匹配不上），上面每条都会红 ——
+    # 但万一是 DOCS_WITH_COUNT 被清空，那就一条都不会跑，测试静默变成恒真。
+    check("写权数字钉子覆盖了至少 2 份文档（防止列表被清空后测试恒真）",
+          found == len(DOCS_WITH_COUNT) and found >= 2, f"实际命中 {found} 份")
 
     # GE 域骨架四表必须可写 —— 否则「导入一条新道路」在结构上就不可能
     # （road_line / road_section 原先是只读，只能靠 seed 种入）

@@ -328,8 +328,17 @@ def main() -> int:
     ok("GE 不提供「无 section 的平铺查」（路段一多就会静默串台）",
        not any(hasattr(repo_mod.GeRepository, m)
                for m in ("all_pis", "all_elements", "all_stations", "all_sections_flat")))
-    ok("SEGMENTS_NOT_BUILT 只声明了 v0.4 的横断面（与契约② 批次一致）",
-       repo_mod.GeRepository.SEGMENTS_NOT_BUILT == ("cross_section",))
+    # v0.5 K 节起这条清空了：cross_section 已建表（cross_section_ground_point），
+    # 故它挪进了 SEGMENT_ANCHOR。★注意这**不**意味着 L4 能到 ——
+    # 变的是原因（schema 没到 → 解析器没做），不是结论。
+    # 断言必须写成"空"，而不是删掉：删掉就再也拦不住"顺手塞一条进来"。
+    ok("SEGMENTS_NOT_BUILT 为空（cross_section 已建表，v0.5 K 节）",
+       repo_mod.GeRepository.SEGMENTS_NOT_BUILT == ())
+    # ★ 反向的钉子：它必须真的出现在 SEGMENT_ANCHOR 里 —— 只是从"没建"挪到"已建"，
+    #   不是从清单里消失。少了这条，"清空 SEGMENTS_NOT_BUILT" 就成了把段**删掉**。
+    ok("cross_section 已挪进 SEGMENT_ANCHOR（不是被删掉）",
+       repo_mod.GeRepository.SEGMENT_ANCHOR.get("cross_section")
+       == ("cross_section_ground_point", "section_id"))
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
