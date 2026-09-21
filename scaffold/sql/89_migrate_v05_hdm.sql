@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS cross_section_ground_point (
     id           bigint        generated always as identity primary key,
     section_id   bigint        not null references road_section(id),
     station_km   numeric(12,6) not null,   -- 精度标准 1 mm，与全库其余 32 处 station*_km 一致
-    side         char(1)       not null check (side in ('L','R')),
+    side         char(1)       not null check (side in ('L','R')),   -- ⚠ 历史写法，见文末注
+
     seq_no       smallint      not null,   -- 该侧第几个测点，从 1 起
     offset_m     numeric(10,4) not null,   -- 相对**前一测点**的平距（文件原样）
     elev_diff_m  numeric(10,4) not null,   -- 相对**前一测点**的高差（文件原样，上正下负）
@@ -120,4 +121,23 @@ COMMIT;
 -- 正确姿势是重跑一次导入（幂等），由 design_import 写入：
 --   cd scaffold && uv run --with "psycopg[binary,pool]==3.2.3" python3 <载入脚本> --write
 -- 留一个"看起来填上了、其实是猜的"值，比留空更糟。
+-- ============================================================================
+
+-- ============================================================================
+-- 【后记：本文件里 side 的写法是历史，不要再照抄】
+--
+-- 本文件建 `cross_section_ground_point` 时用了 `char(1) check (side in ('L','R'))`。
+-- 那是我自己发明的词表 —— `.HDM` 源文件**根本没有侧的标记**（靠"3 行一组"的
+-- 位置关系：桩号 / 左行 / 右行），侧是位置推出来的，脑子里没有现成词表可抄，
+-- 就随手写了单字母。而库里另外 7 张 side 表一直是 `varchar(8)` + `left`/`right`。
+--
+-- **本文件不改**：迁移是历史，改了就与已升级的库对不上。
+-- 修正走 `91_migrate_v05_side_vocab.sql`（升级路径），
+-- 而**全新安装的真源是 `10_ddl_v0.5.sql`** —— 那边已经是 varchar(8) + left/right。
+-- 注意 `docker-compose.skeleton.yml` 只把 `10_ddl_v0.5.sql` 挂进
+-- `docker-entrypoint-initdb.d/`，**本文件不会在全新安装时执行**。
+--
+-- ⚠ 这也暴露了一个还没做的检查：**没有测试验证"从 DDL 全新建库"与
+--   "从旧库逐条迁移上来"得到的结构一致**。目前靠人工保证。
+--   待办，记在这里以免忘掉。
 -- ============================================================================

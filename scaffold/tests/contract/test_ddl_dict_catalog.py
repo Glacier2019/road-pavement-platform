@@ -286,6 +286,73 @@ def main() -> int:
           _m2 != txt and not _half_ok(_m2))
     check("元测试：原文下 _half_ok 为真（证明它不是恒假）", _half_ok(txt))
 
+    print("\n=== 8) 侧词表统一：全库 side 列只能是 left / right ===")
+    # 【这个缺陷真实发生过】本会话给 `cross_section_ground_point` 写 DDL 时，
+    #   随手写了 `char(1) ... check (side in ('L','R'))`，而库里另外 7 张 side 表
+    #   一直是 `varchar(8)` + `left`/`right`。同一个库里两套侧词表。
+    #
+    #   危害是**静默**的：跨表查"左侧测点"时 `where side = 'left'` 在本表上
+    #   返回 **0 行且不报错** —— 正是本项目最怕的失败形态。
+    #
+    #   为什么会写错：`.HDM` 源文件**没有任何侧的标记**（靠"3 行一组"的位置关系：
+    #   桩号 / 左行 / 右行），侧是**位置推出来的**，脑子里没有现成词表可抄。
+    #   而源文件里**确实**写 `[LEFT]`/`[RIGHT]` 的是 `.WID` —— 注意那是**源文件**的
+    #   写法，库里的词表由解析器归一化。别把两者搞混（DDL 里 roadbed_width 那行
+    #   注释「实测为 [LEFT]/[RIGHT]」说的是源文件，**是对的**）。
+    #
+    #   所以这条检查放在 **DDL 层、离线可跑**：数据还没导进来就能拦住。
+    def _side_cols(text: str) -> list[tuple[str, str]]:
+        """返回 [(表名, 该行原文)]，只认**列定义**里的 side（缩进 + 行首）。
+
+        用行首缩进而不是 'side' 子串，是为了避开 `side_ditch`（边沟）这类
+        名字里带 side 的列 —— 否则会误报。
+        """
+        out: list[tuple[str, str]] = []
+        cur = ""
+        for line in text.splitlines():
+            m = re.match(r"\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)",
+                         line, re.I)
+            if m:
+                cur = m.group(1)
+                continue
+            if re.match(r"\s*side\s+", line):
+                out.append((cur, line.strip()))
+        return out
+
+    def _side_vocab_ok(text: str) -> bool:
+        """全库 side 列的词表一致：varchar(8)，且不许出现 'L'/'R' 这种单字母词表。"""
+        cols = _side_cols(text)
+        if len(cols) < 8:                      # 少一张就说明扫描坏了，不能算通过
+            return False
+        for _t, ln in cols:
+            if "varchar(8)" not in ln.lower():
+                return False
+            if re.search(r"'L'\s*,\s*'R'", ln):   # char(1) + L/R 那套
+                return False
+        return True
+
+    _cols = _side_cols(txt)
+    check(f"★ DDL 里带 side 列的表共 8 张（实为 {len(_cols)}）", len(_cols) == 8,
+          "；".join(t for t, _ in _cols))
+    check("★ 全库 side 列词表统一：varchar(8) 且无 'L'/'R' 单字母词表",
+          _side_vocab_ok(txt),
+          "；".join(f"{t}: {ln}" for t, ln in _cols if "varchar(8)" not in ln.lower()
+                    or re.search(r"'L'\s*,\s*'R'", ln)))
+
+    # 非空转证明：把词表改回那套错的，**同一个谓词**必须变红。
+    _bad = txt.replace("side         varchar(8)    not null check (side in ('left','right')),",
+                       "side         char(1)       not null check (side in ('L','R')),")
+    check("元测试：把 cross_section_ground_point 的 side 改回 char(1)+L/R 后必须变红",
+          _bad != txt and not _side_vocab_ok(_bad))
+    check("元测试：原文下 _side_vocab_ok 为真（证明它不是恒假）", _side_vocab_ok(txt))
+    # 换一个**真的会减少**的变异：删掉一张表的 side 列行。
+    # （一开始我写的是"把表名改掉"，那不减少表的数量，扫描照样找到 8 张 ——
+    #   变异本身选错了，红不了是当然的。变异必须真的改变被检查的事实。）
+    _short = txt.replace(
+        "    side         varchar(8) NOT NULL,              -- left / right\n", "", 1)
+    check("元测试：某张表的 side 列行被删掉（只剩 7 张）时也必须变红 —— 防扫描静默失效",
+          _short != txt and not _side_vocab_ok(_short))
+
     print("\n" + "=" * 74)
     print(f"通过 {PASS} ｜ 失败 {FAIL}")
     print("=" * 74)

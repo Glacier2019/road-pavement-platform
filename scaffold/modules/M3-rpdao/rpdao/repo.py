@@ -282,6 +282,24 @@ class GeRepository(DomainRepository):
     ORDER BY e.element_seq
     """
 
+    WIDTHS_SQL = """
+    SELECT side, seq_no, group_seq, station_km, median_width_m,
+           half_carriageway_width_m, extra_lane_flag, hard_shoulder_width_m,
+           earth_shoulder_width_m, extra_lane_file, remark
+    FROM roadbed_width
+    WHERE section_id = %(sid)s::bigint
+    ORDER BY station_km, side, group_seq, seq_no
+    """
+
+    SUPERELEV_SQL = """
+    SELECT transition_seq, station_km, earth_shoulder_left_pct, hard_shoulder_left_pct,
+           lane_left_pct, lane_right_pct, hard_shoulder_right_pct,
+           earth_shoulder_right_pct, remark
+    FROM superelev_transition
+    WHERE section_id = %(sid)s::bigint
+    ORDER BY transition_seq
+    """
+
     #: 几何完整度等级规则。**必须与 M2 `adapters/base._LEVEL_RULES` 一致。**
     #:
     #: 为什么要写两遍：M3 不许 import M2（模块之间只认契约，见架构约定），
@@ -394,6 +412,52 @@ class GeRepository(DomainRepository):
             "pis": self._dao.query(self.PIS_SQL, {"sid": section_id}),
             "elements": self._dao.query(self.ELEMENTS_SQL, {"sid": section_id}),
         }
+
+    def widths(self, section_id: int) -> list[dict[str, Any]]:
+        """某路段的**路幅宽度表**（`.WID`）。
+
+        ⚠ 三件事得先知道，否则会把这表用错：
+
+        ① **它是"变化点"表，不是"逐桩"表**。一行 = 一个宽度分组的起点，
+           不是每个桩号一行。实测毕设路段**只有 4 行**，而 `.WID` 覆盖
+           0.000–5701.461 m。想拿"某个桩号的宽度"必须**按桩号取最后一行**
+           （`<= 该桩号` 的 `station_km` 最大者），这里不替调用方做这个决定 ——
+           那是**业务语义**，不是取数。
+
+        ② 终点 5701.461 m **早于**路线终点 5805.421 m：后 103.960 m **没有**
+           路幅宽度数据。这是**源文件缺口**（实测该工程正是如此），不是解析漏了。
+
+        ③ `side` 是 **`left` / `right`**（全库 8 张 side 表统一这个词表），
+           同一桩号左右各一行（`group_seq` 区分同侧多组）。别假设"一行就是一个断面"。
+           源文件里写 `[LEFT]`/`[RIGHT]`，解析器负责归一化成小写、去括号。
+
+        ⚠ 与 GE 域其它变化点表一样，本表带 `station_km` 而**不带 `station_id`**：
+           变化点桩号（`.WID`/`.CTR`/`.SUP`/`.HDM`）不保证是 `station_sequence`
+           的子集，挂 FK 会拒掉合法数据。
+        """
+        return self._dao.query(self.WIDTHS_SQL, {"sid": section_id})
+
+    def superelevation(self, section_id: int) -> list[dict[str, Any]]:
+        """某路段的**超高过渡**（`.SUP`）：逐桩的六个横坡值（百分数）。
+
+        ⚠ ① 这是**控制点**表，不是逐桩表。实测毕设路段 76 行。**控制点之间
+              横坡是线性渐变的** —— 想拿某个桩号的横坡必须插值，直接取
+              "最后一行"是错的。（这一条不是推测：`.lj` 的 11 个高差列能由本表
+              复现，而**只有插值才对得上** —— 按"沿用上值"算有 55/332 行不符。
+              见 tests/contract/test_design_import.py 第 12b 组。）
+
+        ⚠ ② 源文件的 **9999 表示"忽略此数据"**，落库为 **NULL**。
+              语义是「横坡渐变**穿过**这个控制点继续走」，所以插值时要
+              **跳过 NULL 去找它两侧最近的非 NULL**，而不是把它当 0、
+              也不是把前一个值沿用它。
+
+        ⚠ ③ **左右两侧用的是同一套符号约定**。正常路拱两侧都写 −2.00，
+              超高段写 +4.00 / −4.00。所以"左比右高"这类判断不能直接比大小 ——
+              要按 `−σ·宽度·横坡` 折算成高差（σ = +1 左 / −1 右）。
+
+        列序按教程 §13.5：土路肩 / 硬路肩 / 行车道 / 桩号 / 行车道 / 硬路肩 / 土路肩。
+        """
+        return self._dao.query(self.SUPERELEV_SQL, {"sid": section_id})
 
     def completeness(self, section_id: int) -> dict[str, Any]:
         """几何完整度报告：**为什么是 L2 而不是 L3**，要能一眼看出来。

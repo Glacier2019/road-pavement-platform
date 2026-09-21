@@ -448,7 +448,12 @@ def _plan_cross_section_points(ir: Mapping[str, Any],
     for sec in ir["segments"].get("cross_section") or []:
         # IR 里是**米**（源文件原生单位），落库换算成 km —— 与全库 station*_km 一致。
         station_km = round(sec["station_m"] / 1000.0, 6)
-        for side, pts in (("L", sec["left"]), ("R", sec["right"])):
+        # ★ 侧的词表必须与全库其余 7 张 side 表一致：**left / right**。
+        #   `.HDM` 源文件**没有任何侧的标记**（靠"3 行一组"的位置关系：
+        #   桩号 / 左行 / 右行），所以两侧是**位置推出来的**，不是读到的。
+        #   一开始写成 "L"/"R"，与 roadbed_width 等 7 张表不一致 —— 已改。
+        #   （源文件里写 [LEFT]/[RIGHT] 的是 `.WID`，见 DDL 里 roadbed_width 的注释。）
+        for side, pts in (("left", sec["left"]), ("right", sec["right"])):
             for i, pt in enumerate(pts, start=1):
                 out.append({
                     "section_id": section_id,

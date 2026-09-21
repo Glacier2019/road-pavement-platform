@@ -1640,7 +1640,9 @@ CREATE TABLE IF NOT EXISTS cross_section_ground_point (
     id           bigint        generated always as identity primary key,
     section_id   bigint        not null references road_section(id),
     station_km   numeric(12,6) not null,   -- 精度标准 1 mm，与全库其余 32 处 station*_km 一致
-    side         char(1)       not null check (side in ('L','R')),
+    side         varchar(8)    not null check (side in ('left','right')),  -- ★与全库其余 7 张 side 表同词表
+                                                                          --   （`.HDM` 源文件**没有**侧标记，侧按"3 行一组"的位置推；
+                                                                          --    源文件里写 [LEFT]/[RIGHT] 的是 `.WID`）
     seq_no       smallint      not null,   -- 该侧第几个测点，从 1 起
     offset_m     numeric(10,4) not null,   -- 相对**前一测点**的平距（文件原样）
     elev_diff_m  numeric(10,4) not null,   -- 相对**前一测点**的高差（文件原样，上正下负）
