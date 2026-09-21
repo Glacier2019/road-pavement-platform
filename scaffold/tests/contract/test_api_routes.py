@@ -191,6 +191,33 @@ class _FakeGe:
                 "pis": [{"pi_seq": 1, "radius_m": 450.0}],
                 "elements": [{"element_seq": 1, "element_type": "line", "pi_id": None}]}
 
+    def widths(self, section_id):
+        self.section(section_id)
+        # 真库里是**变化点**：同一桩号左右各一行。假实现保留这个形状，
+        # 免得前端在假数据上写"一行一个断面"的代码而到真库上才炸。
+        return [{"side": "left",  "seq_no": 1, "group_seq": 1, "station_km": 0.0,
+                 "median_width_m": 0.0, "half_carriageway_width_m": 3.5,
+                 "extra_lane_flag": 0, "hard_shoulder_width_m": 0.75,
+                 "earth_shoulder_width_m": 0.75, "extra_lane_file": None, "remark": None},
+                {"side": "right", "seq_no": 1, "group_seq": 1, "station_km": 0.0,
+                 "median_width_m": 0.0, "half_carriageway_width_m": 3.5,
+                 "extra_lane_flag": 0, "hard_shoulder_width_m": 0.75,
+                 "earth_shoulder_width_m": 0.75, "extra_lane_file": None, "remark": None}]
+
+    def superelevation(self, section_id):
+        self.section(section_id)
+        # 真库里 **9999 → null**；假实现保留 null，让"当 0 处理"的写法在这里就露馅。
+        return [{"transition_seq": 1, "station_km": 0.0,
+                 "earth_shoulder_left_pct": -3.0, "hard_shoulder_left_pct": -2.0,
+                 "lane_left_pct": -2.0, "lane_right_pct": -2.0,
+                 "hard_shoulder_right_pct": -2.0, "earth_shoulder_right_pct": -3.0,
+                 "remark": None},
+                {"transition_seq": 2, "station_km": 0.485874,
+                 "earth_shoulder_left_pct": None, "hard_shoulder_left_pct": None,
+                 "lane_left_pct": None, "lane_right_pct": None,
+                 "hard_shoulder_right_pct": None, "earth_shoulder_right_pct": None,
+                 "remark": "源文件该行 6 列均为 9999（忽略此数据）"}]
+
     def completeness(self, section_id):
         self.section(section_id)
         return {"section_id": section_id, "geometry_level": "L2",
@@ -271,7 +298,11 @@ def main() -> int:
         ("GET",    "/v1/geometry/sections/6/stations?from_km=0&to_km=1&integer_only=true", 200),
         ("GET",    "/v1/geometry/sections/6/alignment",             200),
         ("GET",    "/v1/geometry/sections/6/summary",               200),
+        ("GET",    "/v1/geometry/sections/6/widths",                200),
+        ("GET",    "/v1/geometry/sections/6/superelevation",        200),
         ("GET",    "/v1/geometry/sections/99999/summary",           404),
+        ("GET",    "/v1/geometry/sections/99999/widths",            404),
+        ("GET",    "/v1/geometry/sections/99999/superelevation",    404),
         # 参数校验：非法筛选项应被 FastAPI 挡在门外（422），而不是进到 DAO
         ("GET",    "/v1/geometry/sections/6/stations?limit=0",      422),
         ("GET",    "/v1/geometry/sections/6/stations?from_km=-1",   422),
@@ -308,6 +339,21 @@ def main() -> int:
     else:
         print(f"  ✗ summary 结构不对 → {str(r)[:120]}")
         fails.append("summary 返回结构不符")
+    r = client.get("/v1/geometry/sections/6/widths").json()
+    if r.get("items") and all(x["side"] in ("left", "right") for x in r["items"]):
+        print(f"  ✓ widths 返回 {r['count']} 行，side 全为 left/right")
+    else:
+        print(f"  ✗ widths 结构不对 → {str(r)[:120]}")
+        fails.append("widths 返回结构不符")
+
+    r = client.get("/v1/geometry/sections/6/superelevation").json()
+    _has_null = any(v is None for x in r.get("items", []) for v in x.values())
+    if r.get("items") and _has_null:
+        print(f"  ✓ superelevation 返回 {r['count']} 行，且保留了源文件 9999 对应的 null")
+    else:
+        print(f"  ✗ superelevation 结构不对（null 丢了？）→ {str(r)[:120]}")
+        fails.append("superelevation 返回结构不符或丢失 null")
+
     # 元测试：GE 假实现也不提供无 section 的平铺查 —— 若哪天有人加了，这里会红
     if not any(hasattr(_FakeGe, m) for m in ("all_pis", "list_objects")):
         print("  ✓ GE 端点无「无 section 的平铺查」（路段一多就会静默串台）")

@@ -482,14 +482,9 @@ class GeRepository(DomainRepository):
             if not self.level_hit(required, present_set, mode):
                 continue
             hit = [s for s in required if s in present_set]
-            if mode == "all" or len(required) == 1:
-                reason = f"{'／'.join(hit)} 有数据"
-            else:
-                reason = f"{'／'.join(hit)} 有数据"
+            reason = f"{'／'.join(hit)} 有数据"
             break
         else:
-            # 差一档时，把"还差什么"直接写进理由 —— 这个方法存在的意义就是
-            # 回答"为什么是 L2 而不是 L3"，只报命中的段回答不了这个问题。
             for lv, required, mode in self.LEVEL_RULES:
                 need = [s for s in required if s not in present_set]
                 have = [s for s in required if s in present_set]

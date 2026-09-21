@@ -199,6 +199,39 @@ def get_section_summary(section_id: int) -> dict[str, Any]:
         raise _http(exc) from exc
 
 
+@app.get("/v1/geometry/sections/{section_id}/widths", tags=["几何查询"],
+         summary="路幅宽度表（`.WID` 的变化点，按桩号）")
+def get_widths(section_id: int) -> dict[str, Any]:
+    """⚠ 返回的是**变化点**，不是逐桩宽度。
+
+    一行 = 一个宽度分组的起点（实测毕设只有 4 行，而 `.WID` 覆盖 0–5701.461 m）。
+    要拿"某个桩号的宽度"，调用方得自己按桩号取最后一行 —— 那是业务语义，
+    网关不替它决定。本层只做两件事：转发、把 M3 的异常翻成 HTTP。
+    """
+    try:
+        rows = dao.ge.widths(section_id)
+    except DaoError as exc:
+        raise _http(exc) from exc
+    return {"section_id": section_id, "count": len(rows), "items": rows}
+
+
+@app.get("/v1/geometry/sections/{section_id}/superelevation", tags=["几何查询"],
+         summary="超高过渡（`.SUP` 的逐桩横坡控制点）")
+def get_superelevation(section_id: int) -> dict[str, Any]:
+    """⚠ 返回的是**控制点**，不是逐桩横坡。
+
+    控制点之间横坡**线性渐变**，所以要拿某桩号的横坡必须插值；直接取最后一行是错的。
+    源文件的 **9999 = 忽略此数据**（落库为 null），语义是"渐变**穿过**该点继续走"，
+    插值时要跳过 null 找两侧最近的非 null。详见 M3 `GeRepository.superelevation`
+    与契约里的说明 —— 这两条都有实测支撑，不是推测。
+    """
+    try:
+        rows = dao.ge.superelevation(section_id)
+    except DaoError as exc:
+        raise _http(exc) from exc
+    return {"section_id": section_id, "count": len(rows), "items": rows}
+
+
 # ----------------------------------------------------------------- 指标查询
 @app.get("/v1/metrics/wim_hourly", tags=["指标查询"],
          summary="小时级过车量/超载数/ESAL/均速")

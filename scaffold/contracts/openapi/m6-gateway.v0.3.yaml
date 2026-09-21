@@ -195,6 +195,54 @@ paths:
         "404":
           description: 路段不存在
 
+  /v1/geometry/sections/{section_id}/widths:
+    get:
+      summary: 路幅宽度表（`.WID` 的变化点，按桩号）
+      description: >-
+        ⚠ 这是**变化点**表，不是逐桩表：一行 = 一个宽度分组的起点。
+        实测毕设路段**只有 4 行**，而 `.WID` 覆盖 0.000–5701.461 m。
+        调用方要拿"某个桩号的宽度"，须**按桩号取最后一行**
+        （`<= 该桩号` 的 station_km 最大者）—— 那是业务语义，网关不替调用方决定。
+        ⚠ 终点 5701.461 m **早于**路线终点 5805.421 m：后 103.960 m
+        **源文件就没有**路幅宽度数据，这是源文件缺口，不是解析漏了。
+        ⚠ side 取 left / right（全库 8 张 side 表统一词表）；源文件写的是
+        [LEFT]/[RIGHT]，由解析器归一化。同一桩号左右各一行，group_seq 区分同侧多组。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: section_id、count 与 items 数组（每行一个变化点）
+
+  /v1/geometry/sections/{section_id}/superelevation:
+    get:
+      summary: 超高过渡（`.SUP` 的逐桩横坡控制点）
+      description: >-
+        ⚠ 这是**控制点**表，不是逐桩表（实测毕设 76 行）。
+        **控制点之间横坡是线性渐变的** —— 想拿某个桩号的横坡必须插值，
+        直接取"最后一行"是错的。这一条有实测支撑：`.lj` 的 11 个高差列
+        能由本表复现，而**只有插值才对得上**（按"沿用上值"算有 55/332 行不符）。
+        ⚠ 源文件的 **9999 表示"忽略此数据"**，落库为 **null**。
+        语义是「横坡渐变**穿过**这个控制点继续走」，所以插值时要**跳过 null
+        去找它两侧最近的非 null**，而不是当 0、也不是沿用前一个值。
+        ⚠ **左右两侧用的是同一套符号约定**：正常路拱两侧都写 −2.00，
+        超高段写 +4.00 / −4.00。所以"左比右高"不能直接比大小 ——
+        要按 −σ·宽度·横坡 折算成高差（σ = +1 左 / −1 右）。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: section_id、count 与 items 数组（每行一个控制点）
+        "404":
+          description: 路段不存在
+
   /v1/metrics/wim_hourly:
     get:
       summary: 小时级过车量 / 超载数 / ESAL / 均速

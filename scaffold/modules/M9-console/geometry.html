@@ -139,6 +139,18 @@
     </section>
 
     <section>
+      <h2>路幅宽度 <span class="n">GET /v1/geometry/sections/{id}/widths</span></h2>
+      <div id="wdnote" class="muted" style="font-size:12.5px;margin-bottom:8px"></div>
+      <div class="scroll"><table id="wdtbl"></table></div>
+    </section>
+
+    <section>
+      <h2>超高过渡 <span class="n">GET /v1/geometry/sections/{id}/superelevation</span></h2>
+      <div id="supnote" class="muted" style="font-size:12.5px;margin-bottom:8px"></div>
+      <div class="scroll"><table id="suptbl"></table></div>
+    </section>
+
+    <section>
       <h2>原始 JSON（可自行核对）</h2>
       <div class="links" id="raw"></div>
     </section>
@@ -148,6 +160,7 @@
 <footer>
   等级是<b>当场算出来的派生量</b>（依据：哪些段有数据），不是存下来的字段——所以本页连依据一起显示，结论可核对。
   缺口分两类：<b>表还没建</b>（schema 没到）与<b>表建好了但没数据</b>（解析器没做），含义不同，不混为一谈。
+  <br>路幅宽度与超高都是<b>变化点/控制点</b>表，不是逐桩表 —— 页面上标了各自的取数口径，免得被当成"逐桩就这么几个值"。
 </footer>
 
 <script>
@@ -270,11 +283,79 @@ async function loadSection(id) {
     ["路段列表", "/v1/geometry/sections"],
     ["本路段概要", "/v1/geometry/sections/" + id + "/summary"],
     ["桩号序列", "/v1/geometry/sections/" + id + "/stations?limit=5000"],
-    ["平面线形", "/v1/geometry/sections/" + id + "/alignment"]
+    ["平面线形", "/v1/geometry/sections/" + id + "/alignment"],
+    ["路幅宽度", "/v1/geometry/sections/" + id + "/widths"],
+    ["超高过渡", "/v1/geometry/sections/" + id + "/superelevation"]
   ].map(([t, p]) => "<div><a href='" + GW + p + "' target='_blank'>" + t + "</a>　<span class='muted mono' style='font-size:12px'>" + p + "</span></div>").join("");
 
   await loadStations(id);
   await loadAlignment(id);
+  await loadWidths(id);
+  await loadSuperelevation(id);
+}
+
+async function loadWidths(id) {
+  let d;
+  try { d = await api("/v1/geometry/sections/" + id + "/widths"); }
+  catch (e) { showErr(e.message, "GET widths"); return; }
+
+  const items = d.items || [];
+  // ★ 这表是**变化点**不是逐桩表 —— 不说清楚，看的人会以为"只有 4 个桩号有宽度"。
+  document.getElementById("wdnote").textContent = items.length
+    ? "共 " + items.length + " 行。⚠ 这是**变化点**表（一行 = 一个宽度分组的起点），"
+      + "不是逐桩表；要拿某个桩号的宽度须按桩号取最后一行。"
+    : "该路段没有路幅宽度数据（源文件 `.WID` 里就没有，不是解析漏了）";
+
+  if (!items.length) {
+    document.getElementById("wdtbl").innerHTML =
+      "<tr><td class='empty'>没有路幅宽度数据</td></tr>";
+    return;
+  }
+  table("wdtbl", [
+    { t: "桩号 km", num: true, f: r => num(r.station_km, 6) },
+    { t: "侧", f: r => "<span class='mono'>" + esc(r.side) + "</span>" },
+    { t: "组", num: true, k: "group_seq" },
+    { t: "行", num: true, k: "seq_no" },
+    { t: "中分带 m", num: true, f: r => num(r.median_width_m, 3) },
+    { t: "半幅车道 m", num: true, f: r => num(r.half_carriageway_width_m, 3) },
+    { t: "硬路肩 m", num: true, f: r => num(r.hard_shoulder_width_m, 3) },
+    { t: "土路肩 m", num: true, f: r => num(r.earth_shoulder_width_m, 3) },
+    { t: "加宽", f: r => (Number(r.extra_lane_flag) ? "是" : "<span class='muted'>否</span>") }
+  ], items);
+}
+
+async function loadSuperelevation(id) {
+  let d;
+  try { d = await api("/v1/geometry/sections/" + id + "/superelevation"); }
+  catch (e) { showErr(e.message, "GET superelevation"); return; }
+
+  const items = d.items || [];
+  const nNull = items.filter(r => r.lane_left_pct === null || r.lane_left_pct === undefined).length;
+  document.getElementById("supnote").textContent = items.length
+    ? "共 " + items.length + " 个**控制点**。⚠ 控制点之间横坡是**线性渐变**的 —— "
+      + "要拿某个桩号的横坡必须插值，直接取最后一行是错的。"
+      + (nNull ? "　其中 " + nNull + " 个控制点的源文件值为 9999（忽略此数据，落库为 null，"
+          + "语义是「渐变穿过该点继续走」，插值时要跳过它去找两侧最近的非 null）。" : "")
+      + "　⚠ 左右两侧用的是**同一套符号约定**（正常路拱两侧都写 −2.00），"
+      + "故「左比右高」不能直接比大小。"
+    : "该路段没有超高数据";
+
+  if (!items.length) {
+    document.getElementById("suptbl").innerHTML =
+      "<tr><td class='empty'>没有超高数据</td></tr>";
+    return;
+  }
+  table("suptbl", [
+    { t: "序", num: true, k: "transition_seq" },
+    { t: "桩号 km", num: true, f: r => num(r.station_km, 6) },
+    { t: "左土路肩 %", num: true, f: r => num(r.earth_shoulder_left_pct, 2) },
+    { t: "左硬路肩 %", num: true, f: r => num(r.hard_shoulder_left_pct, 2) },
+    { t: "左行车道 %", num: true, f: r => num(r.lane_left_pct, 2) },
+    { t: "右行车道 %", num: true, f: r => num(r.lane_right_pct, 2) },
+    { t: "右硬路肩 %", num: true, f: r => num(r.hard_shoulder_right_pct, 2) },
+    { t: "右土路肩 %", num: true, f: r => num(r.earth_shoulder_right_pct, 2) },
+    { t: "备注", f: r => (r.remark ? esc(r.remark) : "<span class='muted'>—</span>") }
+  ], items);
 }
 
 async function loadStations(id) {
