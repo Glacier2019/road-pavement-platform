@@ -390,6 +390,43 @@ class GeRepository(DomainRepository):
         got = [s for s in required if s in present]
         return bool(got) if mode == "any" else len(got) == len(required)
 
+    @classmethod
+    def derive_level(cls, present: set[str]) -> tuple[str, str]:
+        """由"有数据的段集合"推出 (等级, 理由)。**纯函数，不碰库，可离线对拍。**
+
+        与 M2 `adapters/base.derive_level` 同义。M3 不许 import M2，所以各写一遍 ——
+        那就用测试拿同一批输入对拍两边。
+
+        ⚠ 这个函数是**因为一个真 bug 才被抽出来的**：
+          原来这段逻辑内联在 `completeness()` 里，循环里只算了 `reason`，
+          **忘了写 `level = lv`** —— 于是 `geometry_level` 恒为 `"L0"`，
+          而 `level_reason` 是对的（"cross_section 有数据"）。
+          结果是「结论错、依据对」这种最刺眼的组合：毕设路段明明有 2215 个
+          横断面测点（L4 的条件），徽章却显示 L0。
+
+          为什么原来的测试没抓住：交叉核对只比了 `LEVEL_RULES`（规则表）和
+          `level_hit`（谓词）—— **两个输入都对，用它们的那段循环错了**。
+          所以现在把判级本身也变成纯函数，让测试能直接喂输入、断言输出。
+        """
+        for lv, required, mode in cls.LEVEL_RULES:
+            if not cls.level_hit(required, present, mode):
+                continue
+            hit = [s for s in required if s in present]
+            # ★ 这一行就是原来漏掉的
+            return lv, f"{'／'.join(hit)} 有数据"
+
+        # 一档都没命中：把"最接近的那一档还差什么"写进理由 ——
+        # 这个方法存在的意义就是回答"为什么是 L2 而不是 L3"，
+        # 只报命中的段回答不了这个问题。
+        for lv, required, mode in cls.LEVEL_RULES:
+            need = [s for s in required if s not in present]
+            have = [s for s in required if s in present]
+            if have and need:
+                return "L0", (f"{'／'.join(have)} 有数据，"
+                              f"但 {lv} 要求 {'／'.join(required)} **全部**有数据，"
+                              f"缺 {'／'.join(need)}")
+        return "L0", "没有任何几何段"
+
     def section(self, section_id: int) -> dict[str, Any]:
         row = self._dao.query_one(self.ONE_SECTION_SQL, {"sid": section_id})
         if row is None:
@@ -476,23 +513,7 @@ class GeRepository(DomainRepository):
         # 归一化成"有数据的段集合"再判定：与 M2 用同一个纯函数，
         # 差别只在"有没有数据"怎么算（这里是行数 > 0）。
         present_set = {s for s, n in counts.items() if n}
-        level = "L0"
-        reason = "没有任何几何段"
-        for lv, required, mode in self.LEVEL_RULES:
-            if not self.level_hit(required, present_set, mode):
-                continue
-            hit = [s for s in required if s in present_set]
-            reason = f"{'／'.join(hit)} 有数据"
-            break
-        else:
-            for lv, required, mode in self.LEVEL_RULES:
-                need = [s for s in required if s not in present_set]
-                have = [s for s in required if s in present_set]
-                if have and need:
-                    reason = (f"{'／'.join(have)} 有数据，"
-                              f"但 {lv} 要求 {'／'.join(required)} **全部**有数据，"
-                              f"缺 {'／'.join(need)}")
-                    break
+        level, reason = self.derive_level(present_set)
 
         present = {s: n for s, n in counts.items() if n}
         missing = [s for s in counts if not counts.get(s)]

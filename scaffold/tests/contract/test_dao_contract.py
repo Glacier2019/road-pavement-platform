@@ -286,6 +286,79 @@ def main() -> int:
     ok("★★ 交叉核对：M3 与 M2 的等级判定逻辑逐个用例一致（不只是规则数据）",
        not _diff, f"不一致 {_diff}")
 
+    # ★★ 再往上一层：`level_hit` 对了，**不等于**用它的那段判级逻辑也对。
+    #   真实发生过的 bug 就在这里：`completeness()` 内联的循环里只算了 reason，
+    #   **忘了写 `level = lv`** —— 于是 `geometry_level` 恒为 "L0"，
+    #   而 `level_reason` 是对的（"cross_section 有数据"）。
+    #   毕设路段明明有 2215 个横断面测点（L4 的条件），徽章却显示 L0。
+    #   而当时的交叉核对只比了 LEVEL_RULES 和 level_hit —— **两个输入都对**。
+    #   所以现在把判级也抽成纯函数 `derive_level`，直接对拍。
+    _level_cases: list[set[str]] = [
+        set(),
+        {"station_sequence"},
+        {"alignment_pi"},
+        {"alignment_element"},
+        {"alignment_pi", "alignment_element"},
+        {"station_sequence", "alignment_pi", "alignment_element"},
+        {"profile_ground_point"},
+        {"profile_grade_point"},
+        {"profile_grade_point", "profile_ground_point"},
+        {"profile_grade_point", "profile_ground_point", "station_sequence"},
+        {"cross_section"},
+        {"cross_section", "station_sequence"},
+        # 真实那一条：毕设路段有数据的段集合（6 段）
+        {"station_sequence", "alignment_pi", "alignment_element",
+         "profile_grade_point", "profile_ground_point", "cross_section"},
+    ]
+    # ⚠ M2 的 derive_level 返回**字符串**（只有等级，没有理由）；M3 返回 (等级, 理由)。
+    _lv_diff = []
+    for _c in _level_cases:
+        _m3 = repo_mod.GeRepository.derive_level(_c)
+        _m2 = m2base.derive_level({s: True for s in _c})
+        if _m3[0] != _m2:
+            _lv_diff.append((sorted(_c), _m3, _m2))
+    ok(f"★★ 交叉核对：M3 与 M2 的 derive_level 在 {len(_level_cases)} 组输入上给出**同一个等级**",
+       not _lv_diff, f"不一致：{_lv_diff[:3]}")
+
+    # ★ 真不变量：等级 = **规则表里第一条命中的那一档**。
+    #   逐条规则构造一个"恰好命中它"的输入，断言返回的就是它。
+    #   （一开始我写的自洽检查是"非空段集合不得给出 L0" —— **那是假不变量**：
+    #     只有 profile_ground_point 时 L0 是对的，L3 要两个都齐，它又不满足 L1/L2。
+    #     测试当场把我这个错抓了出来。）
+    _rule_diff = []
+    for _lv, _segs, _mode in repo_mod.GeRepository.LEVEL_RULES:
+        _present = set(_segs)                      # 恰好满足这一条
+        _got = repo_mod.GeRepository.derive_level(_present)[0]
+        if _got != _lv:
+            _rule_diff.append((_lv, sorted(_present), _got))
+    ok("★★ 逐规则构造输入：恰好满足某档条件时，derive_level 必须给出**那一档**",
+       not _rule_diff, f"不符：{_rule_diff}")
+
+    # ★ 真实那一条（毕设路段有数据的 6 段）必须真的是 L4 —— 只对拍两边不够，两边可以一起错。
+    _real = {"station_sequence", "alignment_pi", "alignment_element",
+             "profile_grade_point", "profile_ground_point", "cross_section"}
+    ok("★★ 毕设那 6 段必须判为 L4（L4 的规则就是 cross_section any）",
+       repo_mod.GeRepository.derive_level(_real)[0] == "L4",
+       f"实为 {repo_mod.GeRepository.derive_level(_real)}")
+    ok("★ 空集合必须是 L0，且理由说得出来",
+       repo_mod.GeRepository.derive_level(set()) == ("L0", "没有任何几何段"),
+       f"实为 {repo_mod.GeRepository.derive_level(set())}")
+
+    # 元测试：把那个真 bug 复现出来（判级恒返回 L0），上面几条必须变红。
+    #   bug 原形：completeness() 内联的循环里只算了 reason，忘了写 level = lv。
+    def _buggy_derive(present):                    # 就是当年那段循环的产物
+        return "L0", "cross_section 有数据"
+
+    ok("★★ 元测试：复现 bug（判级恒 L0）后，与 M2 的对拍**必须**变红",
+       any(_buggy_derive(_c)[0] != m2base.derive_level({s: True for s in _c})
+           for _c in _level_cases),
+       "复现 bug 后仍无差异 —— 说明对拍是空的")
+    ok("★★ 元测试：复现 bug 后，「逐规则构造输入」也必须变红",
+       any(_buggy_derive(set(_segs))[0] != _lv
+           for _lv, _segs, _mode in repo_mod.GeRepository.LEVEL_RULES))
+    ok("★ 元测试：正常实现下 derive_level 不是恒 L0（否则上面全是空断言）",
+       repo_mod.GeRepository.derive_level(_real)[0] != "L0")
+
     # 元测试：把 L3 改回 any 时，上面那条"必须是 all"的检查会失败吗？
     # 不验这一下，就无法排除"检查写得永远为真"。
     _l3req = next(segs for lv, segs, _m in repo_mod.GeRepository.LEVEL_RULES if lv == "L3")

@@ -2302,6 +2302,62 @@ def main() -> int:
                 _fail.append('清理失败：' + str(_cleanup_failed))
             print(f"  （已清理：路段 {sec_id} / 批次 {batch}）")
 
+    # ── 第 12a 组：completeness() 的等级必须与 derive_level() 自洽（打真库）──
+    #
+    # ★ 这一组是**因为一个真 bug 才补的**：
+    #   `completeness()` 里那段内联循环只算了 `level_reason`，**忘了写 `level = lv`** ——
+    #   于是 `geometry_level` 恒为 "L0"，而理由是对的（"cross_section 有数据"）。
+    #   毕设路段明明有 2215 个横断面测点（L4 的条件），徽章却显示 L0。
+    #
+    #   为什么原来的测试没抓住：交叉核对只比了 `LEVEL_RULES`（规则表）和
+    #   `level_hit`（谓词）—— **两个输入都对，用它们的那段循环错了**。
+    #   修法是把判级抽成纯函数 `derive_level`（已在 test_dao_contract.py 里与 M2 对拍），
+    #   这里再钉一层：**库里的真实数据走完整条路，等级必须自洽**。
+    print("\n" + "=" * 74)
+    print("第 12a 组  completeness() 等级 ↔ derive_level()（打真库，全部路段）")
+    print("=" * 74)
+    try:
+        from rpdao import Dao as _DaoL                                # noqa: PLC0415
+        from rpdao.repo import GeRepository as _GeL                   # noqa: PLC0415
+        _dao_l = _DaoL(pg_dsn() or "", app_name="contract-test-12a")
+        _dao_l.open()
+    except Exception as exc:                                          # noqa: BLE001
+        SKIP[0] += 1
+        print(f"  ⊘ 跳过：{type(exc).__name__}: {str(exc)[:90]}")
+    else:
+        try:
+            _secs = _dao_l.ge.sections()
+            _mismatch, _checked = [], 0
+            for _s in _secs:
+                _sid = _s["id"]
+                _c = _dao_l.ge.completeness(_sid)
+                _lv = _c.get("geometry_level")
+                _want = _GeL.derive_level({k for k, v in (_c.get("present") or {}).items() if v})[0]
+                _checked += 1
+                if _lv != _want:
+                    _mismatch.append((_sid, _s.get("section_name"), _lv, _want,
+                                      _c.get("level_reason")))
+            check(f"★★ 每个路段的 geometry_level 都等于 derive_level(present)（查了 {_checked} 条）",
+                  _checked > 0 and not _mismatch,
+                  f"不自洽：{_mismatch[:3]}" if _mismatch else f"路段数 {_checked}")
+
+            # ★ 具体到毕设：有 cross_section 就必须是 L4，且理由要能说出是哪一段。
+            _b = _dao_l.ge.completeness(6)
+            check("★★ 毕设（有 2215 个横断面测点）必须是 L4，不是 L0",
+                  _b.get("geometry_level") == "L4",
+                  f"实为 {_b.get('geometry_level')!r}，理由 {_b.get('level_reason')!r}")
+            check("★ 毕设的理由要点出 cross_section",
+                  "cross_section" in (_b.get("level_reason") or ""),
+                  repr(_b.get("level_reason")))
+
+            # 元测试：拿同一个方法、把 present 掏空，等级必须跟着变 ——
+            # 证明上面那条不是"无论数据怎样都返回 L4"。
+            check("★ 元测试：空段集合下 derive_level 给 L0（说明它真的看数据）",
+                  _GeL.derive_level(set())[0] == "L0",
+                  f"实为 {_GeL.derive_level(set())}")
+        finally:
+            _dao_l.close()
+
     # ── 第 12b 组：.lj 的 11 个高差列 ↔ .SUP 的逐桩横坡（交叉验证）──────────
     #
     # ★ 这一组是 .lj 解析器 docstring 里那句「它们能反过来校验 .SUP」的兑现 ——
