@@ -340,8 +340,17 @@ def main() -> int:
                     or re.search(r"'L'\s*,\s*'R'", ln)))
 
     # 非空转证明：把词表改回那套错的，**同一个谓词**必须变红。
-    _bad = txt.replace("side         varchar(8)    not null check (side in ('left','right')),",
-                       "side         char(1)       not null check (side in ('L','R')),")
+    # ⚠ 这个变异串**跟着 DDL 改过一次**：原来 cross_section_ground_point 的 side 是
+    #   「列 + 行内 check」一行写完，后来为了让"全新装"和"升级上来"两条路径上的
+    #   约束名一致（见 test_ddl_migration_parity.py），拆成了「列 + 具名 constraint」两行。
+    #   拆完这个 replace 就**匹配不到任何东西**了 —— 于是 _bad == txt，
+    #   下面那句 `_bad != txt` 立刻变红。**元测试当场发现了自己的原料没了**，
+    #   这正是它该有的行为（变异必须真的改变被检查的事实）。
+    _bad = txt.replace("side         varchar(8)    not null,",
+                       "side         char(1)       not null,")
+    _bad = _bad.replace(
+        "constraint ck_cross_section_ground_point_side check (side in ('left','right')),",
+        "constraint ck_cross_section_ground_point_side check (side in ('L','R')),")
     check("元测试：把 cross_section_ground_point 的 side 改回 char(1)+L/R 后必须变红",
           _bad != txt and not _side_vocab_ok(_bad))
     check("元测试：原文下 _side_vocab_ok 为真（证明它不是恒假）", _side_vocab_ok(txt))

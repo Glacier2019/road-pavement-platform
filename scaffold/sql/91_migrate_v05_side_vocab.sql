@@ -94,6 +94,8 @@ DECLARE
     n_bad   bigint;
     n_left  bigint;
     n_right bigint;
+    n_old   bigint;
+    n_all   bigint;
     vals    text;
 BEGIN
     SELECT count(*) INTO n_bad
@@ -110,12 +112,50 @@ BEGIN
       INTO n_left, n_right
       FROM cross_section_ground_point;
 
-    IF n_left = 0 OR n_right = 0 THEN
-        RAISE EXCEPTION '两侧之一为 0 行（left=% right=%）—— 改名可能没生效，'
-                        '或者本来就没数据；无论哪种都不该当作迁移成功', n_left, n_right;
-    END IF;
+    SELECT count(*) INTO n_all FROM cross_section_ground_point;
 
-    RAISE NOTICE 'cross_section_ground_point.side：left=% right=% ✓', n_left, n_right;
+    -- ★★ 空表要放行 —— 这一条是**补的**，原因见文末后记：
+    --   原来这里无条件要求两侧都非空，于是这条 migration 在**全新装的库**上
+    --   必然报错（DDL 只建表、不插数据）。而全新装恰恰是本迁移该是空操作的情形。
+    --   守住的仍然是原来那个用意（"改名没生效"），只是问得更准：
+    --   **本来有 L/R 要改**，改完就必须两侧都有数据；本来就没数据，不该拦。
+    IF n_all = 0 THEN
+        RAISE NOTICE 'cross_section_ground_point 无数据（全新装）—— 无需改名，放行 ✓';
+    ELSIF n_left = 0 OR n_right = 0 THEN
+        RAISE EXCEPTION '两侧之一为 0 行（left=% right=%）—— 本表有 % 行，'
+                        '改名却没有生效', n_left, n_right, n_all;
+    ELSE
+        RAISE NOTICE 'cross_section_ground_point.side：left=% right=% ✓', n_left, n_right;
+    END IF;
 END $$;
 
 COMMIT;
+
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- 后记（2026-09 补）：本迁移原先在**全新装的库**上必然失败
+-- ══════════════════════════════════════════════════════════════════════════
+--
+-- 怎么发现的
+--   补上了 `tests/contract/test_ddl_migration_parity.py` —— 它建一个一次性库，
+--   只跑 `10_ddl_v0.5.sql`，再依次施加 85..91 的全部 migration，比对前后 schema。
+--   第一次跑就报：**6/7 条 migration 跑通，91 报错**（就是上面那个 RAISE）。
+--
+-- 为什么
+--   原来的校验无条件要求 left/right 两侧都非空。而全新装的库里
+--   `cross_section_ground_point` **一行数据都没有**（DDL 只建表不插数据），
+--   于是必然命中 `n_left = 0 OR n_right = 0` → RAISE EXCEPTION。
+--
+--   作者的用意是对的（"改名没生效"要能查出来），只是问法太粗：
+--   它把"本来就没数据"和"有数据但没改成功"当成了同一种情况。
+--
+-- 改了什么
+--   先看全表行数 `n_all`：
+--     · n_all = 0  → 全新装，无数据可改，放行（原来会崩）
+--     · n_all > 0  → 两侧仍必须都非空，否则报错（守卫原样保留，且把行数写进消息）
+--   只放宽了"空表"这一种情形，**对真实升级路径的行为一字未变**。
+--
+-- 幂等性
+--   本文件本来就是幂等的（`DO $$` 里先按列名删旧约束、再改类型、再按值改名），
+--   所以这个改动对**已经升级过的库**重跑一次是安全的：表里有数据 → 走 ELSIF 分支，
+--   两侧都非空 → 不报错。

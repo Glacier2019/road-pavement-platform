@@ -1640,7 +1640,14 @@ CREATE TABLE IF NOT EXISTS cross_section_ground_point (
     id           bigint        generated always as identity primary key,
     section_id   bigint        not null references road_section(id),
     station_km   numeric(12,6) not null,   -- 精度标准 1 mm，与全库其余 32 处 station*_km 一致
-    side         varchar(8)    not null check (side in ('left','right')),  -- ★与全库其余 7 张 side 表同词表
+    side         varchar(8)    not null,
+    -- ★与全库其余 7 张 side 表同词表（left/right）。约束**显式命名**：
+    --   不命名的话 PostgreSQL 会自动叫 cross_section_ground_point_side_check，
+    --   而 91_migrate_v05_side_vocab.sql 建的是 ck_cross_section_ground_point_side ——
+    --   于是"全新装"和"升级上来"两条路径上**同一个约束、两个名字**，
+    --   按名字 DROP CONSTRAINT 的脚本在一条路径上能用、另一条不能。
+    --   这是 test_ddl_migration_parity.py 抓出来的（它比对两条路径的 schema）。
+    constraint ck_cross_section_ground_point_side check (side in ('left','right')),
                                                                           --   （`.HDM` 源文件**没有**侧标记，侧按"3 行一组"的位置推；
                                                                           --    源文件里写 [LEFT]/[RIGHT] 的是 `.WID`）
     seq_no       smallint      not null,   -- 该侧第几个测点，从 1 起
