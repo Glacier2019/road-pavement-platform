@@ -2642,9 +2642,12 @@ def main() -> int:
           "section_design_attr / design_file")
     planned = di.plan_project(po, project_dir=None)
     cnt = {k: len(v) for k, v in planned["tables"].items()}
-    check("五张表各 1/1/1/1 行 + design_file 16 行",
+    # ⚠ 16 → 19：.hda（2026-09-22 定「加」）+ .prj + .dtm（见第 14b 组）。
+    #   本用例 `project_dir=None` ⇒ 磁盘补行不发生，故 19 里的 .prj/.dtm 是
+    #   **第 14b 组**用临时目录单独验的；这里数的是**只看 .PRJ 时**的条数 = 17。
+    check("五张表各 1/1/1/1 行 + design_file 17 行（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
           cnt == {"design_project": 1, "road_line": 1, "road_section": 1,
-                  "section_design_attr": 1, "design_file": 16}, str(cnt))
+                  "section_design_attr": 1, "design_file": 17}, str(cnt))
     check("★ 元测试：路幅总宽 10.000 **不许**进 road_line.lane_width_m（那是单车道宽）",
           planned["tables"]["road_line"][0]["lane_width_m"] is None)
     check("★ 路幅总宽进 section_design_attr.roadway_width_m",
@@ -2658,31 +2661,40 @@ def main() -> int:
           and "无路线代码" in planned["tables"]["road_line"][0]["remark"])
     check("12 条空路径的槽位不进 design_file",
           all(f["rel_path"] for f in planned["tables"]["design_file"]))
-    # ★ 两条被跳过的文件**原因不同**，不能合成一句（2026-09 查清）：
+    # ★★ 两条**没给键号**的文件，结局**不同** —— 不能合并（2026-09-22 定）：
     #   .hda 首行 `HINTSOFT_HD_**PRJ**_1045`，有 BEGIN_CUL(涵洞)、桩号+GUID、
-    #        `[涵洞…]` 组名、`2009 100 1 0 5232.274…` 字段号+值 —— 与 .PRJ 同族，
-    #        是**工程数据**，只是 .PRJ 那行没给号 → 这是 .PRJ 的疏漏。
+    #        `[基本参数] 0 17 0` 这样的分节 —— **工程数据**。纬地官方技术支持原文：
+    #        「每一个涵洞项目都有两个设计文件（hda 和 cys）组成，其中 **hda 文件用于
+    #         保存涵洞设计参数**，cys 文件用于保存绘图参数」「只需要打开新的路线项目，
+    #         **在项目管理器中把原来的（hda 和 cys）文件路径添加进来即可**」——
+    #        涵洞是**独立产品**(HintHD)，按路径手工挂进来，故〔文件名〕段里
+    #        **有名有路径、就是没有号**。**不是疏漏。**
+    #        → **进台账**（file_kind_code=NULL），`pending`。
+    #        ⚠ 为什么不是 `blocked`：blocked = **结构上**读不了（二进制）；.hda 是
+    #          纯文本 GBK，框架**能**解析（4 个涵洞的 10 个分节完全一致、节号固定枚举）。
+    #          解析不了的只是**每列数字的含义** —— 只有教程 §24.13.2 说得清，公开取不到。
     #   .cys 首行 `HINTSOFT_HD_**SYS**_1026`，内容是尺寸标注样式(ZDIMAPP)、
     #        图框([TITLE] 1:[SCALE])、填充图案(ANSI31) —— **软件的系统参数**，
     #        纬地自己的说明也写它是"安装目录下'系统设置'文件夹中的系统参数.cys"。
-    #        → 它**本就不该进工程台账**，跟字段号无关。
-    # ★ 2026-09-22 更正：原来这里断言 .hda 的理由是「未给字段号」——
-    #   **那条断言本身是错的**。号只是表象，给了号它也进不来：缺的是适配器，
-    #   而适配器做不出来的原因是字段含义无文档（说明书 §24.13.2 未获得）。
-    #   断言改红是对的 —— 它抓住了"我们把表象当成了原因"。
-    check("2 条被跳过的文件，且原因**分别**写对（.hda 是字段无文档 / .cys 是系统参数）",
-          len(planned["skipped_files"]) == 2
-          and any("字段含义无文档" in x and ".hda" in x for x in planned["skipped_files"])
-          and any("系统参数" in x and ".cys" in x for x in planned["skipped_files"]),
+    #        → **不进台账**，跟字段号无关。
+    _hda = [f for f in planned["tables"]["design_file"] if f["file_name"].endswith(".hda")]
+    check("★ .hda 进台账：file_kind_code=NULL、parse_status=pending",
+          len(_hda) == 1 and _hda[0]["file_kind_code"] is None
+          and _hda[0]["parse_status"] == "pending", str(_hda))
+    check("★ 它的 remark 说清「声明了但没给号，因为是涵洞系统的文件」",
+          _hda and "涵洞系统" in (_hda[0]["remark"] or "")
+          and "没有键号" in (_hda[0]["remark"] or ""), str(_hda[0] if _hda else None))
+    check("★ 只剩 1 条被跳过（.cys），且理由是**系统参数**不是「未给字段号」",
+          len(planned["skipped_files"]) == 1
+          and "系统参数" in planned["skipped_files"][0]
+          and ".cys" in planned["skipped_files"][0],
           str(planned["skipped_files"]))
-    check("★ .hda 的理由点明「与『未给字段号』是两件事，给了号也进不来」",
-          any(".hda" in x and "给了号也进不来" in x for x in planned["skipped_files"]),
+    check("★★ 元测试：跳过理由**不能**只是「未给字段号」（那是表象，不是原因）",
+          all("未给字段号" not in x for x in planned["skipped_files"]),
           str(planned["skipped_files"]))
-    check("★ 元测试：.cys 的跳过理由**不能**只是「未给字段号」（那是表象，不是原因）",
-          all("未给字段号" not in x for x in planned["skipped_files"] if ".cys" in x))
-    check("★ 元测试：.hda 的理由**不能**只说「.PRJ 未给字段号」（那是表象）",
-          all("未给字段号，无法满足 NOT NULL" not in x
-              for x in planned["skipped_files"] if ".hda" in x))
+    check("★★ 元测试：.hda **不得**出现在 skipped 里（它已经进台账了）",
+          all(".hda" not in x for x in planned["skipped_files"]),
+          str(planned["skipped_files"]))
     # ⚠ 上面那条原来断言的是「每行都有 file_kind_code（满足 NOT NULL）」——
     #   v0.5 迁移 ⑨② 之后**它不再成立**：没码的行是合法的（NULL = 纬地自己没给码）。
     #   断言改红是对的：它钉住的正是一个被推翻的前提。
@@ -2703,7 +2715,11 @@ def main() -> int:
             (pathlib.Path(_td2) / _n).write_bytes(b"")
         _p3 = di.plan_project(po, project_dir=_td2)
     _rows3 = _p3["tables"]["design_file"]
-    _null3 = [r for r in _rows3 if r["file_kind_code"] is None]
+    # ⚠ 只取**临时目录里造的那两个**（x.PRJ / x.dtm）。不能笼统取"所有没码的行"——
+    #   2026-09-22 起 `.hda` 也是没码的行（它来自 .PRJ 声明，不是磁盘补行），
+    #   混进来会让本组测的东西变味：本组验的是**磁盘补行**那条路。
+    _null3 = [r for r in _rows3
+              if r["file_kind_code"] is None and r["file_name"].startswith("x.")]
     # ⚠ 用**文件名**索引，不用下标：追加顺序是 sorted(_LEDGER_EXTRA_SUFFIX)
     #   （.dtm < .prj），写下标就会随登记表增删而错位 —— 我第一版就是这么错的，
     #   实测两次变红（期望 [x.PRJ, x.dtm] 实得 [x.dtm, x.PRJ]）。
@@ -2730,15 +2746,19 @@ def main() -> int:
     _saved = di._LEDGER_EXTRA_SUFFIX.pop(".prj")
     try:
         _p5 = di.plan_project(po, project_dir=_td2)
-        _gone = not any(r["file_kind_code"] is None for r in _p5["tables"]["design_file"])
+        _gone = not any(r["file_kind_code"] is None and r["file_name"].startswith("x.")
+                        for r in _p5["tables"]["design_file"])
     finally:
         di._LEDGER_EXTRA_SUFFIX[".prj"] = _saved
     check("★★ 元测试：把 .prj 从 _LEDGER_EXTRA_SUFFIX 拿掉后这一行**必须**消失"
           "（证明上面那条不是空洞检查）", _gone)
     # ★★ 非空转：没扫描目录时**不得**补行 —— 「没去看」≠「看了没有」
     _p4 = di.plan_project(po, project_dir=None)
+    #   ⚠ 这里也只看 x.* —— `.hda` 是**来自 .PRJ 声明**的没码行，与"扫没扫磁盘"无关，
+    #     拿它当反例就把两件事混了。
     check("★★ 不给 project_dir 时不补行（没扫描磁盘就补 = 编）",
-          not any(r["file_kind_code"] is None for r in _p4["tables"]["design_file"]))
+          not any(r["file_kind_code"] is None and r["file_name"].startswith("x.")
+                  for r in _p4["tables"]["design_file"]))
 
     # 已实现适配器的后缀才给 ok。加 .DMX/.ZDM 后从 3 个变 5 个 —— 这条断言当时
     # 变红是对的（它抓住了行为变化）。103/104 是不是 .DMX/.ZDM 已从库里核实：
@@ -2801,16 +2821,26 @@ def main() -> int:
     #        ok      1  = 105（.HDM —— 唯一"存在且实现了"的）
     #        blocked 4  = 114(.dq) / 115(.gtm) / 120(.BDM) / 121(.HDMSJ)
     #        absent 11  = 其余 11 个槽位（含 118 .3DR）
-    #        pending 0
-    #      这比"真工程里的分布"更适合测四态：**同一轮里 ok/blocked/absent 各有代表**，
-    #      三种含义当场分得开 —— 而 pending 恰好没有代表（本工程已无未实现的段）。
+    #        pending 1  = **.hda**（2026-09-22 起；见下）
+    #      这比"真工程里的分布"更适合测四态：**同一轮里 ok/blocked/absent/pending
+    #      四种含义当场分得开**。
+    #
+    #    ★ 2026-09-22 这条断言红了，属于上面写的**第 ① 种**（不是第 ② 种）：
+    #      新槽位是 **`.hda` 涵洞数据文件**，它**故意**记 pending，不是忘了归类。
+    #      它既不在 _IMPLEMENTED_SUFFIX（适配器没写）也不在 _BLOCKED_SUFFIX
+    #      （它是**纯文本 GBK**，框架能解析，不是"结构上读不了"）——
+    #      所以 `pending` 正是它该在的档。依据见 `_LEDGER_DECLARED_CODELESS`。
+    #      四态至此**每一态都有代表**了，这条断言反而比原来更强。
     _pen = [f for f in _p2["tables"]["design_file"] if f["parse_status"] == "pending"]
-    check("★★ 同一轮里四态分得开：ok 1 / blocked 4 / absent 11 / pending 0",
+    check("★★ 同一轮里四态分得开：ok 1 / blocked 4 / absent 11 / pending 1",
           (sum(1 for f in _p2["tables"]["design_file"] if f["parse_status"] == "ok"),
            sum(1 for f in _p2["tables"]["design_file"] if f["parse_status"] == "blocked"),
            sum(1 for f in _p2["tables"]["design_file"] if f["parse_status"] == "absent"),
-           len(_pen)) == (1, 4, 11, 0),
+           len(_pen)) == (1, 4, 11, 1),
           f"pending={[f['file_kind_code'] for f in _pen]}")
+    check("★ pending 的那一个是 .hda（不是别的什么溜进来了）",
+          [f["file_name"] for f in _pen] == ["毕设.hda"],
+          str([f["file_name"] for f in _pen]))
     check("★★ .dq 必须记 blocked —— 它看着像文本，其实是定长二进制记录",
           _st.get("114") == "blocked", str(_st.get("114")))
     check("★ blocked 的 parse_note 必须写明实测依据（不是一句「读不了」）",

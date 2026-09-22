@@ -1011,6 +1011,34 @@ _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
 #  ⚠ 只收**明确登记过的**，不做"见到就收"。理由：`.cys`（涵洞系统参数）也
 #    在磁盘上、也不在〔文件名〕段里，但它是**软件参数**不是工程数据，收了就把
 #    台账弄脏了（见 `_SYSTEM_PARAM_SUFFIX`）。所以这张表必须一行一行加。
+# ★ 台账的第二张显式登记表：**`.PRJ` 里声明了、但纬地没给键号**的文件。
+#   与 `_LEDGER_EXTRA_SUFFIX` 是两回事 —— 那张表管的是"磁盘上有、`.PRJ` 压根没提"，
+#   这张表管的是"`.PRJ` 提了、就排在〔文件名〕段里、唯独没有号"。
+#   ⚠ 同样一行一行加，不做"没号就收"：没号的原因**各不相同**（见下面 _SYSTEM_PARAM_SUFFIX）。
+_LEDGER_DECLARED_CODELESS = {
+    # ★ 2026-09-22 用户定「甲 = 加」。依据（网上查证 + 实测）：
+    #   ① 纬地官方技术支持原文：「每一个涵洞项目都有两个设计文件（hda 和 cys）组成，
+    #      其中 **hda 文件用于保存涵洞设计参数**，cys 文件用于保存绘图参数」——
+    #      **hda 是工程数据**。
+    #   ② 「只需要打开新的路线项目，**在项目管理器中把原来的（hda 和 cys）文件路径
+    #      添加进来即可**」—— 涵洞是**独立产品**(HintHD)，按路径手工挂进来，
+    #      所以它在〔文件名〕段里**有名有路径、就是没有号**。**不是疏漏。**
+    #   ③ 实测 4 个涵洞，桩号 820/2700/3700/4500 m 全在本路段(0~5805.421 m)内 ——
+    #      确实是本工程的数据。
+    #   ④ 与 .dtm 同类：都是"确实是工程文件、暂时解析不了"。
+    #
+    #   ⚠ 为什么是 `pending` 而不是 `blocked`：`blocked` = **结构上**读不了（二进制）；
+    #     而 .hda 是**纯文本 GBK**，框架**能**解析 —— 实测 `BEGIN_CUL` + 桩号 + GUID，
+    #     4 个涵洞的 10 个分节**完全一致**、节号是固定枚举
+    #     （[基本参数]0 [涵身参数]1 [分段错台]2 [左帽石]3 [右帽石]4
+    #       [左洞口]7 [右洞口]8 [计算参数]11 [涵洞附注]12 [钢筋参数]13；5/6/9/10 缺号）。
+    #     解析不了的是**每一列数字的含义** —— 只有教程 §24.13.2 说得清，而那本
+    #     72 页 PDF 公开网络取不到（试过道客巴巴/土木在线/百度报告，都没拿到正文）。
+    #     → 所以：**登记 + 记下能确证的（桩号），但不建涵洞表**。
+    #       猜列含义会往库里灌一批"看着有、其实含义错"的数据，比没有更糟。
+    ".hda": ("pending", "涵洞设计参数文件（HintHD 涵洞系统的工程数据）"),
+}
+
 _LEDGER_EXTRA_SUFFIX = {
     ".prj": "总项目文件(*.PRJ)",
     # ★ 2026-09-22 用户定「甲 = 加」。三条理由（按硬度排）：
@@ -1217,15 +1245,27 @@ def _plan_design_files(prj: Mapping[str, Any],
                 skipped.append(
                     f"{f['kind_name']}（{_SYSTEM_PARAM_SUFFIX[_suffix]}—— "
                     "本就不属于工程台账，与字段号无关）")
-            elif _suffix == ".hda":
-                # ⚠ 与上面那句「未给字段号」分开：号只是**表象**，给了号也进不来。
-                skipped.append(
-                    f"{f['kind_name']}（**工程数据**，但字段含义无文档：格式说明在"
-                    "《纬地涵洞设计系统教程》§24.13.2，该说明书未获得；"
-                    "且本仓尚无 .hda 适配器 —— 与「.PRJ 未给字段号」是两件事，"
-                    "给了号也进不来）")
+            elif _suffix in _LEDGER_DECLARED_CODELESS:
+                # ★ 2026-09-22：这类**进台账**（file_kind_code=NULL）。原来一律跳过，
+                #   依据是"NOT NULL 满足不了"—— 那条约束已在迁移 ⑨② 去掉，
+                #   所以理由不再成立。见 _LEDGER_DECLARED_CODELESS 上的完整依据。
+                _st, _nm = _LEDGER_DECLARED_CODELESS[_suffix]
+                rows.append({
+                    "file_kind_code": None,   # ★ NULL = 纬地自己没给码
+                    "file_kind_name": f["kind_name"],
+                    "file_name": _basename(rel) or rel,
+                    "rel_path": rel,
+                    "coverage_from_station_km": None,
+                    "coverage_to_station_km": None,
+                    "parse_status": _st,
+                    "parse_note": _nm,
+                    "remark": ("`.PRJ`〔文件名〕段里**声明了**它（有名字有路径），"
+                               "但**没有键号** —— 它是纬地**涵洞系统**(HintHD) 的"
+                               "工程文件，按路径手工挂进项目管理器，故无号"),
+                })
+                continue
             else:
-                skipped.append(f"{f['kind_name']}（.PRJ 未给字段号，无法满足 NOT NULL）")
+                skipped.append(f"{f['kind_name']}（.PRJ 未给字段号，且未登记进台账）")
             continue
         declared = _basename(rel)
         suffix = ("." + declared.rsplit(".", 1)[-1].lower()) if declared and "." in declared else ""
