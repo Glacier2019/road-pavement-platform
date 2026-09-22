@@ -2666,13 +2666,23 @@ def main() -> int:
     #        图框([TITLE] 1:[SCALE])、填充图案(ANSI31) —— **软件的系统参数**，
     #        纬地自己的说明也写它是"安装目录下'系统设置'文件夹中的系统参数.cys"。
     #        → 它**本就不该进工程台账**，跟字段号无关。
-    check("2 条被跳过的文件，且原因**分别**写对（.hda 是 .PRJ 疏漏 / .cys 是系统参数）",
+    # ★ 2026-09-22 更正：原来这里断言 .hda 的理由是「未给字段号」——
+    #   **那条断言本身是错的**。号只是表象，给了号它也进不来：缺的是适配器，
+    #   而适配器做不出来的原因是字段含义无文档（说明书 §24.13.2 未获得）。
+    #   断言改红是对的 —— 它抓住了"我们把表象当成了原因"。
+    check("2 条被跳过的文件，且原因**分别**写对（.hda 是字段无文档 / .cys 是系统参数）",
           len(planned["skipped_files"]) == 2
-          and any("未给字段号" in x and ".hda" in x for x in planned["skipped_files"])
+          and any("字段含义无文档" in x and ".hda" in x for x in planned["skipped_files"])
           and any("系统参数" in x and ".cys" in x for x in planned["skipped_files"]),
           str(planned["skipped_files"]))
-    check("★ 元测试：.cys 的跳过理由**不能**只是「未给字段号」（那是 .hda 的理由）",
+    check("★ .hda 的理由点明「与『未给字段号』是两件事，给了号也进不来」",
+          any(".hda" in x and "给了号也进不来" in x for x in planned["skipped_files"]),
+          str(planned["skipped_files"]))
+    check("★ 元测试：.cys 的跳过理由**不能**只是「未给字段号」（那是表象，不是原因）",
           all("未给字段号" not in x for x in planned["skipped_files"] if ".cys" in x))
+    check("★ 元测试：.hda 的理由**不能**只说「.PRJ 未给字段号」（那是表象）",
+          all("未给字段号，无法满足 NOT NULL" not in x
+              for x in planned["skipped_files"] if ".hda" in x))
     check("★ 元测试：design_file 每行都有 file_kind_code（满足 NOT NULL）",
           all(f["file_kind_code"] for f in planned["tables"]["design_file"]))
     # 已实现适配器的后缀才给 ok。加 .DMX/.ZDM 后从 3 个变 5 个 —— 这条断言当时
