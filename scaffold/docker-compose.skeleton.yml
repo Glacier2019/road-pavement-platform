@@ -328,6 +328,10 @@ services:
       # 几何浏览页经此地址转发到 M6（容器内服务名与端口，不是宿主映射端口 8001）
       GATEWAY_BASE: http://api:8000
       GATEWAY_TIMEOUT_S: "10"
+      # 设计导入页的上游。**与 GATEWAY_BASE 分开是有意的**：导入是写，
+      # 而 /gw 的契约是只读转发（POST /gw/... → 405），两者不能共用一个地址。
+      INGEST_BASE: http://ingest:8000
+      INGEST_TIMEOUT_S: "120"
       LOG_LEVEL: INFO
       TZ: Asia/Shanghai
     ports:

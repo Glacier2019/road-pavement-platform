@@ -67,6 +67,7 @@
 <nav>
   <a href="/" class="here">首页</a>
   <a href="/geometry">GE 道路几何</a>
+  <a href="/import">设计数据导入</a>
   <a href="/docs">接口文档</a>
 </nav>
 <main>
@@ -80,10 +81,13 @@
         <p>按路段看桩号序列、交点链、线元链、纵断面，以及几何完整度等级 L0–L4。
            缺口分成「表还没建」与「建好了但没数据」两类。</p>
       </div>
-      <div class="card off">
-        <a>设计数据导入</a>
-        <p>未做。导入要往库里写，而写只能经 M2；M2 目前还没有
-           <span class="mono">POST /v1/design/import</span>，所以这一页先不建。</p>
+      <div class="card">
+        <a href="/import">设计数据导入</a>
+        <p>上传一个纬地设计文件（<span class="mono">.STA/.JD/.pm/.DMX/.SUP/.WID/.CTR/.HDM/…</span>），
+           经 M2 的 <span class="mono">POST /v1/design/import</span> 解析成契约⑤ IR 再落库，
+           返回批次号、逐段行数与缺口。
+           <span class="muted">这一页<b>不走 <span class="mono">/gw</span></b>——<span class="mono">/gw</span>
+           的契约是「有边界的只读转发」，而导入是写。</span></p>
       </div>
       <div class="card off">
         <a>指标看板</a>

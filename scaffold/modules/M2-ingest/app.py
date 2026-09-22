@@ -12,20 +12,27 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
+import tempfile
 import threading
 import time
+import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 from paho.mqtt import client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 from pydantic import ValidationError
 from rpdao.write import WriteDao
 
+import design_import
+from adapters import base, weidi
+from adapters.errors import ImportError_, ParseBlocked, SourceInvalid  # noqa: F401
+from design_import import LoadError
 from models import SCHEMA_VERSION, WimEvent
 import violations
 
@@ -419,3 +426,121 @@ def metrics() -> str:
             f"rp_ingest_mqtt_up {1 if STATE.mqtt_connected else 0}",
         ]
     return "\n".join(lines) + "\n"
+
+
+# ═══════════════════════════════════════════ 契约⑤：设计数据导入（HTTP 面）
+# 把"IR → 落库"这条已经在测试里跑通的链路，接成一个能被 M9 页面调用的端点。
+#
+# 收的是**单个文件**（不是工程目录）：解析器 `parse(text, *, file=...)` 本来就只吃
+# 文本，所以单个上传的文件可以直接解析。做法是把字节写进一个临时目录，再调
+# `weidi.build_ir(tmpdir)` —— **复用整条既有链路**，而不是为单文件另写一遍。
+# 好处是 IR 的形状、gaps 的分类（source_absent / parse_blocked / not_supported）
+# 全部与目录导入一致：目录里没有的那些段照样老实记 source_absent。
+
+#: 契约⑤ 的 schema 在镜像里的位置（由 Dockerfile COPY 进来）
+IR_SCHEMA_PATH = pathlib.Path(
+    os.getenv("IR_SCHEMA_PATH",
+              "/app/contracts/design-import/road_geometry_ir.v0.3.schema.json"))
+
+_ir_validator: Any = None
+
+
+def _ir_schema_validator() -> Any:
+    """懒加载契约⑤ 的校验器。**校验的是 IR 本身**，不是落库结果。"""
+    global _ir_validator
+    if _ir_validator is None:
+        import jsonschema
+        _ir_validator = jsonschema.Draft202012Validator(
+            json.loads(IR_SCHEMA_PATH.read_text(encoding="utf-8")))
+    return _ir_validator
+
+
+#: 本端点认的后缀 = 已实现解析的 + 已知解不开的。
+#  后者也放行：`build_ir` 会把它记成 parse_blocked 进 gaps，
+#  让用户看到"这个文件我收到了、但按现有手段读不了"，而不是一个 400。
+_ACCEPTED_SUFFIX = set(design_import._IMPLEMENTED_SUFFIX) | set(design_import._BLOCKED_SUFFIX)
+
+
+@app.post("/v1/design/import", tags=["设计导入"],
+          summary="上传一个纬地设计文件 → 解析成 IR → 落进 GE 表")
+async def design_import_route(
+    file: UploadFile = File(..., description="单个纬地设计文件（.STA/.JD/.pm/.DMX/.SUP/.WID/.CTR/.HDM/…）"),
+    section_id: int = Form(..., description="落到哪个路段（road_section.id）"),
+    dry_run: bool = Form(False, description="true = 只预检（plan+verify），一行都不写"),
+    batch_no: str | None = Form(None, description="批次号；留空则自动生成"),
+) -> dict[str, Any]:
+    """上传 → IR → 落库。返回批次号、逐段计划/实写行数、告警与缺口。
+
+    ⚠ 只经 `WriteDao`（本模块是七域业务数据的唯一写入方），越权表会直接抛
+      `WriteGuardError` —— 这里**不 catch** 它：那是编程错误，不是用户输入问题，
+      应当以 500 暴露出来，而不是伪装成 400 让用户去改文件。
+    """
+    # ① 文件名只取 basename —— 上传方可以送 "../../etc/passwd" 这种，
+    #    直接拿去拼临时目录路径就会写到目录外。这是**安全**问题，不是洁癖。
+    raw_name = pathlib.Path(file.filename or "").name
+    if not raw_name:
+        raise HTTPException(status_code=400, detail="文件名为空")
+    suffix = pathlib.Path(raw_name).suffix.lower()
+    if suffix not in _ACCEPTED_SUFFIX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不认这个后缀 {suffix!r}。本端点接受："
+                   + "、".join(sorted(_ACCEPTED_SUFFIX)))
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="文件是空的（0 字节）")
+
+    batch = batch_no or f"design-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid.uuid4().hex[:6]}"
+
+    # ② 写进临时目录，然后**复用目录导入的整条链路**
+    with tempfile.TemporaryDirectory(prefix="rp-design-") as td:
+        path = pathlib.Path(td) / raw_name
+        path.write_bytes(data)
+
+        # 编码：utf-8 优先、退 gbk（.PRJ 是 GBK）。读不出来就是源不合法。
+        try:
+            text, used_enc = base.read_text_any(path)
+        except Exception as exc:                                   # noqa: BLE001
+            raise HTTPException(status_code=400,
+                                detail=f"读不出文本（既不是 UTF-8 也不是 GBK）：{exc}") from exc
+
+        try:
+            ir = weidi.build_ir(td)
+        except ImportError_ as exc:
+            raise HTTPException(status_code=400, detail=f"解析失败：{exc}") from exc
+
+    # ③ 校验 IR 本身过不过契约⑤。落库器已经会挡坏数据，但那是**下游**；
+    #    这里挡的是"我们产出的 IR 不符合自己声明的契约" —— 那是我们的 bug，
+    #    也要以明确的信息暴露，而不是让它悄悄流进库里。
+    errs = sorted(_ir_schema_validator().iter_errors(ir),
+                  key=lambda e: list(e.absolute_path))
+    if errs:
+        first = errs[0]
+        where = "/".join(str(p) for p in first.absolute_path) or "(根)"
+        raise HTTPException(
+            status_code=500,
+            detail=f"内部错误：生成的 IR 不符合契约⑤（{len(errs)} 处），"
+                   f"首处 {where}：{first.message}")
+
+    # ④ 落库（多表同事务）
+    try:
+        report = design_import.load(
+            ir, dao, section_id=section_id, batch_no=batch,
+            source_desc=f"{raw_name}（{used_enc}）",
+            writer=WRITER, dry_run=dry_run, strict=True)
+    except LoadError as exc:
+        raise HTTPException(status_code=400, detail=f"落库前检查未通过：{exc}") from exc
+    except ImportError_ as exc:
+        raise HTTPException(status_code=400, detail=f"解析/校验失败：{exc}") from exc
+
+    # ⑤ 把"这个文件本身"的信息一并回给调用方：解析状态与缺口原因，
+    #    不然用户只看 planned 行数，不知道其余段是"源里没有"还是"适配器没做"。
+    report["file"] = {"name": raw_name, "encoding": used_enc,
+                      "suffix": suffix, "bytes": len(data)}
+    report["source"] = ir.get("source")
+    report["gaps"] = ir.get("gaps")
+    report["ir_warnings"] = ir.get("warnings")
+    report["parsed_segments"] = sorted(
+        k for k, v in (ir.get("segments") or {}).items() if v)
+    return report

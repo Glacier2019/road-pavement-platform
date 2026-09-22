@@ -4,3 +4,6 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 psycopg[binary,pool]==3.2.3
 PyYAML==6.0.2
+# 设计导入页：收上传要 multipart，转发到 M2 要一个 HTTP 客户端
+httpx==0.28.1
+python-multipart==0.0.20

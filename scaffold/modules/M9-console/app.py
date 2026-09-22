@@ -33,8 +33,9 @@ import urllib.request
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 import yaml
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 logging.basicConfig(
@@ -51,10 +52,25 @@ PROBE_TIMEOUT = float(os.getenv("PROBE_TIMEOUT_S", "3"))
 # 页面自身不写死主机端口，所以 M9 部署到哪台机器、从哪个地址打开都能用。
 GATEWAY_BASE = os.getenv("GATEWAY_BASE", "http://localhost:8001").rstrip("/")
 GATEWAY_TIMEOUT_S = float(os.getenv("GATEWAY_TIMEOUT_S", "10"))
+
+# 设计导入页要**写**，所以它**不走 /gw** —— 这不是遗漏，是契约划的界：
+#   · `/gw` 的契约是「**有边界的只读转发，不是通用代理**」（见 /gw 的实现与 M9 的
+#     契约测试：`POST /gw/... → 405`）。导入是写，塞进 /gw 就把那条界破了。
+#   · M6 那边倒是有 `POST /v1/actions/{action_name}`，但它的契约写明那是
+#     **受治理动作**：参数校验 → 权限校验 → 副作用 → 写回 → 审计留痕，
+#     且**默认在人工确认后才执行**，计划实现的是
+#     create_maintenance_ticket / dispatch_alert / confirm_event /
+#     mark_data_quality_issue / request_design_change —— 是"要审批的事"。
+#     数据接入不是那一类：它不需要人工确认，也不需要审计留痕那一套。
+#   · 所以导入直连 M2。M9 的硬线是「**不得直连数据库**」（读只经 M3 rpdao），
+#     不是"不得连别的服务" —— 这一条仍然是 HTTP，M9 依旧不碰库。
+INGEST_BASE = os.getenv("INGEST_BASE", "http://localhost:8010").rstrip("/")
+INGEST_TIMEOUT_S = float(os.getenv("INGEST_TIMEOUT_S", "120"))
 #: 只转发这些前缀。**这不是通用代理**：只有 GET，且必须落在 M6 的 API 命名空间内 ——
 #: 目的是让页面与 M9 同源（不必给 M6 放开 CORS），而不是把 M9 变成任意转发器。
 GATEWAY_ALLOWED_PREFIXES = ("v1/",)
 GEOMETRY_PAGE = pathlib.Path(__file__).with_name("geometry.html")
+IMPORT_PAGE = pathlib.Path(__file__).with_name("import.html")
 INDEX_PAGE = pathlib.Path(__file__).with_name("index.html")
 
 MODULE_CONTRACTS = {
@@ -265,6 +281,56 @@ def gateway_get(path: str, request: Request) -> JSONResponse:
             502, detail=f"取不到上游数据：M6（{GATEWAY_BASE}）不可达 —— {exc}") from exc
     except json.JSONDecodeError as exc:
         raise HTTPException(502, detail=f"上游返回的不是 JSON：{exc}") from exc
+    return JSONResponse(payload)
+
+
+@app.get("/import", response_class=HTMLResponse, include_in_schema=False)
+def import_page() -> HTMLResponse:
+    """设计数据导入页。取数入口是 M2（见 INGEST_BASE 上面那段为什么不经 /gw）。"""
+    if not IMPORT_PAGE.exists():
+        raise HTTPException(500, f"页面文件缺失：{IMPORT_PAGE}")
+    return HTMLResponse(IMPORT_PAGE.read_text(encoding="utf-8"))
+
+
+@app.post("/v1/design/import", include_in_schema=False)
+async def design_import_forward(
+    file: UploadFile = File(...),
+    section_id: int = Form(...),
+    dry_run: bool = Form(False),
+) -> JSONResponse:
+    """把上传的设计文件转给 M2。**这一步只做搬运与错误翻译，不做解析。**
+
+    为什么要有这一层：页面与 M9 同源，省掉给 M2 放开 CORS —— 与 /gw 同一个理由。
+    但**语义完全不同**：/gw 是只读转发，这里是写，所以它单独一条路由、单独一个
+    上游地址（INGEST_BASE），不复用 /gw 的前缀白名单。
+
+    错误翻译的原则与 /gw 一致：上游的语义化状态码**原样透传**
+    （400 = 你传的文件有问题，页面要能显示原因），只有"够不着上游"才是 502。
+    """
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "文件是空的（0 字节）")
+    try:
+        async with httpx.AsyncClient(timeout=INGEST_TIMEOUT_S) as client:
+            resp = await client.post(
+                f"{INGEST_BASE}/v1/design/import",
+                files={"file": (pathlib.Path(file.filename or "upload").name, data)},
+                data={"section_id": str(section_id),
+                      "dry_run": "true" if dry_run else "false"},
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+        raise HTTPException(
+            502, detail=f"够不着 M2 接入服务（{INGEST_BASE}）—— {type(exc).__name__}: {exc}") from exc
+
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise HTTPException(502, detail=f"上游返回的不是 JSON：{resp.text[:300]}") from exc
+
+    if resp.status_code >= 400:
+        # 原样透传状态码与 detail —— 页面据此区分"文件不对"（400）与"上游坏了"（502）
+        detail = payload.get("detail") if isinstance(payload, dict) else payload
+        raise HTTPException(resp.status_code, detail=str(detail)[:600])
     return JSONResponse(payload)
 
 

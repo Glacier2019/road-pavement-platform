@@ -145,6 +145,7 @@ def main() -> int:
     # 首页只打 M9 自己的接口，出现 /gw 反而说明它绕了不该绕的路。
     PAGES = {
         "geometry.html": 'const GW = "/gw"',
+        "import.html": 'const GW = "/gw"',      # 读路段列表仍经 /gw → M6
         "index.html": 'const GW = ""',
     }
     have = sorted(p.name for p in M9_DIR.glob("*.html"))
@@ -160,6 +161,26 @@ def main() -> int:
         ok(f"{_name} 的取数入口声明正确（{_gw}）", _gw in html)
         ok(f"{_name} 没有构建产物依赖（无外部 script/link 引入）",
            not re.search(r"<(script|link)[^>]+(src|href)=[\"']https?://", html))
+    # ------------------------------------------------- 3b) 导入页的边界
+    # 导入是**写**，而 /gw 的契约是「有边界的只读转发」（下面第 4 组会断言
+    # POST /gw/... → 405）。所以导入页必须**另有**入口，不能把写塞进 /gw。
+    # 这条不是形式检查：把写塞进只读转发器，等于悄悄把那条界破掉，
+    # 而 /gw 的白名单是前缀匹配，塞进去**照样能跑通**——不报错，只是越了界。
+    print("\n=== 3b) 导入页：写走自己的端点，不借 /gw ===")
+    _imp = (M9_DIR / "import.html").read_text(encoding="utf-8")
+    ok("导入页声明了直连 M9 自己的转发端点（不是 /gw）",
+       'const API = "/v1/design/import"' in _imp)
+    ok("导入页确实用那个端点发 POST，而不是 fetch(GW + …)",
+       re.search(r"fetch\(\s*API\s*,\s*\{\s*method:\s*\"POST\"", _imp) is not None)
+    ok("导入页里没有向 /gw 发 POST（那会被 405 挡住）",
+       not re.search(r"fetch\(\s*GW[^)]*method:\s*\"POST\"", _imp))
+    ok("导入页向用户说明了「为什么不经 /gw」",
+       "只读转发" in _imp)
+    # 元测试：把 POST 改成打 /gw，上面那条必须红
+    ok("元测试：把导入改成 POST 到 /gw 时必须被认出来",
+       re.search(r"fetch\(\s*GW[^)]*method:\s*\"POST\"",
+                 _imp.replace("fetch(API, { method: \"POST\"", "fetch(GW, { method: \"POST\"", 1)) is not None)
+
     # 元测试：写死地址时必须能被认出来
     ok("元测试：检测规则确实能认出写死的地址（不是摆设）",
        bool(re.search(r"localhost:\d+", "fetch('http://localhost:8001/x')")))

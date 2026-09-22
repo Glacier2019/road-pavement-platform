@@ -15,6 +15,7 @@ COPY app.py ./
 # 几何浏览页：自包含 HTML（内联 JS/CSS，无构建步骤），随镜像一起带
 COPY geometry.html ./
 COPY index.html ./
+COPY import.html ./
 # 配置外置：config/ 随镜像带默认值，生产由 volume/环境变量覆盖（五件套第 3 件）
 COPY config/ ./config/
 

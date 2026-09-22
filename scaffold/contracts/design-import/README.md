@@ -432,6 +432,37 @@ v0.4/v0.5 的 11 张表（`.CTR` 9 张 + `.tf`/`.lj` 2 张）落地后**没人�
 但必须满足两条：① **可重建**（导入器能一键重算并断言结果一致）；② 与 A12 同批次生成。
 DDL 里已标注，落库器要实现。
 
+## HTTP 面：怎么把它用起来
+
+```
+M9 导入页 ──POST multipart──▶ M9 /v1/design/import ──转发──▶ M2 /v1/design/import
+                                                              │
+                        ┌─────────────────────────────────────┘
+                        ▼
+   文件字节 → 临时目录 → weidi.build_ir(dir) → 过契约⑤ schema → plan → verify → load(WriteDao)
+```
+
+- **收的是单个文件**，不是工程目录。解析器 `parse(text, *, file=...)` 本来就只吃文本，
+  所以把字节写进一个临时目录再调 `weidi.build_ir(tmpdir)` 就够了 —— **复用整条既有链路**，
+  不为单文件另写一遍。于是 IR 的形状、`gaps` 的分类（`source_absent` /
+  `parse_blocked` / `not_supported`）与目录导入**完全一致**：
+  目录里没有的那些段照样老实记 `source_absent`。
+- **文件名只取 basename**。上传方可以送 `../../etc/passwd`，直接拿去拼临时目录路径
+  就会写到目录外 —— 这是安全问题，不是洁癖。
+- **IR 要过契约⑤ schema**（`jsonschema`）。落库器已经会挡坏数据，但那是下游；
+  这一层挡的是「我们产出的 IR 不符合自己声明的契约」，那是**我们的 bug**，
+  以 500 暴露，不伪装成 400 让用户去改文件。
+- **上游语义化状态码原样透传**：400 = 你传的文件有问题（页面要能显示原因），
+  502 = 够不着 M2。`WriteGuardError` **不 catch** —— 越权是编程错误，不是用户输入问题。
+- 认的后缀 = 已实现的 12 个 + 已知解不开的 6 个。后者也放行：
+  `build_ir` 会把它记成 `parse_blocked` 进 `gaps`，让用户看到
+  「文件我收到了、但按现有手段读不了」，而不是一个 400。
+
+**实测（2026-09-22，`.HDM` 61,407 B，section 6）**：预检 → `L4`、
+`cross_section_ground_point` 计划 2215 行（与库里 2215 一致）、缺口逐段 `source_absent`；
+真写 → `written 2215`、批次行 `导入当时几何等级 L4｜缺口 source_absent×11`；
+库计数不变（**幂等**）。浏览器里从拖文件到出结果整条跑通。
+
 ## 待办
 
 - [x] ~~`.pm` → `alignment_element`~~ ✅ 2026-09-17（33 单元；3 条不变量证明字段语义）
@@ -472,8 +503,28 @@ DDL 里已标注，落库器要实现。
       若要按等级筛批次，需给该表加工单加列 —— 不擅自扩表。
 - [ ] `alignment_pi` **没有桩号列**（交点桩号 = ZH + 切线长，是派生量，故不存）：
       核对时得现算。若预检报告要展示它，在报告层算，别急着加列。
-- [ ] M2 `POST /v1/design/import/precheck`（预检，**不落库**）
-- [ ] M9 控制台导入页（预检报告 → 确认 → 落库）
+- [x] ~~M2 `POST /v1/design/import/precheck`（预检，**不落库**）~~
+      ✅ 2026-09-22 —— **但实现成一个端点 + `dry_run` 标志，不是两个端点**：
+      `POST /v1/design/import`（`modules/M2-ingest/app.py`）。
+      待办里提的是 `/precheck` + `/import` 两条，落地时改成一个，理由：
+      两条路由的**解析 → IR → 契约校验 → plan → verify** 完全相同，只有最后写不写库不同。
+      拆两条就是把同一段逻辑抄两遍，而**抄两遍就会分家** —— 这类"两条路径慢慢不一致"
+      正是本次刚在 DDL/migration 上抓到的那类问题（见 `sql/89` 的后记）。
+      落库器 `design_import.load(..., dry_run=)` 本来就是这个设计，端点照它来。
+      **两条路径的差别有实测为证**：`dry_run=true` 时 `section_start_km` 是 `null`
+      （不查库，见 `load` 里的 `if section_start_km is None and not dry_run`），
+      且**不写 `data_import_batch`**；`dry_run=false` 时是 `0.0`，且有批次行。
+- [x] ~~M9 控制台导入页（预检报告 → 确认 → 落库）~~ ✅ 2026-09-22
+      页面 `modules/M9-console/import.html`（路由 `/import`）。拖拽/选择单个文件 →
+      预检（勾选「只预检」）→ 看逐表计划行数、几何等级、缺口与告警 → 取消勾选再导入。
+      **⚠ 导入页不走 `/gw`**：`/gw` 的契约是「有边界的只读转发，不是通用代理」
+      （`POST /gw/... → 405`），而导入是写。M6 那边虽有 `POST /v1/actions/{action_name}`，
+      但契约写明那是**受治理动作**（权限校验/副作用/写回/审计留痕，默认人工确认后才执行），
+      数据接入不属于那一类。故导入走 M9 自己的 `POST /v1/design/import`，
+      转发到 `INGEST_BASE`（与 `GATEWAY_BASE` 分开配置）。M9 的硬线是
+      「不得直连**数据库**」，这一条仍然是 HTTP，M9 依旧不碰库。
+      契约测试 `tests/contract/test_console.py` 第 3b 组专门钉住这条边界
+      （含一条元测试：把导入改成 `POST` 到 `/gw` 时必须变红）。
 - [ ] **L3 的 `any` 语义待定论**：`derive_level` 目前对 `(profile_grade_point, profile_ground_point)`
       用 `any`，即"只有地面线"也会被判成有纵断面。等 .ZDM/.DMX 落地时必须改成 `all` 或拆级，
       否则等级**虚高**。已写在 `base.derive_level` 的 docstring 里。

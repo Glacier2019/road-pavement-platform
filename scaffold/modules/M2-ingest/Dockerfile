@@ -21,7 +21,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 收口后本服务**不再自带连接池、不再有裸 SQL**，读写一律经契约③。
 COPY modules/M3-rpdao/rpdao /app/rpdao
 
+# 契约⑤（设计数据导入）落地侧：解析适配器 + 落库器。
+# 加了 /v1/design/import 之后，本服务要能 import 这些；在此之前它们只被测试用到，
+# 没进镜像 —— 于是"测试里跑得通"和"服务里跑得通"是两件事。
+# ⚠ adapters/ 要整目录 COPY：design_import 依赖 adapters.geom 与 adapters.weidi.*，
+#   逐个文件列容易漏（漏了就是启动即 ImportError）。
+COPY modules/M2-ingest/adapters /app/adapters
+COPY modules/M2-ingest/design_import.py ./
 COPY modules/M2-ingest/models.py modules/M2-ingest/violations.py modules/M2-ingest/app.py ./
+
+# 契约⑤ 的 schema：端点拿它校验自己产出的 IR 过不过契约。
+# 放在 /app/contracts/design-import/，与 IR_SCHEMA_PATH 的默认值对应。
+COPY contracts/design-import /app/contracts/design-import
 
 EXPOSE 8000
 
