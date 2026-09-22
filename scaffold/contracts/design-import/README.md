@@ -442,11 +442,42 @@ M9 导入页 ──POST multipart──▶ M9 /v1/design/import ──转发─�
    文件字节 → 临时目录 → weidi.build_ir(dir) → 过契约⑤ schema → plan → verify → load(WriteDao)
 ```
 
-- **收的是单个文件**，不是工程目录。解析器 `parse(text, *, file=...)` 本来就只吃文本，
-  所以把字节写进一个临时目录再调 `weidi.build_ir(tmpdir)` 就够了 —— **复用整条既有链路**，
-  不为单文件另写一遍。于是 IR 的形状、`gaps` 的分类（`source_absent` /
-  `parse_blocked` / `not_supported`）与目录导入**完全一致**：
+- **收一个或多个文件**（`files`，可重复），全部写进**同一个**临时目录，再调
+  `weidi.build_ir(tmpdir)` —— **复用整条既有链路**。于是 IR 的形状、`gaps` 的分类
+  （`source_absent` / `parse_blocked` / `not_supported`）与目录导入**完全一致**：
   目录里没有的那些段照样老实记 `source_absent`。
+
+  **为什么必须能一次多个**：跨文件校验只在两段同时在场时才成立 ——
+  `.STA` 非整桩 ≡ 曲线特征点 ∪ {首末} 要 `.STA`+`.pm`；`.JD` 对 `.pm` 的转向符号对质
+  要两者都在；几何等级升到 L4 要横断面那几段都在。一次一个文件时这些**全都跑不起来**。
+  实测（052201341 毕设，20 个文件一次传）：单传 `.HDM` 是 1 段 1 表；
+  整目录是 **11 段 17 表 3719 行**，`交点来源 derived`（`.JD` 走验算路径）。
+
+- **未登记的后缀：收下、跳过、报出来，不是 400。** 拖一整个工程目录是正常用法，
+  而真实工程里总有几个没人管的后缀（本工程是 `.hda` 涵洞数据文件）。因为一个 `.hda`
+  就把整批拒掉，等于逼用户手工挑文件 —— 而手工挑正是最容易漏掉关键文件的做法。
+  返回里 `skipped` 逐条给出 `reason`，两类性质不同：
+    · `system_param`（`.cys` 等）——**按设计**不进库（描述"软件怎么画图"，
+      不是"这条路是什么"），跳过是应该的，但仍要报出来免得用户以为导进去了；
+    · `unregistered`——既没适配器、也没登记为「存在但解不开」，**里面可能有本工程的数据
+      而没有被导入**。页面会把它标红并提示"请确认这些文件是不是该有适配器"。
+  全部文件都不能解析时才是 400。
+
+- **同段多文件会被点名。** `build_ir` 原来是 `hits[0]` 静默取第一个、其余丢掉 ——
+  丢掉的是一整个文件的数据，而**不会有任何报错**（等级照升、页面照样显示"有"）。
+  现在进 `warnings`，点名是哪几个文件、用了哪个。一套工程每段只有一个文件，
+  出现多个通常是把两套工程混在了一起。
+
+- **重名文件直接拒收。** 取完 basename 之后 `a/x.STA` 与 `b/x.STA` 都叫 `x.STA`，
+  写进同一个临时目录就是后者覆盖前者 —— 又一个静默丢数据。故 400 并点名。
+
+- **已知解不开的后缀（`.bdm`/`.gtm`/`.dtm`/`.tsf`/…）不做编码预读。** 它们是二进制，
+  解码必然失败；它们该走 `build_ir` 的 `parse_blocked` 分支记进 `gaps`。
+  ⚠ 第一版对**所有**文件预读，于是拖整个目录时被 `.BDM` 直接 400 ——
+  而 `.BDM` 恰恰是"登记为解不开"的那一类。
+
+- **数量与体量有硬上限**（64 个文件 / 单个 64 MB / 合计 256 MB）。没有它，
+  一个请求就能把临时目录和内存塞满。
 - **文件名只取 basename**。上传方可以送 `../../etc/passwd`，直接拿去拼临时目录路径
   就会写到目录外 —— 这是安全问题，不是洁癖。
 - **IR 要过契约⑤ schema**（`jsonschema`）。落库器已经会挡坏数据，但那是下游；
@@ -458,10 +489,17 @@ M9 导入页 ──POST multipart──▶ M9 /v1/design/import ──转发─�
   `build_ir` 会把它记成 `parse_blocked` 进 `gaps`，让用户看到
   「文件我收到了、但按现有手段读不了」，而不是一个 400。
 
-**实测（2026-09-22，`.HDM` 61,407 B，section 6）**：预检 → `L4`、
-`cross_section_ground_point` 计划 2215 行（与库里 2215 一致）、缺口逐段 `source_absent`；
-真写 → `written 2215`、批次行 `导入当时几何等级 L4｜缺口 source_absent×11`；
-库计数不变（**幂等**）。浏览器里从拖文件到出结果整条跑通。
+**实测（2026-09-22，section 6）**：
+· 单传 `.HDM`（61,407 B）：预检 → `L4`、`cross_section_ground_point` 计划 2215 行
+  （与库里一致）、缺口逐段 `source_absent`；真写 → `written 2215`；库计数不变（**幂等**）。
+· **整目录 20 个文件一次传**：预检 → `L4`、**11 段 17 表**（含 `.CTR` 的
+  `slope_segment 22` / `ditch_segment 6` / `standard_cross_section 2` /
+  `roadbed_trench 2` / `structure_control 6` / `earthwork_composition 1` /
+  `land_use_width 4`）、`交点来源 derived`、`skipped` 2 个（`.hda` unregistered、
+  `.cys` system_param）；真写 → **3719 行，逐表 `planned == written`**；
+  库计数不变（`station_sequence` 332 / `alignment_pi` 8 / `cross_section_ground_point` 2215 /
+  `slope_segment` 22 / 56 表）。
+浏览器里从拖 20 个文件到出结果整条跑通（含真写）。
 
 ## 待办
 

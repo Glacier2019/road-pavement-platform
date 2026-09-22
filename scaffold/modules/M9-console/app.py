@@ -294,7 +294,7 @@ def import_page() -> HTMLResponse:
 
 @app.post("/v1/design/import", include_in_schema=False)
 async def design_import_forward(
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     section_id: int = Form(...),
     dry_run: bool = Form(False),
 ) -> JSONResponse:
@@ -307,14 +307,22 @@ async def design_import_forward(
     错误翻译的原则与 /gw 一致：上游的语义化状态码**原样透传**
     （400 = 你传的文件有问题，页面要能显示原因），只有"够不着上游"才是 502。
     """
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "文件是空的（0 字节）")
+    if not files:
+        raise HTTPException(400, "没有收到任何文件")
+    # 逐个读出来再转发。**这一层不做后缀/重名/体量判断** —— 那是 M2 的职责，
+    # 判两遍就会出现"两层规则慢慢不一致"。这里只做 M9 该做的两件事：
+    # 搬运，以及把"够不着上游"翻译成 502。
+    payload: list[tuple[str, bytes]] = []
+    for f in files:
+        data = await f.read()
+        if not data:
+            raise HTTPException(400, f"文件是空的（0 字节）：{f.filename}")
+        payload.append((pathlib.Path(f.filename or "upload").name, data))
     try:
         async with httpx.AsyncClient(timeout=INGEST_TIMEOUT_S) as client:
             resp = await client.post(
                 f"{INGEST_BASE}/v1/design/import",
-                files={"file": (pathlib.Path(file.filename or "upload").name, data)},
+                files=[("files", (name, data)) for name, data in payload],
                 data={"section_id": str(section_id),
                       "dry_run": "true" if dry_run else "false"},
             )

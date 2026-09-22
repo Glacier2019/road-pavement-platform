@@ -176,6 +176,17 @@ def main() -> int:
        not re.search(r"fetch\(\s*GW[^)]*method:\s*\"POST\"", _imp))
     ok("导入页向用户说明了「为什么不经 /gw」",
        "只读转发" in _imp)
+    # 一次多个文件 —— 不是图省事：跨文件校验只在两段同时在场时才成立。
+    ok("导入页支持一次选多个文件（input multiple）",
+       re.search(r'<input[^>]*type="file"[^>]*\bmultiple\b', _imp) is not None)
+    ok("导入页把多个文件都发出去（同名追加多次，不是只发第一个）",
+       "FILES.forEach((f) => fd.append(" in _imp)
+    ok("导入页说明了「为什么必须一次多个」（跨文件校验）",
+       "跨文件校验" in _imp)
+    # 元测试：把 multiple 去掉，上面那条必须红
+    ok("元测试：去掉 multiple 后必须被认出来",
+       re.search(r'<input[^>]*type="file"[^>]*\bmultiple\b',
+                 _imp.replace('id="file" multiple hidden', 'id="file" hidden', 1)) is None)
     # 元测试：把 POST 改成打 /gw，上面那条必须红
     ok("元测试：把导入改成 POST 到 /gw 时必须被认出来",
        re.search(r"fetch\(\s*GW[^)]*method:\s*\"POST\"",

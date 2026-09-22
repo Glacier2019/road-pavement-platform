@@ -460,50 +460,133 @@ def _ir_schema_validator() -> Any:
 #  让用户看到"这个文件我收到了、但按现有手段读不了"，而不是一个 400。
 _ACCEPTED_SUFFIX = set(design_import._IMPLEMENTED_SUFFIX) | set(design_import._BLOCKED_SUFFIX)
 
+#: 一次最多收多少个文件。一套纬地工程的段是有限的（已实现 12 段 + 已知解不开 6 段），
+#  留出余量即可。**上限是必须有的**：没有它，一个请求就能把临时目录和内存塞满。
+_MAX_FILES = 64
+#: 单个文件与单次请求的字节上限。
+_MAX_FILE_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+
 
 @app.post("/v1/design/import", tags=["设计导入"],
           summary="上传一个纬地设计文件 → 解析成 IR → 落进 GE 表")
 async def design_import_route(
-    file: UploadFile = File(..., description="单个纬地设计文件（.STA/.JD/.pm/.DMX/.SUP/.WID/.CTR/.HDM/…）"),
+    files: list[UploadFile] = File(..., description="纬地设计文件，可一次多个（.STA/.JD/.pm/.DMX/.SUP/.WID/.CTR/.HDM/…）"),
     section_id: int = Form(..., description="落到哪个路段（road_section.id）"),
     dry_run: bool = Form(False, description="true = 只预检（plan+verify），一行都不写"),
     batch_no: str | None = Form(None, description="批次号；留空则自动生成"),
 ) -> dict[str, Any]:
-    """上传 → IR → 落库。返回批次号、逐段计划/实写行数、告警与缺口。
+    """上传（一个或多个文件）→ IR → 落库。返回批次号、逐段计划/实写行数、告警与缺口。
+
+    收多个文件不是图省事，是**必须的**：跨文件校验只在两段同时在场时才成立
+    —— `.STA` 非整桩 ≡ 曲线特征点 ∪ {首末} 要 `.STA`+`.pm`；`.JD` 对 `.pm`
+    的转向符号对质要两者都在；几何等级也从 L1 升到 L4 要横断面那几段都在。
+    一次一个文件时，这些**全都跑不起来**。
 
     ⚠ 只经 `WriteDao`（本模块是七域业务数据的唯一写入方），越权表会直接抛
       `WriteGuardError` —— 这里**不 catch** 它：那是编程错误，不是用户输入问题，
       应当以 500 暴露出来，而不是伪装成 400 让用户去改文件。
     """
-    # ① 文件名只取 basename —— 上传方可以送 "../../etc/passwd" 这种，
+    # ① 数量与体量的硬上限。没有它，一个请求就能把临时目录塞满。
+    if not files:
+        raise HTTPException(status_code=400, detail="没有收到任何文件")
+    if len(files) > _MAX_FILES:
+        raise HTTPException(status_code=400,
+                            detail=f"一次最多 {_MAX_FILES} 个文件，收到 {len(files)} 个")
+
+    # ② 文件名只取 basename —— 上传方可以送 "../../etc/passwd" 这种，
     #    直接拿去拼临时目录路径就会写到目录外。这是**安全**问题，不是洁癖。
-    raw_name = pathlib.Path(file.filename or "").name
-    if not raw_name:
-        raise HTTPException(status_code=400, detail="文件名为空")
-    suffix = pathlib.Path(raw_name).suffix.lower()
-    if suffix not in _ACCEPTED_SUFFIX:
+    #
+    #    ⚠ 取了 basename 之后**重名就必须挡**：来自不同子目录的 a/x.STA 与 b/x.STA
+    #      取完 basename 都是 x.STA，写进同一个临时目录就是**后者覆盖前者** ——
+    #      又是一个静默丢数据。这里直接拒收，并点名是哪几个。
+    named: list[tuple[str, bytes]] = []
+    seen: dict[str, int] = {}
+    # 收下但**不解析**的文件。分两种，性质完全不同：
+    #   · `.cys` 这类「软件自身的参数」——**按设计**就不该进库（它描述"软件怎么画图"，
+    #     不是"这条路是什么"）。静默跳过是可以的，但仍要报出来，免得用户以为导进去了。
+    #   · 其余**未登记**的后缀——既没实现、也没登记为解不开。这可能是**真的在丢数据**
+    #     （`.hda` 涵洞数据文件就是：它是正经工程数据，只是还没人管它）。必须显眼地说。
+    #
+    # ⚠ 为什么要收下而不是 400：**拖一整个工程目录是正常用法**，而一套真实工程里
+    #   总会有几个没人管的后缀。因为一个 `.hda` 就把整批拒掉，等于逼用户手工挑文件 ——
+    #   而"手工挑"正是最容易漏掉关键文件的做法。所以：收下、跳过、说清楚。
+    skipped: list[dict[str, str]] = []
+    for f in files:
+        raw_name = pathlib.Path(f.filename or "").name
+        if not raw_name:
+            raise HTTPException(status_code=400, detail="有文件的名字是空的")
+        suffix = pathlib.Path(raw_name).suffix.lower()
+        data = await f.read()
+        if len(data) > _MAX_FILE_BYTES:
+            raise HTTPException(status_code=400,
+                                detail=f"单个文件超过 {_MAX_FILE_BYTES // 1048576} MB：{raw_name}")
+        seen[raw_name] = seen.get(raw_name, 0) + 1
+        if suffix not in _ACCEPTED_SUFFIX:
+            skipped.append({
+                "name": raw_name,
+                "reason": ("system_param" if suffix in design_import._SYSTEM_PARAM_SUFFIX
+                           else "unregistered"),
+                "detail": design_import._SYSTEM_PARAM_SUFFIX.get(suffix)
+                          or f"未登记的后缀 {suffix!r}：既没有适配器，也没有登记为"
+                             f"「存在但解不开」。**它里面可能有本工程的数据而没有被导入。**",
+            })
+            continue
+        if not data:
+            raise HTTPException(status_code=400, detail=f"文件是空的（0 字节）：{raw_name}")
+        # 已知解不开的后缀（.bdm/.gtm/.dtm/.tsf/…）**不预读**：它们是二进制，
+        # 解码必然失败。它们该走的是 build_ir 的 parse_blocked 分支 —— 记进 gaps，
+        # 让用户看到"收到了但读不了"，而不是让整批挂掉。
+        # ⚠ 我第一版对**所有**文件预读，于是拖一整个工程目录时被 .BDM 直接 400 ——
+        #   而 .BDM 恰恰是"登记为解不开"的那一类。预读只该对**本该是文本**的文件做。
+        named.append((raw_name, data))
+
+    if not named:
         raise HTTPException(
             status_code=400,
-            detail=f"不认这个后缀 {suffix!r}。本端点接受："
-                   + "、".join(sorted(_ACCEPTED_SUFFIX)))
+            detail="收到 " + str(len(files)) + " 个文件，但没有一个能解析："
+                   + "；".join(f"{k['name']}（{k['reason']}）" for k in skipped))
 
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="文件是空的（0 字节）")
+    dup_names = sorted(n for n, c in seen.items() if c > 1)
+    if dup_names:
+        raise HTTPException(
+            status_code=400,
+            detail="有重名文件：" + "、".join(dup_names)
+                   + "。它们写进同一个临时目录会互相覆盖（后写的赢），"
+                     "而覆盖是静默的 —— 请先确认这些文件是不是属于同一套工程。")
+
+    total = sum(len(d) for _, d in named)
+    if total > _MAX_TOTAL_BYTES:
+        raise HTTPException(status_code=400,
+                            detail=f"合计超过 {_MAX_TOTAL_BYTES // 1048576} MB（{total} 字节）")
 
     batch = batch_no or f"design-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid.uuid4().hex[:6]}"
 
-    # ② 写进临时目录，然后**复用目录导入的整条链路**
+    # ③ 全部写进**同一个**临时目录，然后**复用目录导入的整条链路** ——
+    #    这正是"一次多个文件"能自动获得跨文件校验的原因：build_ir 看到的就是
+    #    一个完整的工程目录，它那几条跨文件动作（混版告警、转向符号对质、
+    #    单元挂交点）全都照常生效。
     with tempfile.TemporaryDirectory(prefix="rp-design-") as td:
-        path = pathlib.Path(td) / raw_name
-        path.write_bytes(data)
-
-        # 编码：utf-8 优先、退 gbk（.PRJ 是 GBK）。读不出来就是源不合法。
-        try:
-            text, used_enc = base.read_text_any(path)
-        except Exception as exc:                                   # noqa: BLE001
-            raise HTTPException(status_code=400,
-                                detail=f"读不出文本（既不是 UTF-8 也不是 GBK）：{exc}") from exc
+        encodings: dict[str, str] = {}
+        for raw_name, data in named:
+            path = pathlib.Path(td) / raw_name
+            path.write_bytes(data)
+            suffix = pathlib.Path(raw_name).suffix.lower()
+            if suffix in design_import._BLOCKED_SUFFIX:
+                # 已知解不开：不预读，交给 build_ir 记 parse_blocked。
+                encodings[raw_name] = "(二进制，按已知缺口登记)"
+                continue
+            # 本该是文本的文件：这里试读一次，是为了把"读不了"落到**具体文件名**上
+            # —— 只让 build_ir 去读的话，用户看到的是"某一段 blocked"，
+            # 而真正的原因是"这个文件编码不对"，两者行动不同。
+            # utf-8 优先、退 gbk（.PRJ 是 GBK）。
+            try:
+                _text, used_enc = base.read_text_any(path)
+            except Exception as exc:                               # noqa: BLE001
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"读不出文本（既不是 UTF-8 也不是 GBK）：{raw_name} —— {exc}") from exc
+            encodings[raw_name] = used_enc
 
         try:
             ir = weidi.build_ir(td)
@@ -536,8 +619,14 @@ async def design_import_route(
 
     # ⑤ 把"这个文件本身"的信息一并回给调用方：解析状态与缺口原因，
     #    不然用户只看 planned 行数，不知道其余段是"源里没有"还是"适配器没做"。
-    report["file"] = {"name": raw_name, "encoding": used_enc,
-                      "suffix": suffix, "bytes": len(data)}
+    report["files"] = [{"name": n, "encoding": encodings.get(n, ""), "bytes": len(d)}
+                       for n, d in named]
+    # 收到但没解析的文件。与 `files` 分开列：`files` 是"进了这份 IR 的"，
+    # `skipped` 是"收到了但没进的"——混在一起会让人以为它们也解析了。
+    report["skipped"] = skipped
+    # 兼容单文件调用方：以前这里叫 "file"，现在多文件叫 "files"。
+    # 只留一个名字会让人以为"只收了一个"，故两个都留，files 是权威。
+    report["file"] = report["files"][0] if len(report["files"]) == 1 else None
     report["source"] = ir.get("source")
     report["gaps"] = ir.get("gaps")
     report["ir_warnings"] = ir.get("warnings")

@@ -184,6 +184,11 @@ def build_ir(project_dir: str | pathlib.Path, *,
     # "另外四个文件是另一个版本"这件事会被静默吃掉，而跨版本格式差异无从保证。
     versions: dict[str, str] = {}
     warns_at_parse: list[str] = []
+    # 「同一段出现多个文件」——原来是 `hits[0]` 静默取第一个，其余一声不吭丢掉。
+    # 丢掉的是一整个文件的数据，而**不会有任何报错**：等级照升、页面上段也照显示"有"。
+    # 纬地一套工程本来每个段只有一个文件，出现多个基本就是**把两个工程的文件混在一起了**
+    # —— 那时"取第一个"等于随机丢一半。故这里必须说出来。
+    dupes: list[str] = []
 
     for seg in CAPABILITIES:
         suffix, kind = SEGMENT_FILES[seg]
@@ -201,6 +206,15 @@ def build_ir(project_dir: str | pathlib.Path, *,
             continue
 
         path = hits[0]
+        if len(hits) > 1:
+            # 选第一个是**确定性**的（hits 排过序），但确定性不等于正确 ——
+            # 只是保证同一批输入每次结果一样，好复现。
+            dupes.append(
+                f"{suffix}（{kind}）在目录里有 {len(hits)} 个文件："
+                + "、".join(h.name for h in hits)
+                + f"；**只用了 {path.name}**，其余 {len(hits) - 1} 个的内容没有进这份 IR。"
+                + "一套工程每段只有一个文件，出现多个通常是把两套工程的文件混在了一起 ——"
+                + "请把不属于本工程的文件移走后重导。")
         if seg not in IMPLEMENTED:
             files.append({"name": path.name, "kind": kind, "parse_status": "pending",
                           "note": "适配器尚未实现该段的解析"})
@@ -239,7 +253,9 @@ def build_ir(project_dir: str | pathlib.Path, *,
 
     # 只有两段都拿到才能做的跨文件动作。单看一份文件做不了这些事。
     # （warns_at_parse 是**单文件内部**的发现，由解析器自己给出，先攒着）
-    warns: list[str] = list(warns_at_parse)
+    # dupes 放在最前：与下面的"混版告警"同一性质 —— 它质疑的是**这份 IR 代表了什么**，
+    # 后面那些对质结论都建立在"每个段取到的就是那个段的全部数据"这个前提上。
+    warns: list[str] = list(dupes) + list(warns_at_parse)
 
     # ⓪ 混版告警：同一套工程里出现了多个厂商版本。放在最前，因为它是"整批数据的
     #    来源前提"，后面那些对质结论都建立在"格式一致"这个假设上。
