@@ -1039,6 +1039,13 @@ _LEDGER_DECLARED_CODELESS = {
     ".hda": ("pending", "涵洞设计参数文件（HintHD 涵洞系统的工程数据）"),
 }
 
+# 补一句「为什么是 pending」—— 没有它，台账上只看得出"还没做"，
+# 看不出"**已经确认过能读、只是没写**"，下一个人会重新去查一遍。
+_LEDGER_EXTRA_NOTE = {
+    ".tsf": ("Microsoft Access (Jet 4) 数据库；**实测可读**（纯 Python 解出 20 张表，"
+             "表名/列名全中文），只是适配器尚未实现"),
+}
+
 _LEDGER_EXTRA_SUFFIX = {
     ".prj": "总项目文件(*.PRJ)",
     # ★ 2026-09-22 用户定「甲 = 加」。三条理由（按硬度排）：
@@ -1059,6 +1066,23 @@ _LEDGER_EXTRA_SUFFIX = {
     #   ⚠ 库里那两张像模像样的表（scan3d_model / model_output）**都不是它** ——
     #     那是 M2 感知接入的（三维扫描仪 / 有限元），且都是 0 行。
     ".dtm": "数模文件(*.DTM)",
+    # ★ 2026-09-22 用户定「甲 = 加」。它是这五个里**唯一一个"现在就能写适配器"**的：
+    #   开放格式（Access Jet 4）、列名中文自解释、**不需要任何说明书**。
+    #   ★ 而且它是唯一一个能**真正扩库**的 —— 逐表比对下来，它独有的有：
+    #     · 土石系数（土方 1.23/1.16/1.09，石方 0.92）—— 库里没有
+    #     · 取土坑 / 弃土坑 —— 库里没有
+    #     · **调配过程表 / 过程（各 27 段）** —— 库里没有 ★★ 这是它的核心价值：
+    #       「哪段土运到哪段、运多远」是**调配决策的结果**，
+    #       而 `earthwork_section`（逐桩断面）里**只有数量、没有去向**。
+    #       教程的分工也印证：数量来自 `.tf`，**调配**来自 HintTF。数量 ≠ 调配。
+    #   ★ 它还**重复**了不少已在库里的东西（可当交叉验证素材）：
+    #     竖曲线 12 行 —— 桩号与 `profile_grade_point` **逐位相同**（0/300/790/1980/
+    #       2660/3080/3480/3715/4050/4430/4950/5805.421）；
+    #     土石含量 1 行 —— 与 `.CTR` TFFD 落下的 `earthwork_composition` 一样；
+    #     构造物 2 行 —— 与 `structure_control` 一样；项目/项目分段 —— 重复。
+    #   ⚠ 一处**对不上**，值得查：逐桩断面 **335 行** vs `earthwork_section` **332 行**。
+    #   ⚠ Tmp调配过程表（562 行）是中间结果，不进。
+    ".tsf": "土石方调配文件(*.TSF)",
     # ⚠ .tsf（土石方调配 2,695,168 B，Microsoft Access 数据库）实测同样
     #   「磁盘上有、.PRJ 里没提」，**尚未决定** —— 定了就加进来，机制已经通了。
 }
@@ -1085,7 +1109,16 @@ _BLOCKED_SUFFIX = {
     ".bdm":   "魔数行后为 zlib 压缩的二进制结构，需专有工具",
     ".hdmsj": "与 .bdm 共用魔数，其后为二进制结构，需专有工具",
     ".dtm":   "二进制三维数模本体，非文本",
-    ".tsf":   "Microsoft Access 数据库（.Standard Jet DB），需 ODBC/Jet 引擎",
+    # ⚠⚠ `.tsf` 原来在这里，理由是「Microsoft Access 数据库，**需 ODBC/Jet 引擎**」。
+    #     **那条理由是错的**（2026-09-22 推翻）。实测：纯 Python 就能读出来 ——
+    #     `uv run --with access-parser` 直接解出 **20 张表**，表名和列名**全是中文**
+    #     （项目／项目分段／逐桩断面／竖曲线／土石系数／土石含量／取土坑／弃土坑／
+    #      构造物／断链／调配过程表／过程／统计扩展／土方调配扩展记录／Tmp调配过程表…），
+    #     数据也全对（构造物：桥 273~333 m、隧道 930~1800 m）。
+    #     → 「需专有引擎」不成立，它不是**结构上**读不了，只是**适配器还没写**。
+    #       故从 blocked 移到 pending（见 `_LEDGER_EXTRA_SUFFIX`）。
+    #     ⚠ 这与 `.dq` 是**同一个缺陷形状、方向相反**：.dq 是我误判成"文本/pending"，
+    #       .tsf 是我误判成"读不了/blocked"。两次都是**没去读就下了结论**。
     # ⚠ .dq 一度被我按"文本"归进 pending —— **错了**。只看前 32 字节只看到魔数行，
     #   第 2 行起就是**裸二进制**（不是 zlib、不是 base64）。实测：9 行里有 5 行
     #   正好 386 字节，且有重复片段 → **定长记录的结构化二进制**（加密不会有重复）。
@@ -1322,7 +1355,8 @@ def _plan_design_files(prj: Mapping[str, Any],
                            if p.is_file() and p.suffix.lower() == suffix)
             for name in found:
                 note = ("适配器已实现（%s）" % _IMPLEMENTED_SUFFIX[suffix]
-                        if suffix in _IMPLEMENTED_SUFFIX else None)
+                        if suffix in _IMPLEMENTED_SUFFIX
+                        else _LEDGER_EXTRA_NOTE.get(suffix))
                 rows.append({
                     "file_kind_code": None,   # ★ NULL = 纬地自己没给码（它没声明这个文件）
                     "file_kind_name": kind_name,

@@ -2711,7 +2711,7 @@ def main() -> int:
     import tempfile as _tf
     with _tf.TemporaryDirectory() as _td2:
         # 造一个目录：放 .PRJ（已登记）+ 一个**没登记**的后缀（.cys，系统参数）
-        for _n in ("x.PRJ", "x.cys", "x.dtm"):
+        for _n in ("x.PRJ", "x.cys", "x.dtm", "x.tsf"):
             (pathlib.Path(_td2) / _n).write_bytes(b"")
         _p3 = di.plan_project(po, project_dir=_td2)
     _rows3 = _p3["tables"]["design_file"]
@@ -2725,7 +2725,7 @@ def main() -> int:
     #   实测两次变红（期望 [x.PRJ, x.dtm] 实得 [x.dtm, x.PRJ]）。
     _by3 = {r["file_name"]: r for r in _null3}
     check("★ 磁盘上有、.PRJ 没声明的文件进了台账（file_kind_code=NULL）",
-          sorted(_by3) == ["x.PRJ", "x.dtm"],
+          sorted(_by3) == ["x.PRJ", "x.dtm", "x.tsf"],
           str([(r["file_kind_code"], r["file_name"]) for r in _null3]))
     check("★ .PRJ 那行 parse_status=ok（适配器已实现）、remark 写明来源",
           _by3.get("x.PRJ", {}).get("parse_status") == "ok"
@@ -2741,6 +2741,39 @@ def main() -> int:
           _by3.get("x.dtm", {}).get("parse_status") == "blocked"
           and _by3.get("x.dtm", {}).get("file_kind_name") == "数模文件(*.DTM)",
           str(_by3.get("x.dtm")))
+
+    # ★★★ `.tsf` 土石方调配 —— 2026-09-22 用户定「甲 = 加」
+    #   ⚠ 它原来在 `_BLOCKED_SUFFIX` 里，理由是「Microsoft Access 数据库，
+    #     **需 ODBC/Jet 引擎**」。**那条理由是错的**：实测纯 Python
+    #     （access-parser）就解出 20 张表，表名/列名**全是中文**，数据也全对
+    #     （构造物：桥 273~333 m、隧道 930~1800 m）。
+    #     → 「需专有引擎」不成立。它不是**结构上**读不了，只是**适配器还没写**。
+    #     ⚠ 这与 `.dq` 是**同一个缺陷形状、方向相反**：.dq 被误判成"文本/pending"，
+    #       .tsf 被误判成"读不了/blocked"。两次都是**没去读就下了结论**。
+    check("★★ .tsf 已从 _BLOCKED_SUFFIX 移出（「需 ODBC/Jet 引擎」不成立）",
+          ".tsf" not in di._BLOCKED_SUFFIX,
+          str(sorted(di._BLOCKED_SUFFIX)))
+    #   ★ 元测试：证明上面那条不是空洞的 —— 把它塞回去，状态**必须**跟着变。
+    #     try/finally 复原，免得污染后面的用例。
+    #   ⚠ 必须**另开**一个临时目录：上面那个 `_td2` 出了 `with` 就没了，
+    #     再拿它去 plan_project 会扫不到任何文件，元测试会假绿/假红。
+    #     （我第一版就是这么错的：_back 得到 []。）
+    with _tf.TemporaryDirectory() as _td5:      # ⚠ 用 _tf（本组开头 import 的），
+                                               #   _tf14 在下面那段才 import
+
+        (pathlib.Path(_td5) / "x.tsf").write_bytes(b"")
+        di._BLOCKED_SUFFIX[".tsf"] = "临时塞回去"
+        try:
+            _back = [r["parse_status"] for r in
+                     di.plan_project(po, project_dir=_td5)["tables"]["design_file"]
+                     if r["file_name"] == "x.tsf"]
+        finally:
+            di._BLOCKED_SUFFIX.pop(".tsf")
+    check("★★ 元测试：把 .tsf 塞回 _BLOCKED_SUFFIX，它**必须**立刻变成 blocked"
+          "（证明归类真的决定状态，上面那条不是空洞检查）",
+          _back == ["blocked"], str(_back))
+    check("★★ 且它在 _LEDGER_EXTRA_SUFFIX 里（是「磁盘补行」那条路，不是声明那条）",
+          ".tsf" in di._LEDGER_EXTRA_SUFFIX)
     #   ★★ 元测试：证明上面那条不是空洞的 —— 把登记拿掉，行**必须**消失。
     #   元测试自己会复原登记（用 try/finally），免得污染后面的用例。
     _saved = di._LEDGER_EXTRA_SUFFIX.pop(".prj")
