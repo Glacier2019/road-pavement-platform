@@ -2704,17 +2704,27 @@ def main() -> int:
         _p3 = di.plan_project(po, project_dir=_td2)
     _rows3 = _p3["tables"]["design_file"]
     _null3 = [r for r in _rows3 if r["file_kind_code"] is None]
-    check("★ 磁盘上有、.PRJ 没声明的 .PRJ 进了台账（file_kind_code=NULL）",
-          [r["file_name"] for r in _null3] == ["x.PRJ"],
+    # ⚠ 用**文件名**索引，不用下标：追加顺序是 sorted(_LEDGER_EXTRA_SUFFIX)
+    #   （.dtm < .prj），写下标就会随登记表增删而错位 —— 我第一版就是这么错的，
+    #   实测两次变红（期望 [x.PRJ, x.dtm] 实得 [x.dtm, x.PRJ]）。
+    _by3 = {r["file_name"]: r for r in _null3}
+    check("★ 磁盘上有、.PRJ 没声明的文件进了台账（file_kind_code=NULL）",
+          sorted(_by3) == ["x.PRJ", "x.dtm"],
           str([(r["file_kind_code"], r["file_name"]) for r in _null3]))
-    check("★ 它的 parse_status=ok（适配器已实现）、remark 写明来源",
-          _null3 and _null3[0]["parse_status"] == "ok"
-          and "没有声明" in (_null3[0]["remark"] or ""),
-          str(_null3[0] if _null3 else None))
-    check("★★ 元测试：**没登记**的后缀（.cys 系统参数 / .dtm 数模）**不得**被自动收进来"
+    check("★ .PRJ 那行 parse_status=ok（适配器已实现）、remark 写明来源",
+          _by3.get("x.PRJ", {}).get("parse_status") == "ok"
+          and "没有声明" in (_by3.get("x.PRJ", {}).get("remark") or ""),
+          str(_by3.get("x.PRJ")))
+    #   ⚠ .dtm 曾在这条里（当时它还没登记）—— 2026-09-22 用户定「加」，故移出。
+    #     .cys **留着**：它是软件参数不是工程数据，收了会把台账弄脏。
+    check("★★ 元测试：**没登记**的后缀（.cys 系统参数）**不得**被自动收进来"
           "（「见一个收一个」会把台账弄脏）",
-          all(r["file_name"] not in ("x.cys", "x.dtm") for r in _rows3),
+          all(r["file_name"] != "x.cys" for r in _rows3),
           str([r["file_name"] for r in _rows3]))
+    check("★ .dtm 已登记 → 必须被收，且记 blocked（二进制数模，读不了）",
+          _by3.get("x.dtm", {}).get("parse_status") == "blocked"
+          and _by3.get("x.dtm", {}).get("file_kind_name") == "数模文件(*.DTM)",
+          str(_by3.get("x.dtm")))
     #   ★★ 元测试：证明上面那条不是空洞的 —— 把登记拿掉，行**必须**消失。
     #   元测试自己会复原登记（用 try/finally），免得污染后面的用例。
     _saved = di._LEDGER_EXTRA_SUFFIX.pop(".prj")
