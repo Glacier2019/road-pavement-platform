@@ -1000,6 +1000,27 @@ _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
                        # 把段名写进了按表名索引的 WEIDI_SOURCE）。两次都是测试抓的。
                        ".hdm": "cross_section"}
 
+#: 台账要不要收「**磁盘上有、`.PRJ` 里没声明**」的文件（v0.5 迁移 ⑨②）。
+#  值是 `file_kind_name` —— `.PRJ` 没给名字（它压根没提），这里给一个。
+#
+#  ★ 为什么需要这一类：`design_file` 的数据来源原来**只有一个** —— `.PRJ` 的
+#    〔文件名〕段。于是它回答的是「`.PRJ` 里写了哪些文件」，**不是**「这个工程
+#    有哪些文件」。实测两者不等价：磁盘 20 个文件，库里 16 行。
+#    「这个工程有哪些文件？哪些我们还没处理？」这句话因此**答不出来**。
+#
+#  ⚠ 只收**明确登记过的**，不做"见到就收"。理由：`.cys`（涵洞系统参数）也
+#    在磁盘上、也不在〔文件名〕段里，但它是**软件参数**不是工程数据，收了就把
+#    台账弄脏了（见 `_SYSTEM_PARAM_SUFFIX`）。所以这张表必须一行一行加。
+_LEDGER_EXTRA_SUFFIX = {
+    ".prj": "总项目文件(*.PRJ)",
+    # ⚠ 下面两个实测同样"磁盘上有、.PRJ 里没提"，但**尚未决定**要不要进台账，
+    #   用户在逐个确认中 —— 定了就加进来，机制已经通了：
+    #     .dtm  数模本体 33,460 B。它的缺席**是设计如此**，不是漏：纬地只把
+    #           「数模组」(.gtm, 115 号) 登记进项目管理器，组里具体哪几个数模
+    #           由 .gtm 自己记（实测存的是各数模的边界框 + .DTM 路径 + 大小）。
+    #     .tsf  土石方调配 2,695,168 B（Access 数据库）。
+}
+
 #: **存在、但结构上解不开**的后缀 → 为什么。parse_status 记 "blocked"。
 #  逐个实测过文件头，不是猜的：
 #    .gtm   魔数 `HB  HINT40_GROUP_DTM_VER6`，之后即二进制（数模组索引）
@@ -1228,6 +1249,40 @@ def _plan_design_files(prj: Mapping[str, Any],
             "parse_note": note,
             "remark": None,
         })
+
+    # ★ 台账 = **`.PRJ` 声明的 ∪ 磁盘上实际存在的**（v0.5 迁移 ⑨②）。
+    #   后半句是补的。上面那个循环只看 `.PRJ`，于是"磁盘上有、`.PRJ` 没提"的文件
+    #   在库里一个字都没有 —— 实测本工程有 3 个（.dtm/.tsf/.prj）。
+    #
+    #   ⚠ 只有**确实去看过**（`scanned`）才能补：没扫描目录时磁盘上有什么是未知的，
+    #     此时补行就是编（和 `absent` 那条同一个道理：「没去看」≠「看了没有」）。
+    if scanned:
+        declared = {r["file_kind_code"] and (r["file_name"].rsplit(".", 1)[-1].lower()
+                                             if "." in r["file_name"] else "")
+                    for r in rows}
+        declared = {d for d in declared if d}
+        for suffix, kind_name in sorted(_LEDGER_EXTRA_SUFFIX.items()):
+            if suffix.lstrip(".") in declared:
+                continue                      # `.PRJ` 已经声明过了，上面那行就是它
+            found = sorted(p.name for p in pathlib.Path(project_dir).iterdir()
+                           if p.is_file() and p.suffix.lower() == suffix)
+            for name in found:
+                note = ("适配器已实现（%s）" % _IMPLEMENTED_SUFFIX[suffix]
+                        if suffix in _IMPLEMENTED_SUFFIX else None)
+                rows.append({
+                    "file_kind_code": None,   # ★ NULL = 纬地自己没给码（它没声明这个文件）
+                    "file_kind_name": kind_name,
+                    "file_name": name,
+                    "rel_path": None,
+                    "coverage_from_station_km": None,
+                    "coverage_to_station_km": None,
+                    "parse_status": ("ok" if suffix in _IMPLEMENTED_SUFFIX
+                                     else "blocked" if suffix in _BLOCKED_SUFFIX
+                                     else "pending"),
+                    "parse_note": note,
+                    "remark": ("磁盘上有、.PRJ〔文件名〕段里**没有声明**这个文件"
+                               "（不是漏读：`.PRJ` 逐行看过，确实没有它）"),
+                })
     return rows, skipped
 
 
@@ -1312,8 +1367,12 @@ def ensure_project(prj: Mapping[str, Any], dao: Any, *,
             tx.insert("section_design_attr", [attr_row], on_conflict=("section_id",))
 
         for row in t["design_file"]:
+            # ★ 冲突键含 file_name（v0.5 迁移 ⑨②）：没码的行（file_kind_code IS NULL）
+            #   靠**文件名**做身份 —— 否则重导时 ON CONFLICT 对 NULL 行永不触发，会插重复。
+            #   ⚠ 列序必须与 DDL 的 UNIQUE 完全一致，否则 PG 报
+            #     "no unique or exclusion constraint matching the ON CONFLICT specification"。
             tx.insert("design_file", [dict(row, design_project_id=pid)],
-                      on_conflict=("design_project_id", "file_kind_code"))
+                      on_conflict=("design_project_id", "file_kind_code", "file_name"))
 
     return report
 

@@ -213,7 +213,14 @@ COMMENT ON COLUMN design_project.station_interval_m IS '桩号间隔，决定逐
 CREATE TABLE IF NOT EXISTS design_file (
     id                       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     design_project_id        bigint NOT NULL REFERENCES design_project(id),
-    file_kind_code           varchar(16) NOT NULL,        -- .PRJ〔文件名〕键号（101/102/…）
+    -- ★ 可空（v0.5 迁移 ⑨②）：NULL = **纬地自己没给码**。
+    --   原来 NOT NULL，前提是"文件都来自 .PRJ〔文件名〕段，那里每条都有号"。
+    --   实测这个前提不成立，有两种文件没有号：
+    --     ① `.PRJ` 里**有名有路径、唯独没给号**（.hda / .cys —— 它们排在〔文件名〕段最后）
+    --     ② 磁盘上**有、.PRJ 里连提都没提**（.dtm / .tsf / .prj 自己）
+    --   硬塞一个号就是造假（101–125/500/501/28674 是纬地的号，不是我们的），
+    --   所以让它为空，并在 remark 里写清是哪种情况。
+    file_kind_code           varchar(16),                  -- .PRJ〔文件名〕键号（101/102/…）；NULL=纬地未给码
     file_kind_name           varchar(64) NOT NULL,        -- 文件类型名（平面线形文件(*.PM)…）
     file_name                varchar(255) NOT NULL,       -- 实际文件名
     rel_path                 varchar(512),                -- 相对工程目录的路径
@@ -222,8 +229,33 @@ CREATE TABLE IF NOT EXISTS design_file (
     parse_status             varchar(16) DEFAULT 'pending', -- ok 明文可解析/blocked 二进制或专有/pending 未验
     parse_note               text,                        -- 不可解析原因（zlib 二进制结构体 / 无已知压缩魔数 …）
     remark                   text,
-    UNIQUE (design_project_id, file_kind_code)
+    -- ★ 冲突键从 `(design_project_id, file_kind_code)` 扩成**加 file_name**
+    --   （v0.5 迁移 ⑨②）。两件事同时要满足，只有这个形状能同时满足：
+    --     ① 没码的行**可以有任意多行** —— PG 的 UNIQUE 默认把 NULL 当互不相等，
+    --        所以 (proj, NULL, 'a.PRJ') 与 (proj, NULL, 'b.DTM') 不冲突 ✓
+    --     ② 重导必须**幂等** —— 有码的行靠号命中；没码的行靠**文件名**命中 ✓
+    --   ⚠ 不能改成"部分唯一索引 (proj, code) WHERE code IS NOT NULL"：
+    --     `ON CONFLICT` 用不了部分索引（除非把谓词也写上），而且本仓那条
+    --     「源码 on_conflict ↔ 实库 pg_constraint」的对账检查**只看约束、不看索引**，
+    --     换成索引它会当场变红（实测确实红了 —— 它是对的）。
+    --   ⚠ 也不能用 `NULLS NOT DISTINCT`（PG15+）：那样只允许**一行** NULL，
+    --     而本工程就有 3 个没码的文件，全插不进去。
+    -- ⚠ 必须**显式命名**：不命名时 PG 自动生成
+    --   `design_file_design_project_id_file_kind_code_file_name_key`，而迁移里
+    --   建的是 `uq_design_file_project_kind` —— 名字不同，parity 测试当场变红
+    --   （实测红了，抓的就是这个）。两条路要产出**同一套** schema，名字也算。
+    -- ⚠⚠ 必须带 **NULLS NOT DISTINCT**（PG15+）。默认的 NULLS DISTINCT 会让
+    --   "没码的行"**永不冲突** —— 实测重导一次就多插一行（16→17→18），
+    --   `ON CONFLICT` 对 NULL 键形同虚设。我先前否掉这个写法是**错的**：
+    --   当时以为它会把所有没码的行并成一行；但冲突键里**有 file_name**，
+    --   NULL 只是变得"可比"，不同文件名仍是不同的键 —— 正是要的语义。
+    CONSTRAINT uq_design_file_project_kind
+        UNIQUE NULLS NOT DISTINCT (design_project_id, file_kind_code, file_name)
 );
+-- 台账 = **.PRJ 声明的 ∪ 磁盘上实际存在的**。前半句是原来的全部；
+-- 后半句（v0.5 迁移 ⑨②）补上"磁盘上有、台账看不见"的那一类 —— 本工程实测有 3 个
+-- （.dtm 数模本体 33KB、.tsf 土石方调配 2.7MB、.prj 总项目自己 9.5KB）。
+-- 没有它，"这个工程有哪些文件？哪些我们还没处理？"这句话**答不出来**。
 COMMENT ON TABLE design_file IS '设计文件台账（.PRJ〔文件名〕段）；★coverage_* 使"某文件覆盖哪一段桩号"成为可查询事实——实测 .WID 只到 5701.461 而全线 5805.421，末段 104m 无路幅数据';
 COMMENT ON COLUMN design_file.parse_status IS 'ok=明文可解析(14个) / blocked=二进制或专有(5个) / pending；Access(.TSF) 需 mdbtools';
 

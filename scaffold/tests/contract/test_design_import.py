@@ -2683,8 +2683,53 @@ def main() -> int:
     check("★ 元测试：.hda 的理由**不能**只说「.PRJ 未给字段号」（那是表象）",
           all("未给字段号，无法满足 NOT NULL" not in x
               for x in planned["skipped_files"] if ".hda" in x))
-    check("★ 元测试：design_file 每行都有 file_kind_code（满足 NOT NULL）",
-          all(f["file_kind_code"] for f in planned["tables"]["design_file"]))
+    # ⚠ 上面那条原来断言的是「每行都有 file_kind_code（满足 NOT NULL）」——
+    #   v0.5 迁移 ⑨② 之后**它不再成立**：没码的行是合法的（NULL = 纬地自己没给码）。
+    #   断言改红是对的：它钉住的正是一个被推翻的前提。
+    check("★ 台账允许没码的行（NULL=纬地未给码），但**有码的行必须有码**",
+          all(f["file_kind_code"] is None or f["file_kind_code"]
+              for f in planned["tables"]["design_file"]))
+
+    # ── 第 14b 组：台账 = .PRJ 声明的 ∪ 磁盘上实际存在的（v0.5 迁移 ⑨②）──────
+    #   ★ 为什么要有这一组：`design_file` 原来只回答「.PRJ 里写了哪些文件」，
+    #     不是「这个工程有哪些文件」。实测磁盘 20 个、库里 16 行 ——
+    #     差的那几个（.dtm/.tsf/.prj）在库里**一个字都没有**，
+    #     于是"这个工程有哪些文件？哪些我们还没处理？"这句话**答不出来**。
+    print("\n第 14b 组  台账补上「磁盘上有、.PRJ 没声明」的文件")
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _td2:
+        # 造一个目录：放 .PRJ（已登记）+ 一个**没登记**的后缀（.cys，系统参数）
+        for _n in ("x.PRJ", "x.cys", "x.dtm"):
+            (pathlib.Path(_td2) / _n).write_bytes(b"")
+        _p3 = di.plan_project(po, project_dir=_td2)
+    _rows3 = _p3["tables"]["design_file"]
+    _null3 = [r for r in _rows3 if r["file_kind_code"] is None]
+    check("★ 磁盘上有、.PRJ 没声明的 .PRJ 进了台账（file_kind_code=NULL）",
+          [r["file_name"] for r in _null3] == ["x.PRJ"],
+          str([(r["file_kind_code"], r["file_name"]) for r in _null3]))
+    check("★ 它的 parse_status=ok（适配器已实现）、remark 写明来源",
+          _null3 and _null3[0]["parse_status"] == "ok"
+          and "没有声明" in (_null3[0]["remark"] or ""),
+          str(_null3[0] if _null3 else None))
+    check("★★ 元测试：**没登记**的后缀（.cys 系统参数 / .dtm 数模）**不得**被自动收进来"
+          "（「见一个收一个」会把台账弄脏）",
+          all(r["file_name"] not in ("x.cys", "x.dtm") for r in _rows3),
+          str([r["file_name"] for r in _rows3]))
+    #   ★★ 元测试：证明上面那条不是空洞的 —— 把登记拿掉，行**必须**消失。
+    #   元测试自己会复原登记（用 try/finally），免得污染后面的用例。
+    _saved = di._LEDGER_EXTRA_SUFFIX.pop(".prj")
+    try:
+        _p5 = di.plan_project(po, project_dir=_td2)
+        _gone = not any(r["file_kind_code"] is None for r in _p5["tables"]["design_file"])
+    finally:
+        di._LEDGER_EXTRA_SUFFIX[".prj"] = _saved
+    check("★★ 元测试：把 .prj 从 _LEDGER_EXTRA_SUFFIX 拿掉后这一行**必须**消失"
+          "（证明上面那条不是空洞检查）", _gone)
+    # ★★ 非空转：没扫描目录时**不得**补行 —— 「没去看」≠「看了没有」
+    _p4 = di.plan_project(po, project_dir=None)
+    check("★★ 不给 project_dir 时不补行（没扫描磁盘就补 = 编）",
+          not any(r["file_kind_code"] is None for r in _p4["tables"]["design_file"]))
+
     # 已实现适配器的后缀才给 ok。加 .DMX/.ZDM 后从 3 个变 5 个 —— 这条断言当时
     # 变红是对的（它抓住了行为变化）。103/104 是不是 .DMX/.ZDM 已从库里核实：
     #   103 = 毕设.DMX         104 = 纵断面设计拟合.ZDM
@@ -2845,6 +2890,33 @@ def main() -> int:
                   (r1["project_id"], r1["line_id"], r1["section_ids"])
                   and d14.scalar("SELECT count(*) FROM design_project WHERE project_uid=%s",
                                      (f"{uniq}-uid",)) == 1)
+            # ★★★ NULLS NOT DISTINCT 的真库钉子（v0.5 迁移 ⑨②）
+            #   上面那条幂等检查只覆盖"**有码**的 design_file 行"（synth 只有 101 一行，
+            #   且没给 project_dir）。而这次改动引入的是"**没码**的行"，
+            #   它的幂等**靠的是另一个机制**：PG 的 UNIQUE 默认把 NULL 当互不相等，
+            #   于是 ON CONFLICT 对 (proj, NULL, name) **永不触发**。
+            #   实测真踩过：重导一次就多插一行（16→17→18）。
+            #   所以这里专门造一个"磁盘上有、.PRJ 没声明"的 .PRJ 文件，跑两遍，数行数。
+            import tempfile as _tf14
+            with _tf14.TemporaryDirectory() as _td14:
+                (pathlib.Path(_td14) / "disk-only.PRJ").write_bytes(b"")
+                _n0 = d14.scalar("SELECT count(*) FROM design_file WHERE design_project_id=%s",
+                                 (r1["project_id"],))
+                _a = di.ensure_project(sp, d14, project_dir=_td14)
+                _n1 = d14.scalar("SELECT count(*) FROM design_file WHERE design_project_id=%s",
+                                 (r1["project_id"],))
+                _b = di.ensure_project(sp, d14, project_dir=_td14)
+                _n2 = d14.scalar("SELECT count(*) FROM design_file WHERE design_project_id=%s",
+                                 (r1["project_id"],))
+            check("★★ 没码的行也进了台账（磁盘上有、.PRJ 没声明）",
+                  _n1 == _n0 + 1, f"{_n0} → {_n1}")
+            check("★★★ 元测试级钉子：重导**不得**多出没码的行"
+                  "（NULLS NOT DISTINCT 一旦丢掉，这里必然 18）",
+                  _n2 == _n1, f"{_n1} → {_n2}")
+            check("★★ 且那行确实是 NULL 码（不是我们编了个号）",
+                  d14.scalar("SELECT count(*) FROM design_file "
+                             "WHERE design_project_id=%s AND file_kind_code IS NULL",
+                             (r1["project_id"],)) == 1)
             check("★ 以 M5 身份建档案 → WriteGuardError（写只经 M2）",
                   _raises_wg(lambda: di.ensure_project(sp, d14, writer="M5")))
         finally:
