@@ -63,7 +63,17 @@ DOMAINS: dict[str, Domain] = {
         #    解析出来的数据没有地方存 ——「段能解析、表不存在」= 静默丢数据。
         #    表名照内容走：内容实测是**外业测量**的地面线（高差 −31 ~ +23 m），
         #    与 profile_ground_point（← .DMX 纵断面地面线）一纵一横同构。
-        "cross_section_ground_point"),
+        "cross_section_ground_point",
+        # ── L 节（v0.5 后补）：土石方调配（.tsf，纬地 **HintTF** 的成果）──
+        #    源文件是**另一个产品**的：I 节全是 .CTR（HintCAD 的文本控制参数），
+        #    这是 .tsf（Microsoft Access / Jet 4 数据库）。一个是"设计时定的控制量"，
+        #    一个是"设计完成后算出来的调配成果"，故 DDL 里单开一节 L。
+        #    ★ 本版只落最小的一张（土石系数 1 行 6 列），其余真有数据的
+        #      （过程 27 行 / 统计扩展 334×73 / 土石计算 334×137）待做 ——
+        #      一次只做一张，是为了把整条链路先走通一遍再照抄。
+        #    ★ 也是 `design_control` 之后**第二个「段名 ≠ 单张物理表名」的例外**：
+        #      .tsf 是 1 文件 ↔ 多表（实测 20 张）。
+        "earthwork_factor"),
         # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
         (),
         "关系库",
@@ -128,7 +138,7 @@ CROSS_TABLES: tuple[str, ...] = (
 #       第二批（横断面/路基土方/构造物）顺延至 v0.5；其中「横断面地面线 .HDM」经确认不做。
 #       （原为 11 张："超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition，
 #         "路幅宽度"已按教程 §13.4 提前落到 v0.3 的 roadbed_width）
-EXPECTED_PHYSICAL_TABLES = 56
+EXPECTED_PHYSICAL_TABLES = 57
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -157,6 +167,7 @@ TABLE_OWNER: dict[str, str] = {
     "land_use_width": "M2", "extra_fill": "M2", "design_control_text": "M2",
     "earthwork_section": "M2", "roadbed_design_point": "M2",
     "cross_section_ground_point": "M2",   # v0.5 K 节：.HDM 横断面地面线，同源（设计文件）
+    "earthwork_factor": "M2",             # v0.5 L 节：.tsf 土石方调配，同源（设计文件）
     # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
     # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
     # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，

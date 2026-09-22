@@ -66,7 +66,8 @@
         "roadbed_width",
         "design_control",
         "earthwork_section",
-        "roadbed_design_point"
+        "roadbed_design_point",
+        "earthwork_factor"
       ]
     },
     "level": {
@@ -329,6 +330,14 @@
           },
           "minItems": 1,
           "description": "逐桩路基设计断面（`.lj`）。**逐桩**段，同 earthwork_section。"
+        },
+        "earthwork_factor": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/earthwork_factor_point"
+          },
+          "minItems": 1,
+          "description": "土石方压实系数（`.tsf` 土石方调配文件，纬地 HintTF）。★**不是逐桩段**：全工程一组系数，故落库不锚 station_sequence，锚 design_project。⚠ 这是 `design_control` 之后**第二个「段名 ≠ 单张物理表名」的例外**：`.tsf` 是 **1 文件 ↔ 多表**的段组（earthwork_factor 先落地，取土坑/弃土坑/调配过程待做）。"
         }
       }
     },
@@ -1167,6 +1176,37 @@
             "null"
           ],
           "description": "第6类土（石）占挖方数量的百分比（%）"
+        }
+      }
+    },
+    "earthwork_factor_point": {
+      "description": "土石方压实系数 —— 来自纬地 **HintTF 土石方调配系统**的 `.tsf` 文件（**Microsoft Access / Jet 4 数据库**，非文本）。表名「土石系数」。★语义**不是猜的**，是实测反推 + 算术验证过的：`过程`表里 `用土 819.1131000000418` → `用土(压实) 707.1642932578042`，比值 **1.1583**；而本段系数 土方1/2/3 = 1.23/1.16/1.09 对应 松土/普通土/硬土，按 `earthwork_composition` 实测的 20/60/20 加权算 0.2/1.23 + 0.6/1.16 + 0.2/1.09 = 0.8633，819.1131 × 0.8633 = **707.13** ✓ 对得上。故用法为 **压实方 = 松方 ÷ 系数**。★六分类与 `earthwork_composition`（.CTR 的 TFFD）**同一套**。",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "factor_soil_1": {
+          "type": ["number", "null"],
+          "description": "松土的压实系数（.tsf 列「土方1」）"
+        },
+        "factor_soil_2": {
+          "type": ["number", "null"],
+          "description": "普通土的压实系数（.tsf 列「土方2」）"
+        },
+        "factor_soil_3": {
+          "type": ["number", "null"],
+          "description": "硬土的压实系数（.tsf 列「土方3」）"
+        },
+        "factor_rock_1": {
+          "type": ["number", "null"],
+          "description": "软石的压实系数（.tsf 列「石方1」）"
+        },
+        "factor_rock_2": {
+          "type": ["number", "null"],
+          "description": "次坚石的压实系数（.tsf 列「石方2」）"
+        },
+        "factor_rock_3": {
+          "type": ["number", "null"],
+          "description": "坚石的压实系数（.tsf 列「石方3」）"
         }
       }
     },

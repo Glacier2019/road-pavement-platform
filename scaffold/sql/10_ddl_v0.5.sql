@@ -43,10 +43,11 @@
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE slope_segment, ditch_segment,
 --                       standard_cross_section, roadbed_trench, structure_control,
 --                       earthwork_composition, land_use_width, extra_fill, design_control_text;
---   v0.5（本版）  56 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张
+--   v0.5（本版）  57 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张 ＋ L 节 1 张
 --                       J1 earthwork_section        逐桩土方断面（.tf，**74 列**）
 --                       J2 roadbed_design_point     逐桩路基设计断面（.lj，**24 列**）
 --                       K1 cross_section_ground_point 逐桩横断面地面线测点（.HDM）★后补，见下
+--                       L1 earthwork_factor         土石方压实系数（.tsf）★后补，见下
 --                 依据：纬地教程 v5.88 §13.9（土方数据文件）、§13.6（路基设计中间数据）。
 --                 ★★ 建表原则（用户明确要求）：**照数据文件的样式，好追溯** ——
 --                       文件里有的列全建（.tf 74 列里 44 列本工程全 0 也建）、
@@ -64,9 +65,11 @@
 --                       .STA 桩号序列的 332 个。I 节（.CTR）不能，因为 .CTR 的
 --                       分段桩号**不是** .STA 桩号序列的子集。
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE earthwork_section,
---                       roadbed_design_point, cross_section_ground_point;
+--                       roadbed_design_point, cross_section_ground_point, earthwork_factor;
 --                 迁移：已存在的库执行 sql/86_migrate_v04_ctr.sql、87_migrate_v05_lj_tf.sql、
---                       88_migrate_v05_pi_station.sql、89_migrate_v05_hdm.sql（均幂等）
+--                       88_migrate_v05_pi_station.sql、89_migrate_v05_hdm.sql、
+--                       91_migrate_v05_side_vocab.sql、92_migrate_v05_ledger_unlisted.sql、
+--                       93_migrate_v05_earthwork_factor.sql（均幂等）
 --                 ★★ K1 的来历（一条**被推翻的"不做"**）：
 --                       本行原写「其中「横断面地面线（.HDM）」经确认**不做**（用户指示）」。
 --                       2026-09 用户改判为**要做** —— 理由与定性无关：M2 的 .HDM 解析器
@@ -1759,3 +1762,53 @@ comment on column standard_cross_section.median_half_width_m is
   '★★ **注意「半幅」二字**：这是 **1/2** 的中间带宽度，与 section_design_attr.median_width_m、'
   'roadbed_width.median_width_m（都是**全宽**）**不是同一个量，数值差 2 倍**。'
   '本表是标准横断面库（本工程 0 行）。跨表引用前务必确认要的是全宽还是半宽。';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- L 节：土石方调配（.tsf）—— 纬地 **HintTF 土石方调配系统**的成果
+--
+-- ★★ L 节为什么另开、不并进 I 节（.CTR）：**源文件不同、产品不同、性质不同**。
+--    I 节全是 `.CTR`（HintCAD 道路系统的设计控制参数，**文本**，关键字驱动）。
+--    L 节是 `.tsf`（HintTF **另一个产品**的成果，**Microsoft Access / Jet 4 数据库**）。
+--    一个是"设计时定的控制量"，一个是"设计完成后算出来的调配成果"。
+--
+-- ★★ L1 是 `design_control`（1 段 ↔ 9 表）之后**第二个「段名 ≠ 单张物理表名」的例外**：
+--    `.tsf` 是 **1 文件 ↔ 多表**（实测 20 张表）。本版只落地**最小的一张**
+--    （土石系数：1 行 6 列），其余真有数据的（过程 27 行 / 统计扩展 334×73 /
+--    土石计算 334×137）**待做**。
+--    ⚠ 一次只做一张，是为了把整条链路（schema → DDL → 适配器 → 落库 → 测试）
+--      **先走通一遍**，再照抄。
+--
+-- ★★ L1 的语义**不是猜的** —— 实测反推 + 算术验证：
+--    `过程`表 GCID=1：`用土 819.1131000000418` → `用土(压实) 707.1642932578042`，比值 1.1583。
+--    本表系数 土方1/2/3 = 1.23/1.16/1.09 对应 松土/普通土/硬土；
+--    按 `earthwork_composition`（.CTR 的 TFFD）实测的 20/60/20 加权：
+--        0.2/1.23 + 0.6/1.16 + 0.2/1.09 = 0.8633
+--        819.1131 × 0.8633 = 707.13   ✓ 与实测 707.1643 对得上
+--    故用法为 **压实方 = 松方 ÷ 系数**（系数是"松方 ÷ 压实方"的倍数，**不是乘数**）。
+--    ★ 六分类与 `earthwork_composition.pct_1..6` **同一套**（松土/普通土/硬土/软石/次坚石/坚石）。
+--
+-- ★★ 为什么**不锚 station_sequence**：它是**全工程一组系数**，没有桩号。
+--    这与 I 节（.CTR 分段桩号不是 .STA 的子集）**又是另一种情况** —— 那是"有桩号但不同源"，
+--    这是"根本没有桩号"。故锚 `design_project`，且 UNIQUE 于它（一个工程一组）。
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS earthwork_factor (
+    id                 bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    design_project_id  bigint NOT NULL REFERENCES design_project(id),
+    factor_soil_1      numeric(8,4),      -- 松土的压实系数（.tsf 列「土方1」）
+    factor_soil_2      numeric(8,4),      -- 普通土（.tsf 列「土方2」）
+    factor_soil_3      numeric(8,4),      -- 硬土（.tsf 列「土方3」）
+    factor_rock_1      numeric(8,4),      -- 软石（.tsf 列「石方1」）
+    factor_rock_2      numeric(8,4),      -- 次坚石（.tsf 列「石方2」）
+    factor_rock_3      numeric(8,4),      -- 坚石（.tsf 列「石方3」）
+    remark             text,
+    CONSTRAINT uq_earthwork_factor_project UNIQUE (design_project_id)
+);
+COMMENT ON TABLE earthwork_factor IS '土石方压实系数（纬地 HintTF 的 .tsf「土石系数」表）★设计输入。全工程一组、无桩号，故锚 design_project 而非 station_sequence。用途：松方 ↔ 压实方换算，压实方 = 松方 ÷ 系数。★六分类与 earthwork_composition 同一套。⚠ 本工程实测：土方 1.23/1.16/1.09、石方 0.92/0.92/0.92';
+COMMENT ON COLUMN earthwork_factor.factor_soil_1 IS '松土的压实系数（.tsf 列「土方1」）。用法：压实方 = 松方 ÷ 系数。本工程 1.23';
+COMMENT ON COLUMN earthwork_factor.factor_soil_2 IS '普通土的压实系数（.tsf 列「土方2」）。本工程 1.16';
+COMMENT ON COLUMN earthwork_factor.factor_soil_3 IS '硬土的压实系数（.tsf 列「土方3」）。本工程 1.09';
+COMMENT ON COLUMN earthwork_factor.factor_rock_1 IS '软石的压实系数（.tsf 列「石方1」）。本工程 0.92';
+COMMENT ON COLUMN earthwork_factor.factor_rock_2 IS '次坚石的压实系数（.tsf 列「石方2」）。本工程 0.92';
+COMMENT ON COLUMN earthwork_factor.factor_rock_3 IS '坚石的压实系数（.tsf 列「石方3」）。本工程 0.92';
+COMMENT ON COLUMN earthwork_factor.remark IS '备注。⚠ 本表**不设 CHECK 约束**要求系数 > 0 或 < 1 —— 源文件是设计输入，系数用户可改，硬约束会拒掉合法的中间稿。';
