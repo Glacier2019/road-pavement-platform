@@ -35,6 +35,7 @@ import re
 import shutil
 import sys
 import tempfile
+from decimal import Decimal
 from decimal import ROUND_HALF_UP, Decimal
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -3017,10 +3018,92 @@ def main() -> int:
                              (r1["project_id"],)) == 1)
             check("★ 以 M5 身份建档案 → WriteGuardError（写只经 M2）",
                   _raises_wg(lambda: di.ensure_project(sp, d14, writer="M5")))
+
+            # ★★★ earthwork_transfer 的**桩号越界检查**（用户选「乙」时我承诺的兜底）
+            #   锚 section_id 的代价是：纬地的「分段编号」要映射成我们的 road_section.id。
+            #   映射错了不会报错，只会把土方算到别的路段上 —— 所以必须有真检查。
+            #   这里造一份 synth .tsftxt：synth .PRJ 的路段是 **100~500 m**，
+            #   故 200 m 合法、900 m 越界。
+            # ⚠ 不能用第 15 组的 _tsf_txt —— 那个在**后面**才赋值，
+            #   而本组跑在前面（刚才就是 UnboundLocalError）。就地读夹具。
+            _tsf_txt14, _ = base.read_text_any(
+                FIXTURE.parent / "weidi_tsf_excerpt.tsftxt")
+            _tf_hdr = next(_l for _l in _tsf_txt14.split("\n")
+                           if _l.startswith("//[ GCID ]"))
+            _tf_row = next(_l for _l in _tsf_txt14.split("\n") if _l.startswith("23\t"))
+
+            def _mk_tsftxt(*, seq=1, cut_s=200.0, cut_e=200.0):
+                """按真表头造一份最小 .tsftxt（系数 1 行 + 过程 1 行）。"""
+                _c = _tf_row.split("\t")
+                _c[0] = "1"                      # GCID
+                _c[1] = repr(cut_s)              # 取土段S
+                _c[2] = repr(cut_e)              # 取土段E
+                _c[3] = repr(cut_s)              # 弃土段S
+                _c[4] = repr(cut_e)              # 弃土段E
+                _c[9] = "0"                      # 坑=0（路段内调运）
+                _c[30] = str(seq)                # 分段编号
+                return ("HINTTF6.00_TSF_TXT_VER1\n"
+                        "== TABLE 土石系数 ==\n"
+                        "//[ 土方1 ][ 土方2 ][ 土方3 ][ 石方1 ][ 石方2 ][ 石方3 ]\n"
+                        "1.23\t1.16\t1.09\t0.92\t0.92\t0.92\n"
+                        "== TABLE 过程 ==\n" + _tf_hdr + "\n" + "\t".join(_c) + "\n")
+
+            with _tf14.TemporaryDirectory() as _td14b:
+                # ① 合法：200 m 落在 100~500 m 内 → 落库，且**桩号从米转成 km**
+                (pathlib.Path(_td14b) / "ok.tsftxt").write_text(
+                    _mk_tsftxt(cut_s=200.0, cut_e=300.0), encoding="utf-8")
+                _before = d14.scalar("SELECT count(*) FROM earthwork_transfer "
+                                     "WHERE section_id=%s", (sid,))
+                di.ensure_project(sp, d14, project_dir=_td14b)
+                _after = d14.scalar("SELECT count(*) FROM earthwork_transfer "
+                                    "WHERE section_id=%s", (sid,))
+                check("★★ 合法的调配行落库了（section_seq=1 → 该路段）",
+                      _after == _before + 1, f"{_before} → {_after}")
+                check("★★ 元测试：若这条没落库，下面的越界检查就是空转的",
+                      _after > 0)
+                _km = d14.scalar("SELECT cut_start_km FROM earthwork_transfer "
+                                 "WHERE section_id=%s ORDER BY transfer_no DESC LIMIT 1", (sid,))
+                check("★★ 桩号从**米**转成了 **km**（200 m → 0.2，不是 200）",
+                      _km == Decimal("0.2"), str(_km))
+
+                # ② 越界：900 m 在 500 m 之外 → LoadError，**且一行都不许写**
+                _n0 = d14.scalar("SELECT count(*) FROM earthwork_transfer WHERE section_id=%s",
+                                 (sid,))
+                (pathlib.Path(_td14b) / "ok.tsftxt").write_text(
+                    _mk_tsftxt(cut_s=900.0, cut_e=900.0), encoding="utf-8")
+                _exc = None
+                try:
+                    di.ensure_project(sp, d14, project_dir=_td14b)
+                except Exception as _e:                          # noqa: BLE001
+                    _exc = _e
+                check("★★★ 桩号越界 → LoadError（不是默默存进别的路段）",
+                      isinstance(_exc, di.LoadError), repr(_exc))
+                check("★★★ 越界时**一行都没写**（事务整体回滚，不是写一半）",
+                      d14.scalar("SELECT count(*) FROM earthwork_transfer WHERE section_id=%s",
+                                 (sid,)) == _n0)
+
+                # ③ 分段编号对不上 → LoadError（synth 只有 1 个路段）
+                (pathlib.Path(_td14b) / "ok.tsftxt").write_text(
+                    _mk_tsftxt(seq=99, cut_s=200.0, cut_e=300.0), encoding="utf-8")
+                _exc2 = None
+                try:
+                    di.ensure_project(sp, d14, project_dir=_td14b)
+                except Exception as _e:                          # noqa: BLE001
+                    _exc2 = _e
+                check("★★★ 分段编号 99 对不上任何路段 → LoadError",
+                      isinstance(_exc2, di.LoadError), repr(_exc2))
+
         finally:
             # 按 FK 反序清干净
             uid = f"{uniq}-uid"
             with d14.write_txn(writer="M2") as tx:      # FK 反序，同成同败
+                tx.execute("design_project",
+                           "DELETE FROM earthwork_factor WHERE design_project_id IN "
+                           "(SELECT id FROM design_project WHERE project_uid=%(u)s)", {"u": uid})
+                tx.execute("design_project",
+                           "DELETE FROM earthwork_transfer WHERE section_id IN "
+                           "(SELECT s.id FROM road_section s JOIN design_project p "
+                           " ON s.design_project_id = p.id WHERE p.project_uid=%(u)s)", {"u": uid})
                 tx.execute("design_project",
                            "DELETE FROM design_file WHERE design_project_id IN "
                            "(SELECT id FROM design_project WHERE project_uid=%(u)s)", {"u": uid})

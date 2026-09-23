@@ -1595,7 +1595,10 @@ def ensure_project(prj: Mapping[str, Any], dao: Any, *,
                     f"（{lo_km:.3f}~{hi_km:.3f} km）之外：{_oor} —— "
                     f"多半是分段编号映射错了。")
             # IR 里桩号是**米**（与其余适配器一致），DDL 列是 km —— 在这里换算。
-            _r = {k: (None if row.get(k) is None else row[k] / 1000.0)
+            # ⚠ **键名也要跟着换**：IR 是 cut_start_m，DDL 列是 cut_start_km。
+            #   只把值 ÷1000 而不改名，PG 会报 "column cut_start_m does not exist" ——
+            #   这条是**真库测试**抓到的（离线测试全绿也发现不了：它不碰 SQL）。
+            _r = {k[:-2] + "_km": (None if row.get(k) is None else row[k] / 1000.0)
                   for k in _STATION_KEYS}
             _rest = {k: v for k, v in row.items() if k not in _STATION_KEYS}
             tx.insert("earthwork_transfer",
