@@ -30,8 +30,11 @@ import json
 import math
 import os
 import pathlib
+from pathlib import Path
 import re
+import shutil
 import sys
+import tempfile
 from decimal import ROUND_HALF_UP, Decimal
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -40,7 +43,8 @@ sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
 import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
-from adapters.weidi import ctr, dmx, jd, lj, pm, prj as prj_mod, sta, sup, tf, wid, zdm  # noqa: E402
+from adapters.weidi import (ctr, dmx, jd, lj, pm, prj as prj_mod, sta, sup, tf,
+                              tsf as tsf_mod, wid, zdm)  # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.3.schema.json"
@@ -3027,6 +3031,113 @@ def main() -> int:
                 + d14.scalar("SELECT count(*) FROM road_line WHERE line_code=%s", (uniq,)))
         check("元测试：清理后残留为 0（否则测试会污染真库）", left == 0, f"残留 {left}")
         d14.close()
+
+    # ── 第 15 组：.tsf 土石方调配（适配器吃的是**转换文本** .tsftxt）──────────
+    print("\n第 15 组  .tsf 土石方调配（纬地 HintTF；适配器吃的是转换文本 .tsftxt）")
+    # ★★ 本组要钉住的第一件事：**这个适配器的输入不是厂商原始文件**。
+    #   .tsf 是 Microsoft Access / Jet 4 二进制，而 M2 的适配器契约是 parse(text)、
+    #   零第三方依赖。故先经 tools/tsf2txt.py 摊成 .tsftxt，适配器读那个。
+    #   把这件事钉住，是为了防止将来有人「顺手」让适配器去吃 .tsf ——
+    #   那会让 M2 的依赖集出现分叉，而契约⑤ 整个设计建立在「只认文本」之上。
+    _tsf_fix = FIXTURE.parent / "weidi_tsf_factor_excerpt.tsftxt"
+    check("★ 夹具存在（转换文本，不是 .tsf 二进制）", _tsf_fix.is_file())
+    _tsf_txt = _tsf_fix.read_text(encoding="utf-8")
+    check("★ 夹具首行是**转换器**的魔数（不是纬地的）",
+          _tsf_txt.splitlines()[0] == "HINTTF6.00_TSF_TXT_VER1",
+          repr(_tsf_txt.splitlines()[0]))
+    check("应通过：detect 认自家魔数", tsf_mod.detect(_tsf_txt))
+    check("应通过：detect 不认纬地 .tf 原文（两者魔数不同，不能互相误认）",
+          not tsf_mod.detect("HINTCAD6.00_TF_SHUJU\n//[ 桩号 ]\n0.0"))
+    _tf_out = tsf_mod.parse(_tsf_txt, file="x.tsftxt")
+    check("厂商版本从魔数取出", _tf_out["vendor_version"] == "6.00",
+          _tf_out["vendor_version"])
+    check("表名 = 土石系数", _tf_out["table"] == "土石系数", _tf_out["table"])
+    _EXPECT_F = {"factor_soil_1": 1.23, "factor_soil_2": 1.16, "factor_soil_3": 1.09,
+                 "factor_rock_1": 0.92, "factor_rock_2": 0.92, "factor_rock_3": 0.92}
+    _tf_row = _tf_out[tsf_mod.PAYLOAD_KEY][0]
+    check("★ 六类系数逐值（土方 1.23/1.16/1.09、石方 0.92×3）",
+          _tf_row == _EXPECT_F, str(_tf_row))
+    check("段名与文件类别与 SEGMENT_FILES 登记一致",
+          tsf_mod.SEGMENT == "earthwork_factor"
+          and weidi.SEGMENT_FILES[tsf_mod.SEGMENT][0].lower() == ".tsftxt",
+          "%s / %s" % (tsf_mod.SEGMENT, weidi.SEGMENT_FILES[tsf_mod.SEGMENT]))
+
+    # ── 应拒绝侧：7 例，全部必须抛 SourceInvalid ──────────────────────────
+    # ⚠ parser=tsf_mod **必须显式传**：check_raises 默认拿 .STA 的解析器，
+    #   那样每个用例都会「恰好」因为魔数不符被拒，看起来全绿，
+    #   实际**一条也没走到本适配器自己的校验逻辑上**（第 1 组踩过这个坑）。
+    for _nm, _bad in [
+        ("魔数不是这个格式", _tsf_txt.replace("_TSF_TXT_VER1", "_BAD_SUFFIX")),
+        ("转换格式版本不认识", _tsf_txt.replace("_VER1", "_VER2")),
+        ("要的表不在文件里", _tsf_txt.replace("土石系数", "别的表")),
+        ("出现未知列", _tsf_txt.replace("[ 土方1 ]", "[ 土方X ]")),
+        ("缺列", _tsf_txt.replace("[ 土方1 ]", "")),
+        ("值不是合法数字", _tsf_txt.replace("1.23", "abc")),
+        ("字段数不符", _tsf_txt.replace("1.23\t1.16\t1.09\t0.92\t0.92\t0.92",
+                                        "1.23\t1.16")),
+    ]:
+        check_raises("应拒绝：" + _nm, _bad, parser=tsf_mod)
+
+    # ── _plan_earthwork_factor：工程级落库的出入口 ─────────────────────────
+    _prj_txt, _ = base.read_text_any(FIXTURE.parent / "weidi_prj_excerpt.PRJ")
+    _prj_out = prj_mod.parse(_prj_txt, file="x.PRJ")
+    with tempfile.TemporaryDirectory() as _td15:
+        check("无 .tsftxt 的目录 → 空列表（缺 .tsf 是**正常**的，不报错）",
+              di.plan_project(_prj_out, project_dir=_td15)["tables"]["earthwork_factor"]
+              == [])
+    check("project_dir=None → 空列表",
+          di.plan_project(_prj_out)["tables"]["earthwork_factor"] == [])
+    with tempfile.TemporaryDirectory() as _td15b:
+        shutil.copy(_tsf_fix, Path(_td15b) / "a.tsftxt")
+        _p15 = di.plan_project(_prj_out, project_dir=_td15b)["tables"]["earthwork_factor"]
+        check("★ 有 .tsftxt → 出 1 行，且**不含** design_project_id（由事务补）",
+              len(_p15) == 1 and "design_project_id" not in _p15[0], str(_p15))
+        check("★ 出行的六类系数与源一致",
+              all(_p15[0][k] == v for k, v in _EXPECT_F.items()), str(_p15[0]))
+        check("★ 出行带 remark 说明来源", "tsftxt" in (_p15[0].get("remark") or ""),
+              str(_p15[0].get("remark")))
+    with tempfile.TemporaryDirectory() as _td15c:
+        shutil.copy(_tsf_fix, Path(_td15c) / "a.tsftxt")
+        shutil.copy(_tsf_fix, Path(_td15c) / "b.tsftxt")
+        check("应拒绝：目录里有 2 个 .tsftxt（两套工程混了，不能默默取第一个）",
+              _raises(lambda: di.plan_project(_prj_out, project_dir=_td15c)))
+    with tempfile.TemporaryDirectory() as _td15d:
+        # 源里 2 行 → 必须拒绝（本表 UNIQUE(design_project_id)，多行必然冲突）
+        _two = _tsf_txt.rstrip("\n") + "\n1.00\t1.00\t1.00\t1.00\t1.00\t1.00\n"
+        (Path(_td15d) / "a.tsftxt").write_text(_two, encoding="utf-8")
+        check("应拒绝：源里 2 行系数（本表 UNIQUE(design_project_id)，取第一行=静默丢数据）",
+              _raises(lambda: di.plan_project(_prj_out, project_dir=_td15d)))
+    with tempfile.TemporaryDirectory() as _td15e:
+        (Path(_td15e) / "a.tsftxt").write_text("不是这个格式\n", encoding="utf-8")
+        check("应拒绝：有 .tsftxt 但魔数不对（**与「没有文件」必须区分开**）",
+              _raises(lambda: di.plan_project(_prj_out, project_dir=_td15e)))
+
+    # ── 分工：工程级 vs 路段级 ────────────────────────────────────────────
+    check("★ plan() 的表里**没有** earthwork_factor（按路段那步不该管工程级数据）",
+          "earthwork_factor" not in di.plan({"segments": {}}, section_id=1)["tables"])
+    check("★ ARCHIVE_TABLES 里有它（与 design_project 同组）",
+          "earthwork_factor" in di.ARCHIVE_TABLES, str(di.ARCHIVE_TABLES))
+    check("★ _IMPLEMENTED_SUFFIX 认 .tsftxt（**不是** .tsf —— 二进制确实还导不进去）",
+          di._IMPLEMENTED_SUFFIX.get(".tsftxt") == "earthwork_factor"
+          and ".tsf" not in di._IMPLEMENTED_SUFFIX,
+          ".tsftxt=%s / .tsf 在不在=%s" % (di._IMPLEMENTED_SUFFIX.get(".tsftxt"),
+                                          ".tsf" in di._IMPLEMENTED_SUFFIX))
+
+    # ── ★★ 元测试：证明上面那些检查**不是摆设** ──────────────────────────
+    # 「一个永远不会失败的检查，比没有检查更糟」。下面每条都先**制造**一个
+    # 应该被抓到的缺陷，确认检查**真的会红** —— 而不是只跑一遍绿灯。
+    check("元测试：把夹具魔数改坏后 detect **必须**变 False",
+          not tsf_mod.detect(_tsf_txt.replace("HINTTF", "HINTTX")))
+    _mt = tsf_mod.parse(_tsf_txt, file="x")[tsf_mod.PAYLOAD_KEY][0]
+    check("元测试：把 1.23 改成 9.99 后，逐值断言**必须**对不上",
+          dict(_mt, factor_soil_1=9.99) != _EXPECT_F)
+    check("元测试：拿 .STA 的解析器去解析 .tsftxt **必须**失败"
+          "（证明上面 parser=tsf_mod 不是多余的）",
+          _raises(lambda: sta.parse(_tsf_txt, file="x")))
+    check("元测试：夹具目录（只有 1 个 .tsftxt）不该被「多个文件」那条拦下 —— "
+          "否则那条检查会变成「永远都在报错」",
+          di.plan_project(_prj_out, project_dir=str(FIXTURE.parent))["tables"]["earthwork_factor"]
+          != [])
 
     print("\n" + "=" * 74)
     print(f"通过 {PASS} ｜ 失败 {FAIL} ｜ 跳过 {SKIP[0]}")

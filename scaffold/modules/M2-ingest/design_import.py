@@ -36,6 +36,7 @@ import pathlib
 from typing import Any, Mapping, Sequence
 
 from adapters import base, geom
+from adapters.errors import SourceInvalid
 # ★ 列名**从适配器取**，不在这里手抄 —— .tf 有 74 列，手抄一遍就多一个会漂移的真源。
 from adapters.weidi import lj as lj_mod
 from adapters.weidi import tsf as tsf_mod
