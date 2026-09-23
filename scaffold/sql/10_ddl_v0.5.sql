@@ -43,7 +43,7 @@
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE slope_segment, ditch_segment,
 --                       standard_cross_section, roadbed_trench, structure_control,
 --                       earthwork_composition, land_use_width, extra_fill, design_control_text;
---   v0.5（本版）  60 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张 ＋ L 节 1 张 ＋ M 节 1 张 ＋ N 节 2 张
+--   v0.5（本版）  62 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张 ＋ L 节 1 张 ＋ M 节 1 张 ＋ N 节 2 张 ＋ O 节 2 张
 --                       J1 earthwork_section        逐桩土方断面（.tf，**74 列**）
 --                       J2 roadbed_design_point     逐桩路基设计断面（.lj，**24 列**）
 --                       K1 cross_section_ground_point 逐桩横断面地面线测点（.HDM）★后补，见下
@@ -51,6 +51,8 @@
 --                       M1 earthwork_transfer      土石方调配过程（.tsf）★后补，见下
 --                       N1 borrow_pit           取土坑（.tsf）★后补，见下
 --                       N2 spoil_pit            弃土坑（.tsf）★后补，见下
+--                       O1 earthwork_haul_stat     逐桩土方调运统计（.tsf「统计扩展」，**73 列**）★后补，见下
+--                       O2 earthwork_fill_stat     逐桩填方来源统计（.tsf「土方调配扩展记录」，**46 列**）★后补，见下
 --                 依据：纬地教程 v5.88 §13.9（土方数据文件）、§13.6（路基设计中间数据）。
 --                 ★★ 建表原则（用户明确要求）：**照数据文件的样式，好追溯** ——
 --                       文件里有的列全建（.tf 74 列里 44 列本工程全 0 也建）、
@@ -1992,3 +1994,189 @@ CREATE TABLE IF NOT EXISTS spoil_pit (
 );
 COMMENT ON TABLE spoil_pit IS '弃土坑（纬地 HintTF 的 .tsf「弃土坑」表）。★ 本工程 1 行且**完全没被用上**：上路桩号实测 1900，而 earthwork_transfer 里没有任何一行指向它（4 条 source_kind=1 全指向取土坑的 4100.000）。与取土坑同样几乎全是出厂默认值/占位符。仍然收它：不收的话，将来出现指向弃土坑的调配行就没有落点；但必须把「这是默认值/占位符」如实标出来，不能让它看起来像设计参数。';
 COMMENT ON COLUMN spoil_pit.capacity_m3 IS '总容量 m³（源列 总容量）。⚠⚠ **「无限」占位符** ≈1e15（实测 999999999999999.0），**不是容量** —— 故本列 numeric(20,4)：numeric(18,4) 只有 14 位整数，装不下。';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- O 节  逐桩土方统计（.tsf「统计扩展」/「土方调配扩展记录」）—— 2 张
+-- ═══════════════════════════════════════════════════════════════════════════════
+--
+-- 背景：纬地 HintTF 的 .tsf 里除 L 节「土石系数」、M 节「过程」、N 节「取土坑/弃土坑」，
+--       还有两张**逐桩**（每 20 m 一段，334 段）统计表：
+--         · 统计扩展        334 行 × 73 列
+--         · 土方调配扩展记录  334 行 × 46 列
+--
+-- 实测（本工程「毕设」，桩号 0.000~5.805421 km）：
+--   ★ 两张表桩号区间**完全相同**（334 段，起 0 止 5805.42），但**列完全不重叠**
+--     —— 是两个维度，不是互相投影：
+--       统计扩展 = 本桩段「调出去多少 / 借进来多少」   ← 调配**流向**
+--       调配扩展 = 本桩段「填多少 / 其中利用多少 / 缺多少」← 填方**来源**
+--   ★ 总量**精确闭合**（松方 m³）：
+--       统计扩展  调 = 461437.3679   借 = 107470.2857   调+借 = 568907.6536
+--       调配扩展  填 = 576216.5624   利 =   7308.9088   缺    = 568907.6536
+--                                                          利+缺 = 576216.5624
+--     即 调+借 == 缺，且 填 == 利+缺（**334 行 0 例外**）。
+--   ⚠ 但 调+借 == 缺+利 **逐行只成立 281/334** —— 分段口径不同，故这两张
+--     **不能**当作 earthwork_transfer 的简单投影，而是**独立的一层归集**。
+--
+--   ★ 用户决定：**收**，且「如实标注」—— 故 **73 / 46 列一列不少**，
+--     全 0 的列（石方、第 4/5/6 类、弃/调出/调入各组）**照样建列**。
+--     少收列 = 静默丢数据；「本工程没用上」和「这一列不存在」是两件事。
+--
+-- 单位：桩号 numeric(12,6) 存 **km**；方量 numeric(14,4)。
+-- 列名是源列名的**机械对应**（调→haul、借→borrow、弃→spoil、调出→haul_out、
+-- 调入→haul_in、填→fill、利→utilize、缺→deficit；松方→_loose_m3），逐列可回溯。
+-- ⚠ 源列「1..6」是**土的六类**（松土/普通土/硬土/软石/次坚石/坚石），
+--   本工程只用到 1/2/3（土方），4/5/6（石方）全 0。
+-- ⚠ 「松」= 松方（自然方，未压实）；无后缀的 1..6 = 压实方。
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS earthwork_haul_stat (
+    id                        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        section_id                bigint NOT NULL REFERENCES road_section(id),   -- 锚：由 分段编号 映射而来
+    start_station_km          numeric(12,6), -- 源列 起始桩号
+    end_station_km            numeric(12,6), -- 源列 终止桩号
+    haul_soil_loose_m3        numeric(14,4), -- 源列 调土量松；松方
+    haul_rock_loose_m3        numeric(14,4), -- 源列 调石量松；松方；本工程全 0
+    haul_loose_1_m3           numeric(14,4), -- 源列 调松1；松方
+    haul_loose_2_m3           numeric(14,4), -- 源列 调松2；松方
+    haul_loose_3_m3           numeric(14,4), -- 源列 调松3；松方
+    haul_loose_4_m3           numeric(14,4), -- 源列 调松4；松方
+    haul_loose_5_m3           numeric(14,4), -- 源列 调松5；松方
+    haul_loose_6_m3           numeric(14,4), -- 源列 调松6；松方
+    haul_1_m3                 numeric(14,4), -- 源列 调1；压实方
+    haul_2_m3                 numeric(14,4), -- 源列 调2；压实方
+    haul_3_m3                 numeric(14,4), -- 源列 调3；压实方
+    haul_4_m3                 numeric(14,4), -- 源列 调4；压实方
+    haul_5_m3                 numeric(14,4), -- 源列 调5；压实方
+    haul_6_m3                 numeric(14,4), -- 源列 调6；压实方
+    borrow_soil_loose_m3      numeric(14,4), -- 源列 借土量松；松方
+    borrow_rock_loose_m3      numeric(14,4), -- 源列 借石量松；松方；本工程全 0
+    borrow_loose_1_m3         numeric(14,4), -- 源列 借松1；松方
+    borrow_loose_2_m3         numeric(14,4), -- 源列 借松2；松方
+    borrow_loose_3_m3         numeric(14,4), -- 源列 借松3；松方
+    borrow_loose_4_m3         numeric(14,4), -- 源列 借松4；松方
+    borrow_loose_5_m3         numeric(14,4), -- 源列 借松5；松方
+    borrow_loose_6_m3         numeric(14,4), -- 源列 借松6；松方
+    borrow_1_m3               numeric(14,4), -- 源列 借1；压实方
+    borrow_2_m3               numeric(14,4), -- 源列 借2；压实方
+    borrow_3_m3               numeric(14,4), -- 源列 借3；压实方
+    borrow_4_m3               numeric(14,4), -- 源列 借4；压实方
+    borrow_5_m3               numeric(14,4), -- 源列 借5；压实方
+    borrow_6_m3               numeric(14,4), -- 源列 借6；压实方
+    spoil_soil_loose_m3       numeric(14,4), -- 源列 弃土量松；松方
+    spoil_rock_loose_m3       numeric(14,4), -- 源列 弃石量松；松方；本工程全 0
+    spoil_loose_1_m3          numeric(14,4), -- 源列 弃松1；松方
+    spoil_loose_2_m3          numeric(14,4), -- 源列 弃松2；松方
+    spoil_loose_3_m3          numeric(14,4), -- 源列 弃松3；松方
+    spoil_loose_4_m3          numeric(14,4), -- 源列 弃松4；松方
+    spoil_loose_5_m3          numeric(14,4), -- 源列 弃松5；松方
+    spoil_loose_6_m3          numeric(14,4), -- 源列 弃松6；松方
+    spoil_1_m3                numeric(14,4), -- 源列 弃1；压实方
+    spoil_2_m3                numeric(14,4), -- 源列 弃2；压实方
+    spoil_3_m3                numeric(14,4), -- 源列 弃3；压实方
+    spoil_4_m3                numeric(14,4), -- 源列 弃4；压实方
+    spoil_5_m3                numeric(14,4), -- 源列 弃5；压实方
+    spoil_6_m3                numeric(14,4), -- 源列 弃6；压实方
+    haul_out_soil_loose_m3    numeric(14,4), -- 源列 调出土量松；松方
+    haul_out_rock_loose_m3    numeric(14,4), -- 源列 调出石量松；松方；本工程全 0
+    haul_out_loose_1_m3       numeric(14,4), -- 源列 调出松1；松方
+    haul_out_loose_2_m3       numeric(14,4), -- 源列 调出松2；松方
+    haul_out_loose_3_m3       numeric(14,4), -- 源列 调出松3；松方
+    haul_out_loose_4_m3       numeric(14,4), -- 源列 调出松4；松方
+    haul_out_loose_5_m3       numeric(14,4), -- 源列 调出松5；松方
+    haul_out_loose_6_m3       numeric(14,4), -- 源列 调出松6；松方
+    haul_out_1_m3             numeric(14,4), -- 源列 调出1；压实方
+    haul_out_2_m3             numeric(14,4), -- 源列 调出2；压实方
+    haul_out_3_m3             numeric(14,4), -- 源列 调出3；压实方
+    haul_out_4_m3             numeric(14,4), -- 源列 调出4；压实方
+    haul_out_5_m3             numeric(14,4), -- 源列 调出5；压实方
+    haul_out_6_m3             numeric(14,4), -- 源列 调出6；压实方
+    haul_in_soil_loose_m3     numeric(14,4), -- 源列 调入土量松；松方
+    haul_in_rock_loose_m3     numeric(14,4), -- 源列 调入石量松；松方；本工程全 0
+    haul_in_loose_1_m3        numeric(14,4), -- 源列 调入松1；松方
+    haul_in_loose_2_m3        numeric(14,4), -- 源列 调入松2；松方
+    haul_in_loose_3_m3        numeric(14,4), -- 源列 调入松3；松方
+    haul_in_loose_4_m3        numeric(14,4), -- 源列 调入松4；松方
+    haul_in_loose_5_m3        numeric(14,4), -- 源列 调入松5；松方
+    haul_in_loose_6_m3        numeric(14,4), -- 源列 调入松6；松方
+    haul_in_1_m3              numeric(14,4), -- 源列 调入1；压实方
+    haul_in_2_m3              numeric(14,4), -- 源列 调入2；压实方
+    haul_in_3_m3              numeric(14,4), -- 源列 调入3；压实方
+    haul_in_4_m3              numeric(14,4), -- 源列 调入4；压实方
+    haul_in_5_m3              numeric(14,4), -- 源列 调入5；压实方
+    haul_in_6_m3              numeric(14,4), -- 源列 调入6；压实方
+    section_seq               smallint,      -- 源列 分段编号；纬地序号，非本库 id
+    remark                    text,
+    CONSTRAINT uq_earthwork_haul_stat_station UNIQUE (section_id, start_station_km)
+);
+
+CREATE TABLE IF NOT EXISTS earthwork_fill_stat (
+    id                       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        section_id                bigint NOT NULL REFERENCES road_section(id),   -- 锚：由 分段编号 映射而来
+    start_station_km         numeric(12,6), -- 源列 起始桩号
+    end_station_km           numeric(12,6), -- 源列 终止桩号
+    fill_total_loose_m3      numeric(14,4), -- 源列 填方总量松；松方
+    fill_soil_loose_m3       numeric(14,4), -- 源列 填土量松；松方
+    fill_rock_loose_m3       numeric(14,4), -- 源列 填石量松；松方；本工程全 0
+    fill_loose_1_m3          numeric(14,4), -- 源列 填松1；松方
+    fill_loose_2_m3          numeric(14,4), -- 源列 填松2；松方
+    fill_loose_3_m3          numeric(14,4), -- 源列 填松3；松方
+    fill_loose_4_m3          numeric(14,4), -- 源列 填松4；松方
+    fill_loose_5_m3          numeric(14,4), -- 源列 填松5；松方
+    fill_loose_6_m3          numeric(14,4), -- 源列 填松6；松方
+    fill_1_m3                numeric(14,4), -- 源列 填1；压实方
+    fill_2_m3                numeric(14,4), -- 源列 填2；压实方
+    fill_3_m3                numeric(14,4), -- 源列 填3；压实方
+    fill_4_m3                numeric(14,4), -- 源列 填4；压实方
+    fill_5_m3                numeric(14,4), -- 源列 填5；压实方
+    fill_6_m3                numeric(14,4), -- 源列 填6；压实方
+    utilize_soil_loose_m3    numeric(14,4), -- 源列 利土量松；松方
+    utilize_rock_loose_m3    numeric(14,4), -- 源列 利石量松；松方；本工程全 0
+    utilize_loose_1_m3       numeric(14,4), -- 源列 利松1；松方
+    utilize_loose_2_m3       numeric(14,4), -- 源列 利松2；松方
+    utilize_loose_3_m3       numeric(14,4), -- 源列 利松3；松方
+    utilize_loose_4_m3       numeric(14,4), -- 源列 利松4；松方
+    utilize_loose_5_m3       numeric(14,4), -- 源列 利松5；松方
+    utilize_loose_6_m3       numeric(14,4), -- 源列 利松6；松方
+    utilize_1_m3             numeric(14,4), -- 源列 利1；压实方
+    utilize_2_m3             numeric(14,4), -- 源列 利2；压实方
+    utilize_3_m3             numeric(14,4), -- 源列 利3；压实方
+    utilize_4_m3             numeric(14,4), -- 源列 利4；压实方
+    utilize_5_m3             numeric(14,4), -- 源列 利5；压实方
+    utilize_6_m3             numeric(14,4), -- 源列 利6；压实方
+    deficit_soil_loose_m3    numeric(14,4), -- 源列 缺土量松；松方
+    deficit_rock_loose_m3    numeric(14,4), -- 源列 缺石量松；松方；本工程全 0
+    deficit_loose_1_m3       numeric(14,4), -- 源列 缺松1；松方
+    deficit_loose_2_m3       numeric(14,4), -- 源列 缺松2；松方
+    deficit_loose_3_m3       numeric(14,4), -- 源列 缺松3；松方
+    deficit_loose_4_m3       numeric(14,4), -- 源列 缺松4；松方
+    deficit_loose_5_m3       numeric(14,4), -- 源列 缺松5；松方
+    deficit_loose_6_m3       numeric(14,4), -- 源列 缺松6；松方
+    deficit_1_m3             numeric(14,4), -- 源列 缺1；压实方
+    deficit_2_m3             numeric(14,4), -- 源列 缺2；压实方
+    deficit_3_m3             numeric(14,4), -- 源列 缺3；压实方
+    deficit_4_m3             numeric(14,4), -- 源列 缺4；压实方
+    deficit_5_m3             numeric(14,4), -- 源列 缺5；压实方
+    deficit_6_m3             numeric(14,4), -- 源列 缺6；压实方
+    section_seq              smallint,      -- 源列 分段编号；纬地序号，非本库 id
+    remark                   text,
+    CONSTRAINT uq_earthwork_fill_stat_station UNIQUE (section_id, start_station_km)
+);
+
+COMMENT ON TABLE earthwork_haul_stat IS '逐桩土方调运统计（纬地 HintTF 的 .tsf「统计扩展」表，334 行 × 73 列）。★ 本桩段「调出去多少 / 借进来多少」—— 调配**流向**。★ 总量与 earthwork_transfer 精确闭合（调+借 = 缺 = 568907.6536 松方 m³），但逐行口径不同（281/334），是**独立的一层归集**，不是 transfer 的投影。⚠ 本工程只用到土的 1/2/3 类，4/5/6（石方）及「弃/调出/调入」三组全 0 —— 列照样建，**不用 ≠ 不存在**。';
+COMMENT ON COLUMN earthwork_haul_stat.start_station_km IS '起始桩号 km（源列 起始桩号，源为 m）。';
+COMMENT ON COLUMN earthwork_haul_stat.end_station_km IS '终止桩号 km（源列 终止桩号）。';
+COMMENT ON COLUMN earthwork_haul_stat.section_seq IS '源列 分段编号：纬地序号，非本库 road_section.id；落库时映射。';
+COMMENT ON COLUMN earthwork_haul_stat.haul_soil_loose_m3 IS '源列 调土量松：本桩段**调出去**的土方（松方）。';
+COMMENT ON COLUMN earthwork_haul_stat.borrow_soil_loose_m3 IS '源列 借土量松：本桩段**借进来**的土方（松方）。';
+COMMENT ON COLUMN earthwork_haul_stat.spoil_soil_loose_m3 IS '源列 弃土量松：⚠ 本工程全 0。';
+COMMENT ON COLUMN earthwork_haul_stat.haul_out_soil_loose_m3 IS '源列 调出土量松：⚠ 本工程全 0（与「调土量松」不是同一列，勿混）。';
+COMMENT ON COLUMN earthwork_haul_stat.haul_in_soil_loose_m3 IS '源列 调入土量松：⚠ 本工程全 0（与「借土量松」不是同一列，勿混）。';
+
+COMMENT ON TABLE earthwork_fill_stat IS '逐桩填方来源统计（纬地 HintTF 的 .tsf「土方调配扩展记录」表，334 行 × 46 列）。★ 本桩段「填多少 / 其中利用多少 / 缺多少」—— 填方**来源**。★ 恒等式 填 == 利+缺 **334 行 0 例外**。⚠ 本工程只用到土的 1/2/3 类，4/5/6（石方）全 0。';
+COMMENT ON COLUMN earthwork_fill_stat.start_station_km IS '起始桩号 km（源列 起始桩号）。';
+COMMENT ON COLUMN earthwork_fill_stat.end_station_km IS '终止桩号 km（源列 终止桩号）。';
+COMMENT ON COLUMN earthwork_fill_stat.fill_total_loose_m3 IS '源列 填方总量松（松方）。';
+COMMENT ON COLUMN earthwork_fill_stat.fill_soil_loose_m3 IS '源列 填土量松（松方）。';
+COMMENT ON COLUMN earthwork_fill_stat.utilize_soil_loose_m3 IS '源列 利土量松：填方中**利用**的部分（松方）。';
+COMMENT ON COLUMN earthwork_fill_stat.deficit_soil_loose_m3 IS '源列 缺土量松：填方中**缺**的部分（松方）—— 合计 = 568907.6536，与 earthwork_haul_stat 的「调+借」相等。';
+COMMENT ON COLUMN earthwork_fill_stat.section_seq IS '源列 分段编号：纬地序号，非本库 road_section.id；落库时映射。';
