@@ -33,7 +33,7 @@ from typing import Any
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
-from . import ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, wid, zdm
+from . import ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, tsf, wid, zdm
 
 VENDOR = "weidi-hintcad"
 
@@ -51,6 +51,12 @@ CAPABILITIES: tuple[str, ...] = (
     "design_control",
     "earthwork_section",
     "roadbed_design_point",
+    # v0.5 L 节：.tsf 土石方调配。⚠ 这条**必须同时在 CAPABILITIES 里** ——
+    #   build_ir 的循环走的是 CAPABILITIES（不是 IMPLEMENTED）：只加 IMPLEMENTED 的话，
+    #   适配器写了却永远扫不到，而且**不会报错**，段就那么静默地缺席。
+    #   （实测踩过：加完 IMPLEMENTED/_PARSERS/SEGMENT_FILES/import 四处，
+    #     build_ir 仍然返回 segments 里没有 earthwork_factor。）
+    "earthwork_factor",
 )
 
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
@@ -64,7 +70,10 @@ IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_e
                                 # 这个状态是**故意允许**的（CAPABILITIES 是能力清单，
                                 # IMPLEMENTED 是真做了的清单，两者不同才如实反映进度），
                                 # 但本工程有 .HDM 文件，长期停在"没解析器"就是静默丢数据。
-                                "cross_section")
+                                "cross_section",
+                                # v0.5 L 节：.tsf 土石方调配。★注意它的输入**不是厂商原始文件**，
+                                # 而是 tools/tsf2txt.py 摊出来的 .tsftxt 文本 —— 见 tsf.py 抬头。
+                                "earthwork_factor")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -83,6 +92,7 @@ _PARSERS: dict[str, Any] = {
     "earthwork_section": tf,
     "roadbed_design_point": lj,
     "cross_section": hdm,
+    "earthwork_factor": tsf,
 }
 
 
@@ -161,6 +171,10 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     "design_control": (".CTR", "设计参数控制文件"),
     "earthwork_section": (".tf", "土方数据文件"),
     "roadbed_design_point": (".lj", "路基设计中间数据文件"),
+    # ⚠ 后缀写的是 **.tsftxt 不是 .tsf** —— 这是有意的、也是必须的：
+    #   适配器读的是**转换后的文本**，不是那个 Access 二进制。写成 .tsf 会让台账
+    #   声称"这个文件能导"，而实际导入前还得先跑一遍转换器 —— 那就是**静默的谎**。
+    "earthwork_factor": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
 }
 
 

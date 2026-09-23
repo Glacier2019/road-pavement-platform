@@ -31,12 +31,14 @@
 而变成一道独立来源的防线。
 """
 from __future__ import annotations
+import pathlib
 
 from typing import Any, Mapping, Sequence
 
-from adapters import geom
+from adapters import base, geom
 # ★ 列名**从适配器取**，不在这里手抄 —— .tf 有 74 列，手抄一遍就多一个会漂移的真源。
 from adapters.weidi import lj as lj_mod
+from adapters.weidi import tsf as tsf_mod
 from adapters.weidi import tf as tf_mod
 
 # 落库器只写这几张表。白名单是刻意的：**新增映射必须在这里显式登记**，
@@ -979,7 +981,9 @@ def _batch_remark(ir: Mapping[str, Any], planned: Mapping[str, Any],
 # 几何表用 FK 锚在 `road_section.id` 上，路段没建出来就没有 section_id 可用。
 # 所以顺序是天生的：档案 → 路段 → 几何。
 ARCHIVE_TABLES = ("design_project", "road_line", "road_section",
-                  "section_design_attr", "design_file")
+                  "section_design_attr", "design_file",
+                  # v0.5 L 节：工程级的设计输入（锚 design_project，非 section）
+                  "earthwork_factor")
 
 #: 已实现适配器的后缀 → 该文件可解析。用于 design_file.parse_status。
 #  ⚠ 这张表曾漏掉 .ctr/.tf/.lj 三个**已经实现**的后缀，导致它们被标成 pending
@@ -998,7 +1002,11 @@ _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
                        # slope_segment/ditch_segment/… —— 段名 ≠ 表名，这张表按**段**索引。
                        # 这已经是本会话第二次栽在同一个混淆上（第一次在 ER 图脚本里，
                        # 把段名写进了按表名索引的 WEIDI_SOURCE）。两次都是测试抓的。
-                       ".hdm": "cross_section"}
+                       ".hdm": "cross_section",
+                       # v0.5 L 节。⚠ 后缀写 **.tsftxt 不是 .tsf** —— 适配器读的是
+                       # tools/tsf2txt.py 摊出来的文本，不是那个 Access 二进制。
+                       # 写成 .tsf 会让这张表声称"这个文件能导"，而实际导入前还得先转换。
+                       ".tsftxt": "earthwork_factor"}
 
 #: 台账要不要收「**磁盘上有、`.PRJ` 里没声明**」的文件（v0.5 迁移 ⑨②）。
 #  值是 `file_kind_name` —— `.PRJ` 没给名字（它压根没提），这里给一个。
@@ -1043,7 +1051,12 @@ _LEDGER_DECLARED_CODELESS = {
 # 看不出"**已经确认过能读、只是没写**"，下一个人会重新去查一遍。
 _LEDGER_EXTRA_NOTE = {
     ".tsf": ("Microsoft Access (Jet 4) 数据库；**实测可读**（纯 Python 解出 20 张表，"
-             "表名/列名全中文），只是适配器尚未实现"),
+             "表名/列名全中文）。"
+             "⚠ **但这个文件本身不能直接导入** —— M2 的适配器契约是 `parse(text)`、"
+             "零第三方依赖，而读 Access 需要 `access-parser`。"
+             "故先经 `tools/tsf2txt.py`（一次性工具，不进运行时）摊成 `.tsftxt` 文本，"
+             "适配器读**那个**。**导入本文件之前必须先跑一遍转换器。**"
+             "（所以这里仍是 pending 而不是 ok：磁盘上这个 .tsf 确实还导不进去。）"),
 }
 
 _LEDGER_EXTRA_SUFFIX = {
@@ -1222,7 +1235,15 @@ def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str
     return {
         "tables": {"design_project": [proj_row], "road_line": [line_row],
                    "road_section": sections, "section_design_attr": attrs,
-                   "design_file": files},
+                   "design_file": files,
+                                      # ★ v0.5 L 节：土石方压实系数（.tsftxt）。
+                                      #   为什么在**工程级**这一步、而不是 plan()/load() 那一步：
+                                      #   它锚的是 `design_project_id`（全工程一组系数，没有桩号），
+                                      #   而 plan()/load() 是**按路段**导入的（签名里只有 section_id）。
+                                      #   硬塞进按路段那一步会错位 —— 同一工程导 3 个路段就会写 3 次。
+                                      #   与 design_file 同构：出行时不带 design_project_id，
+                                      #   由 ensure_project 在事务里用 pid 补上。
+                                      "earthwork_factor": _plan_earthwork_factor(project_dir)},
         "skipped_files": skipped,
     }
 
@@ -1233,7 +1254,6 @@ def _plan_design_files(prj: Mapping[str, Any],
     on_disk: dict[str, str] = {}
     scanned = False
     if project_dir is not None:
-        import pathlib
         d = pathlib.Path(project_dir)
         if d.is_dir():
             scanned = True
@@ -1374,6 +1394,44 @@ def _plan_design_files(prj: Mapping[str, Any],
     return rows, skipped
 
 
+def _plan_earthwork_factor(project_dir: Any) -> list[dict]:
+    """扫 ``project_dir`` 找 `.tsftxt`（`.tsf` 的转换文本）→ ``earthwork_factor`` 行。
+
+    ⚠ **找不到就返回空列表，不报错** —— 大多数工程没有 .tsf，缺它是**正常**的。
+    这与"有文件却解析失败"是两回事：后者会抛 :class:`SourceInvalid` 冒到调用方，
+    **不会被这里吞掉**。
+
+    ⚠ 行里**不含** ``design_project_id`` —— 由 :func:`ensure_project` 在事务里补。
+    """
+    if not project_dir:
+        return []
+    d = pathlib.Path(project_dir)
+    if not d.is_dir():
+        return []
+    hits = sorted(p for p in d.iterdir()
+                  if p.is_file() and p.suffix.lower() == ".tsftxt")
+    if not hits:
+        return []
+    # 与 build_ir 同一条规矩：同一段出现多个文件是**异常**（通常是把两套工程混了）。
+    # 选第一个是确定性的，但**确定性不等于正确** —— 所以要说出来，不能默默取。
+    if len(hits) > 1:
+        raise SourceInvalid(
+            "目录里有 %d 个 .tsftxt 文件：%s —— 一套工程每段只有一个，"
+            "出现多个通常是把两套工程的文件混在了一起，请先清理。"
+            % (len(hits), "、".join(h.name for h in hits)))
+    text, _enc = base.read_text_any(hits[0])
+    if not tsf_mod.detect(text):
+        raise SourceInvalid(f"魔数不匹配，可能不是 .tsftxt：{hits[0].name}",
+                            file=hits[0].name)
+    out = tsf_mod.parse(text, file=hits[0].name)
+    rows = out[tsf_mod.PAYLOAD_KEY]
+    # 一个工程一组系数 —— 源里有多行就是源的问题，取第一行会**静默丢数据**。
+    if len(rows) != 1:
+        raise SourceInvalid(
+            f"表「{tsf_mod.TABLE}」应有 1 行（全工程一组系数），实为 {len(rows)} 行 —— "
+            f"本表 UNIQUE(design_project_id)，多行必然冲突，故在这里就说清楚。",
+            file=hits[0].name)
+    return [dict(rows[0], remark=f"来源：{hits[0].name}（纬地 HintTF .tsf 转换文本）")]
 def _project_remark(prj: Mapping[str, Any]) -> str:
     bits = []
     if prj.get("save_time"):
@@ -1412,6 +1470,7 @@ def ensure_project(prj: Mapping[str, Any], dao: Any, *,
     # 混用 `dao.query*` 又是**另一条连接**、读不到本事务未提交的行 ——
     # 真放到事务里查，第一次调用查不到（对），重放也查不到（**错**，于是插重复路段，
     # 而 `insert_returning` 会返回那个新 id，下一轮几何就挂到重复路段上）。
+
     # 挪到事务外、靠 `project_uid` 先定位项目，两种情况就都对了。
     #
     # 残留竞态：两个进程同时首次导入同一项目，可能各插一条同名路段。
@@ -1454,6 +1513,11 @@ def ensure_project(prj: Mapping[str, Any], dao: Any, *,
             attr_row["section_id"] = sid
             tx.insert("section_design_attr", [attr_row], on_conflict=("section_id",))
 
+        for row in t.get("earthwork_factor", []):
+            # 冲突键就是 UNIQUE(design_project_id)：一个工程一组系数，重导覆盖。
+            tx.insert("earthwork_factor", [dict(row, design_project_id=pid)],
+                      on_conflict=("design_project_id",))
+        
         for row in t["design_file"]:
             # ★ 冲突键含 file_name（v0.5 迁移 ⑨②）：没码的行（file_kind_code IS NULL）
             #   靠**文件名**做身份 —— 否则重导时 ON CONFLICT 对 NULL 行永不触发，会插重复。

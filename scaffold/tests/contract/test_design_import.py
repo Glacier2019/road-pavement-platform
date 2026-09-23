@@ -659,12 +659,16 @@ def main() -> int:
         # 判据（写给下一次红的人）：**看那个段在不在 _LEVEL_RULES 里**。
         #   在  → 等级该动，改这条断言，并说明是定义内的段被实现了；
         #   不在 → 等级不该动，是"顺手加了段"，改断言等于把测试改坏。
+        # ★★ 第 7 次变红：加 .tsf（土石方调配）时又红了。按上面那条判据走 ——
+        #    `earthwork_factor` **不在** _LEVEL_RULES 的任何一条里（L0–L4 只认平/纵/横），
+        #    所以答案和加 .CTR/.SUP/.WID/.tf/.lj 那五次一样：**等级不该动**。
+        #    等级的定义是平的，实现进度不该动它 —— 改的是下面这份**已实现清单**。
         check("★ 等级 = L4（cross_section 就是 L4 的定义，.HDM 落地后第一次满足）",
               full["geometry_level"] == "L4"
               and sorted(weidi.IMPLEMENTED)
               == ["alignment_element", "alignment_pi", "cross_section", "design_control",
-                  "earthwork_section", "profile_grade_point", "profile_ground_point",
-                  "roadbed_design_point", "roadbed_width",
+                  "earthwork_factor", "earthwork_section", "profile_grade_point",
+                  "profile_ground_point", "roadbed_design_point", "roadbed_width",
                   "station_sequence", "superelev_transition"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
         gpts = full["segments"].get("profile_ground_point", [])
@@ -699,6 +703,7 @@ def main() -> int:
                   "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
                   "厂商版本 5.83",   # ← .HDM 横断面地面线（v0.5 K 节）
                   "厂商版本 5.84", "厂商版本 6.00", "厂商版本 6.00",
+                  "厂商版本 6.00",   # ← .tsftxt 土石方调配（v0.5 L 节）
                   "厂商版本 7.0"],
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
@@ -835,7 +840,11 @@ def main() -> int:
             check("派生纵坡量级合理（|i| < 20%，超出即说明列错位或推导错）",
                   grades and max(abs(g) for g in grades) < 20.0,
                   f"最大 {max(abs(g) for g in grades):.4f}%")
-        check("台账登记了 12 类文件（含未实现的）", len(full["source"]["files"]) == 12,
+        # 12 → 13：v0.5 L 节引入 `.tsftxt`（.tsf 经 tools/tsf2txt.py 摊出的文本）。
+        # ★ 它是**另一个文件类别**，不是 .tsf 的别名 —— 两者在台账里各占一行：
+        #   `.tsf`     → pending（这个二进制确实还导不进去，要先转换）
+        #   `.tsftxt`  → ok     （适配器读的就是它）
+        check("台账登记了 13 类文件（含未实现的）", len(full["source"]["files"]) == 13,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
@@ -2645,9 +2654,12 @@ def main() -> int:
     # ⚠ 16 → 19：.hda（2026-09-22 定「加」）+ .prj + .dtm（见第 14b 组）。
     #   本用例 `project_dir=None` ⇒ 磁盘补行不发生，故 19 里的 .prj/.dtm 是
     #   **第 14b 组**用临时目录单独验的；这里数的是**只看 .PRJ 时**的条数 = 17。
-    check("五张表各 1/1/1/1 行 + design_file 17 行（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
+    # 五张 → 六张：v0.5 L 节加 earthwork_factor。本用例 project_dir=None
+    #   ⇒ 目录里没有 .tsftxt，故它是 **0 行**（缺 .tsf 是正常的，不报错）。
+    check("六张表各 1/1/1/1/0 行 + design_file 17 行（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
           cnt == {"design_project": 1, "road_line": 1, "road_section": 1,
-                  "section_design_attr": 1, "design_file": 17}, str(cnt))
+                  "section_design_attr": 1, "design_file": 17,
+                  "earthwork_factor": 0}, str(cnt))
     check("★ 元测试：路幅总宽 10.000 **不许**进 road_line.lane_width_m（那是单车道宽）",
           planned["tables"]["road_line"][0]["lane_width_m"] is None)
     check("★ 路幅总宽进 section_design_attr.roadway_width_m",
