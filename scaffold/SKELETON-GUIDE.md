@@ -207,7 +207,7 @@ with dao.write_txn(writer="M2") as tx:
 dao.execute_write("data_import_batch", UPSERT_BATCH, {...}, writer="M2")
 ```
 
-写权对照表在 `modules/M3-rpdao/catalog.py` 的 `TABLE_OWNER`（53 张可写 / 5 张只读）。
+写权对照表在 `modules/M3-rpdao/catalog.py` 的 `TABLE_OWNER`（55 张可写 / 5 张只读）。
 **不在表里的表一律拒写**——这是刻意的：默认允许会让每张新表都自动多一个无人看守的写入口。
 （本行的数字由 `tests/contract/test_write_guard.py` 断言，改了 `TABLE_OWNER` 不改这里，测试会红。）
 
