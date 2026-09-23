@@ -1232,21 +1232,21 @@
           "type": ["integer", "null"],
           "description": "纬地的**分段编号**（源列 `分段编号`，本工程全为 1）。⚠ 是**纬地的序号**，不是我们的 `road_section.id` —— 由落库器映射。"
         },
-        "cut_start_km": {
+        "cut_start_m": {
           "type": ["number", "null"],
-          "description": "取土段起点桩号 km（源列 `取土段S`）。⚠ `source_kind=1` 时它与 `cut_end_km` **相等**（取土坑退化成一个点）。"
+          "description": "取土段起点桩号 **m**（源列 `取土段S`）。⚠ `source_kind=1` 时它与 `cut_end_km` **相等**（取土坑退化成一个点）。"
         },
-        "cut_end_km": {
+        "cut_end_m": {
           "type": ["number", "null"],
-          "description": "取土段终点桩号 km（源列 `取土段E`）。"
+          "description": "取土段终点桩号 **m**（源列 `取土段E`）。"
         },
-        "fill_start_km": {
+        "fill_start_m": {
           "type": ["number", "null"],
-          "description": "弃土段（即填方段）起点桩号 km（源列 `弃土段S`）。"
+          "description": "弃土段（即填方段）起点桩号 **m**（源列 `弃土段S`）。"
         },
-        "fill_end_km": {
+        "fill_end_m": {
           "type": ["number", "null"],
-          "description": "弃土段终点桩号 km（源列 `弃土段E`）。"
+          "description": "弃土段终点桩号 **m**（源列 `弃土段E`）。"
         },
         "used_soil_m3": {
           "type": ["number", "null"],

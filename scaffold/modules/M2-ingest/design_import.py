@@ -40,6 +40,7 @@ from adapters.errors import SourceInvalid
 # ★ 列名**从适配器取**，不在这里手抄 —— .tf 有 74 列，手抄一遍就多一个会漂移的真源。
 from adapters.weidi import lj as lj_mod
 from adapters.weidi import tsf as tsf_mod
+from adapters.weidi import tsftransfer as tsf_transfer_mod
 from adapters.weidi import tf as tf_mod
 
 # 落库器只写这几张表。白名单是刻意的：**新增映射必须在这里显式登记**，
@@ -990,12 +991,12 @@ ARCHIVE_TABLES = ("design_project", "road_line", "road_section",
 #  ⚠ 这张表曾漏掉 .ctr/.tf/.lj 三个**已经实现**的后缀，导致它们被标成 pending
 #  （"适配器尚未实现"）—— 表是手抄的，就会漂。所以下面有一条测试钉住：
 #  **凡是 adapters/weidi 里 IMPLEMENTED 的段，其后缀必须在这张表里**。
-_IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
-                       ".pm": "alignment_element", ".prj": "design_project",
-                       ".dmx": "profile_ground_point", ".zdm": "profile_grade_point",
-                       ".sup": "superelev_transition", ".wid": "roadbed_width",
-                       ".ctr": "design_control", ".tf": "earthwork_section",
-                       ".lj": "roadbed_design_point",
+_IMPLEMENTED_SUFFIX = {".sta": ("station_sequence",), ".jd": ("alignment_pi",),
+                       ".pm": ("alignment_element",), ".prj": ("design_project",),
+                       ".dmx": ("profile_ground_point",), ".zdm": ("profile_grade_point",),
+                       ".sup": ("superelev_transition",), ".wid": ("roadbed_width",),
+                       ".ctr": ("design_control",), ".tf": ("earthwork_section",),
+                       ".lj": ("roadbed_design_point",),
                        # v0.5 K 节。★★ 这里填的是**段名** `cross_section`，不是表名
                        # `cross_section_ground_point` —— 我第一版就填成了表名，被下面那条
                        # 钉子当场抓住（"漏了 ['cross_section']"）。
@@ -1003,11 +1004,14 @@ _IMPLEMENTED_SUFFIX = {".sta": "station_sequence", ".jd": "alignment_pi",
                        # slope_segment/ditch_segment/… —— 段名 ≠ 表名，这张表按**段**索引。
                        # 这已经是本会话第二次栽在同一个混淆上（第一次在 ER 图脚本里，
                        # 把段名写进了按表名索引的 WEIDI_SOURCE）。两次都是测试抓的。
-                       ".hdm": "cross_section",
+                       ".hdm": ("cross_section",),
                        # v0.5 L 节。⚠ 后缀写 **.tsftxt 不是 .tsf** —— 适配器读的是
                        # tools/tsf2txt.py 摊出来的文本，不是那个 Access 二进制。
                        # 写成 .tsf 会让这张表声称"这个文件能导"，而实际导入前还得先转换。
-                       ".tsftxt": "earthwork_factor"}
+                       # ★★ 值是**元组**：.tsftxt 一个文件出**两个段**。原先是 dict[str, str]，
+                       #   一个后缀只能挂一个段 —— 那样 earthwork_transfer 一进 IMPLEMENTED，元测试
+                       #   「IMPLEMENTED 的每个段都在 _IMPLEMENTED_SUFFIX 里」就会报它「漂了」。
+                       ".tsftxt": ("earthwork_factor", "earthwork_transfer")}
 
 #: 台账要不要收「**磁盘上有、`.PRJ` 里没声明**」的文件（v0.5 迁移 ⑨②）。
 #  值是 `file_kind_name` —— `.PRJ` 没给名字（它压根没提），这里给一个。
@@ -1244,7 +1248,8 @@ def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str
                                       #   硬塞进按路段那一步会错位 —— 同一工程导 3 个路段就会写 3 次。
                                       #   与 design_file 同构：出行时不带 design_project_id，
                                       #   由 ensure_project 在事务里用 pid 补上。
-                                      "earthwork_factor": _plan_earthwork_factor(project_dir)},
+                                      "earthwork_factor": _plan_earthwork_factor(project_dir),
+                                      "earthwork_transfer": _plan_earthwork_transfer(project_dir)},
         "skipped_files": skipped,
     }
 
@@ -1326,7 +1331,8 @@ def _plan_design_files(prj: Mapping[str, Any],
         actual = on_disk.get(suffix)
         note = None
         if suffix in _IMPLEMENTED_SUFFIX:
-            status, note = "ok", f"适配器已实现（{_IMPLEMENTED_SUFFIX[suffix]}）"
+            _segs = "、".join(_IMPLEMENTED_SUFFIX[suffix])
+            status, note = "ok", f"适配器已实现（{_segs}）"
         elif suffix in _BLOCKED_SUFFIX:
             # ★ 与 pending 分开：这不是"还没写适配器"，是"按现有手段读不了"。
             status, note = "blocked", f"结构上不可解析：{_BLOCKED_SUFFIX[suffix]}"
@@ -1375,7 +1381,7 @@ def _plan_design_files(prj: Mapping[str, Any],
             found = sorted(p.name for p in pathlib.Path(project_dir).iterdir()
                            if p.is_file() and p.suffix.lower() == suffix)
             for name in found:
-                note = ("适配器已实现（%s）" % _IMPLEMENTED_SUFFIX[suffix]
+                note = ("适配器已实现（%s）" % "、".join(_IMPLEMENTED_SUFFIX[suffix])
                         if suffix in _IMPLEMENTED_SUFFIX
                         else _LEDGER_EXTRA_NOTE.get(suffix))
                 rows.append({
@@ -1433,6 +1439,47 @@ def _plan_earthwork_factor(project_dir: Any) -> list[dict]:
             f"本表 UNIQUE(design_project_id)，多行必然冲突，故在这里就说清楚。",
             file=hits[0].name)
     return [dict(rows[0], remark=f"来源：{hits[0].name}（纬地 HintTF .tsf 转换文本）")]
+
+def _plan_earthwork_transfer(project_dir: Any) -> list[dict]:
+    """扫 ``project_dir`` 找 `.tsftxt` → ``earthwork_transfer`` 行（一次调配一行）。
+
+    ⚠ **找不到就返回空列表，不报错** —— 大多数工程没有 .tsf，缺它是**正常**的。
+    与"有文件却解析失败"是两回事：后者抛 :class:`SourceInvalid` 冒到调用方，不被这里吞掉。
+
+    ⚠ 行里**不含** ``section_id`` —— 由 :func:`ensure_project` 在事务里按 ``section_seq`` 映射。
+
+    ★ 与 :func:`_plan_earthwork_factor` 的关键差别：那个是**全工程一组**（故校验"必须恰好
+    1 行"），这个是**一次调配一行**（本工程 27 行）—— 所以这里**不**校验行数，
+    校验的是**每一行的桩号落不落在它声明的那个路段里**（在 ensure_project 里做，
+    因为那里才知道路段的桩号范围）。
+    """
+    if not project_dir:
+        return []
+    d = pathlib.Path(project_dir)
+    if not d.is_dir():
+        return []
+    hits = sorted(p for p in d.iterdir()
+                  if p.is_file() and p.suffix.lower() == ".tsftxt")
+    if not hits:
+        return []
+    # 与 build_ir 同一条规矩：同一段出现多个文件是**异常**（通常是把两套工程混了）。
+    # 选第一个是确定性的，但**确定性不等于正确** —— 所以要说出来，不能默默取。
+    if len(hits) > 1:
+        raise SourceInvalid(
+            "目录里有 %d 个 .tsftxt 文件：%s —— 一套工程每段只有一个，"
+            "出现多个通常是把两套工程的文件混在了一起，请先清理。"
+            % (len(hits), "、".join(h.name for h in hits)))
+    text, _enc = base.read_text_any(hits[0])
+    if not tsf_transfer_mod.detect(text):
+        raise SourceInvalid(f"魔数不匹配，可能不是 .tsftxt：{hits[0].name}",
+                            file=hits[0].name)
+    out = tsf_transfer_mod.parse(text, file=hits[0].name)
+    rows = out[tsf_transfer_mod.PAYLOAD_KEY]
+    return [dict(r, remark=f"来源：{hits[0].name}（纬地 HintTF .tsf 转换文本）")
+            for r in rows]
+
+
+
 def _project_remark(prj: Mapping[str, Any]) -> str:
     bits = []
     if prj.get("save_time"):
@@ -1518,6 +1565,42 @@ def ensure_project(prj: Mapping[str, Any], dao: Any, *,
             # 冲突键就是 UNIQUE(design_project_id)：一个工程一组系数，重导覆盖。
             tx.insert("earthwork_factor", [dict(row, design_project_id=pid)],
                       on_conflict=("design_project_id",))
+
+        # ── 土石方调配过程（.tsf「过程」）────────────────────────────────────────
+        # ★★ 锚 section_id 而不是 design_project_id —— 用户定的「乙」：**按内容走**。
+        #    桩号 0~5805.421 正好覆盖路段 6 的全长，所以它是**路段级**数据；
+        #    仓库里所有带桩号的表都锚 section_id，破例会让人没法跟 earthwork_section 对账。
+        #
+        # ★★ 代价是纬地的「分段编号」要映射成我们的 road_section.id —— **映射错了会被抓**：
+        #    下面按该路段的桩号范围校验每一次调配的 4 个桩号，越界就抛。
+        #    这是"乙"方案唯一的风险点，故必须有一条**真检查**兜着，不能只写在注释里。
+        _seq2sid = {e["seq"]: e["section_id"] for e in report["section_ids"]}
+        _seq2range = {sec["_seg_seq"]: (sec["start_station_km"], sec["end_station_km"])
+                      for sec in t["road_section"]}
+        _STATION_KEYS = ("cut_start_m", "cut_end_m", "fill_start_m", "fill_end_m")
+        for row in t.get("earthwork_transfer", []):
+            seq = row.get("section_seq")
+            if seq not in _seq2sid:
+                raise LoadError(
+                    f"调配序号 {row.get('transfer_no')} 的分段编号是 {seq}，"
+                    f"但本工程只有 {sorted(_seq2sid)} 这些路段 —— "
+                    f"纬地的分段编号与本库 road_section 对不上，**不猜**。")
+            lo_km, hi_km = _seq2range[seq]
+            _oor = [(k, row[k] / 1000.0) for k in _STATION_KEYS
+                    if row.get(k) is not None
+                    and not (lo_km - 1e-6 <= row[k] / 1000.0 <= hi_km + 1e-6)]
+            if _oor:
+                raise LoadError(
+                    f"调配序号 {row.get('transfer_no')} 的桩号落在路段 {seq} "
+                    f"（{lo_km:.3f}~{hi_km:.3f} km）之外：{_oor} —— "
+                    f"多半是分段编号映射错了。")
+            # IR 里桩号是**米**（与其余适配器一致），DDL 列是 km —— 在这里换算。
+            _r = {k: (None if row.get(k) is None else row[k] / 1000.0)
+                  for k in _STATION_KEYS}
+            _rest = {k: v for k, v in row.items() if k not in _STATION_KEYS}
+            tx.insert("earthwork_transfer",
+                      [dict(_rest, section_id=_seq2sid[seq], **_r)],
+                      on_conflict=("section_id", "transfer_no"))
         
         for row in t["design_file"]:
             # ★ 冲突键含 file_name（v0.5 迁移 ⑨②）：没码的行（file_kind_code IS NULL）

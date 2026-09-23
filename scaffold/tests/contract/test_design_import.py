@@ -44,7 +44,8 @@ import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
 from adapters.weidi import (ctr, dmx, jd, lj, pm, prj as prj_mod, sta, sup, tf,
-                              tsf as tsf_mod, wid, zdm)  # noqa: E402
+                              tsf as tsf_mod, tsftransfer as tsf_transfer_mod,
+                              wid, zdm)  # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.3.schema.json"
@@ -671,7 +672,8 @@ def main() -> int:
               full["geometry_level"] == "L4"
               and sorted(weidi.IMPLEMENTED)
               == ["alignment_element", "alignment_pi", "cross_section", "design_control",
-                  "earthwork_factor", "earthwork_section", "profile_grade_point",
+                  "earthwork_factor", "earthwork_section", "earthwork_transfer",
+                  "profile_grade_point",
                   "profile_ground_point", "roadbed_design_point", "roadbed_width",
                   "station_sequence", "superelev_transition"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
@@ -706,9 +708,11 @@ def main() -> int:
               == ["厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
                   "厂商版本 5.83", "厂商版本 5.83", "厂商版本 5.83",
                   "厂商版本 5.83",   # ← .HDM 横断面地面线（v0.5 K 节）
-                  "厂商版本 5.84", "厂商版本 6.00", "厂商版本 6.00",
+                  "厂商版本 5.84",   # ← .STA
+                  "厂商版本 6.00", "厂商版本 6.00",
                   "厂商版本 6.00",   # ← .tsftxt 土石方调配（v0.5 L 节）
-                  "厂商版本 7.0"],
+                  "厂商版本 6.00",   # ← .tsftxt 调配过程（v0.5 M 节）—— **同一文件出两段**
+                  "厂商版本 7.0"],   # ← .tf 土石方量
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
         _vps = full["segments"]["profile_grade_point"]
@@ -848,7 +852,7 @@ def main() -> int:
         # ★ 它是**另一个文件类别**，不是 .tsf 的别名 —— 两者在台账里各占一行：
         #   `.tsf`     → pending（这个二进制确实还导不进去，要先转换）
         #   `.tsftxt`  → ok     （适配器读的就是它）
-        check("台账登记了 13 类文件（含未实现的）", len(full["source"]["files"]) == 13,
+        check("台账登记了 14 类文件（含未实现的）", len(full["source"]["files"]) == 14,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
@@ -2658,12 +2662,13 @@ def main() -> int:
     # ⚠ 16 → 19：.hda（2026-09-22 定「加」）+ .prj + .dtm（见第 14b 组）。
     #   本用例 `project_dir=None` ⇒ 磁盘补行不发生，故 19 里的 .prj/.dtm 是
     #   **第 14b 组**用临时目录单独验的；这里数的是**只看 .PRJ 时**的条数 = 17。
-    # 五张 → 六张：v0.5 L 节加 earthwork_factor。本用例 project_dir=None
-    #   ⇒ 目录里没有 .tsftxt，故它是 **0 行**（缺 .tsf 是正常的，不报错）。
-    check("六张表各 1/1/1/1/0 行 + design_file 17 行（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
+    # 五张 → 六张 → 七张：v0.5 L 节加 earthwork_factor，M 节加 earthwork_transfer。
+    #   本用例 project_dir=None ⇒ 目录里没有 .tsftxt，故**两张都是 0 行**
+    #   （缺 .tsf 是正常的，不报错 —— 这与"有文件却解析失败"是两回事）。
+    check("七张表各 1/1/1/1/0/0 行 + design_file 17 行（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
           cnt == {"design_project": 1, "road_line": 1, "road_section": 1,
                   "section_design_attr": 1, "design_file": 17,
-                  "earthwork_factor": 0}, str(cnt))
+                  "earthwork_factor": 0, "earthwork_transfer": 0}, str(cnt))
     check("★ 元测试：路幅总宽 10.000 **不许**进 road_line.lane_width_m（那是单车道宽）",
           planned["tables"]["road_line"][0]["lane_width_m"] is None)
     check("★ 路幅总宽进 section_design_attr.roadway_width_m",
@@ -2899,7 +2904,11 @@ def main() -> int:
     # ★★ 钉住：**凡是 adapters/weidi 里 IMPLEMENTED 的段，其后缀必须在
     #    _IMPLEMENTED_SUFFIX 里**。这张表是手抄的，就会漂 —— .ctr/.tf/.lj
     #    就是这样漂成 pending 的。让测试来钉，而不是靠记性。
-    _seg2suf = {v: k for k, v in di._IMPLEMENTED_SUFFIX.items()}
+    # ★★ 值是**元组**不是单值：`.tsftxt` 一个文件出**两个段**（earthwork_factor +
+    #    earthwork_transfer）。故这里必须**摊平**再比 —— 直接 `{v: k for k, v in …}`
+    #    会把每个元组当成一个"段名"，于是**每个段都报漂了**（我改完泛化就撞上了这一条，
+    #    是这条元测试自己把我拦下来的）。它拦得对：值变了，比对方式就得跟着变。
+    _seg2suf = {seg: suf for suf, segs in di._IMPLEMENTED_SUFFIX.items() for seg in segs}
     _missing = sorted(seg for seg in weidi.IMPLEMENTED if seg not in _seg2suf)
     check("★★ 元测试：IMPLEMENTED 的每个段都在 _IMPLEMENTED_SUFFIX 里（表不会漂）",
           not _missing, f"漏了 {_missing}")
@@ -3039,7 +3048,7 @@ def main() -> int:
     #   零第三方依赖。故先经 tools/tsf2txt.py 摊成 .tsftxt，适配器读那个。
     #   把这件事钉住，是为了防止将来有人「顺手」让适配器去吃 .tsf ——
     #   那会让 M2 的依赖集出现分叉，而契约⑤ 整个设计建立在「只认文本」之上。
-    _tsf_fix = FIXTURE.parent / "weidi_tsf_factor_excerpt.tsftxt"
+    _tsf_fix = FIXTURE.parent / "weidi_tsf_excerpt.tsftxt"
     check("★ 夹具存在（转换文本，不是 .tsf 二进制）", _tsf_fix.is_file())
     _tsf_txt = _tsf_fix.read_text(encoding="utf-8")
     check("★ 夹具首行是**转换器**的魔数（不是纬地的）",
@@ -3112,13 +3121,99 @@ def main() -> int:
         check("应拒绝：有 .tsftxt 但魔数不对（**与「没有文件」必须区分开**）",
               _raises(lambda: di.plan_project(_prj_out, project_dir=_td15e)))
 
+    # ── 段 earthwork_transfer（.tsf「过程」）──────────────────────────────
+    #   ★ 与 earthwork_factor 同一个文件、同一个后缀，**第二个段**。
+    #     这条本身就是被测项：证明"一个文件出多段"是支持的（见下面那条元测试）。
+    print("\n第 15b 组  .tsf「过程」→ earthwork_transfer（调配过程）")
+    _tf_out = tsf_transfer_mod.parse(_tsf_txt, file="x.tsftxt")
+    check("解析 .tsftxt 的「过程」表 → 3 行（夹具切的是 GCID 1/23/24）",
+          len(_tf_out["rows"]) == 3, str(len(_tf_out["rows"])))
+    check("★ 每行 31 个字段，一个不省（源 31 列全落）",
+          all(len(r) == 31 for r in _tf_out["rows"]),
+          str(sorted(len(r) for r in _tf_out["rows"])))
+    check("★ transfer_no / section_seq 是 **int**（schema 声明 integer，不是 number）",
+          all(isinstance(r["transfer_no"], int) and isinstance(r["section_seq"], int)
+              for r in _tf_out["rows"]),
+          str([type(r["transfer_no"]).__name__ for r in _tf_out["rows"]]))
+    check("★★ `坑` 不是「坑的类型」，是「土从哪来」：0=路段内调运 1=取土坑取土",
+          [r["source_kind"] for r in _tf_out["rows"]] == [0, 1, 1],
+          str([r["source_kind"] for r in _tf_out["rows"]]))
+    check("★★ source_kind=1 时取土段起止**相等**（取土坑退化成一个点）",
+          all(r["cut_start_m"] == r["cut_end_m"]
+              for r in _tf_out["rows"] if r["source_kind"] == 1),
+          str([(r["cut_start_m"], r["cut_end_m"]) for r in _tf_out["rows"]
+               if r["source_kind"] == 1]))
+    check("★★ 元测试：source_kind=0 的行取土段**不**退化（否则这条判据是空转的）",
+          all(r["cut_start_m"] != r["cut_end_m"]
+              for r in _tf_out["rows"] if r["source_kind"] == 0),
+          "若这条也过了，说明夹具里根本没有 source_kind=0 的行，上一条判据等于没测")
+    check("★★ 取土坑那个点 == 4100.000 m（与 取土坑.上路桩号 完全一致）",
+          all(r["cut_start_m"] == 4100.0
+              for r in _tf_out["rows"] if r["source_kind"] == 1),
+          str([r["cut_start_m"] for r in _tf_out["rows"] if r["source_kind"] == 1]))
+    check("★ 桩号在 IR 里是**米**（与其余适配器一致），不是 km",
+          all(r["cut_start_m"] > 100 for r in _tf_out["rows"]),
+          "落库时才 ÷1000 转 km —— 若这里已是 km，说明单位搞反了")
+    check("★ 六分类列齐全（用土1/2/3 + 用石4/5/6 → used_class_1..6_m3）",
+          all(f"used_class_{n}_m3" in _tf_out["rows"][0] for n in range(1, 7)))
+    check("★ 六类运距列齐全（土方1/2/3运距 + 石方4/5/6运距）",
+          all(f"haul_class_{n}_m" in _tf_out["rows"][0] for n in range(1, 7)))
+
+    _bad_cases = [
+        ("缺「过程」表", _tsf_txt.split("== TABLE 过程 ==")[0]),
+        ("未知列", _tsf_txt.replace("][ 坑 ]", "][ 谁 ]")),
+        # ⚠ 下面两条第一版写的是 "1\t5800.000" —— 真值是 "5800.0"，
+        #   于是 replace **没匹配上**，坏样本 == 好样本，两条"应拒绝"全都**空转通过**。
+        #   是测试自己把这件事报出来的（"本应拒绝却通过了"）。见下面那条元测试。
+        ("GCID 不是整数", _tsf_txt.replace("1\t5800.0\t", "1.5\t5800.0\t")),
+        ("字段数不符（过程表）",
+         _tsf_txt.replace("5800.0\t5805.421\t5775.481", "5800.0\t5775.481")),
+    ]
+    # ★★ 元测试：每个"坏样本"**必须真的与好样本不同**。
+    #   否则 replace 打空 → 坏样本就是好样本 → 那条"应拒绝"永远不会失败。
+    #   「一个永远不会失败的检查，比没有检查更糟」。
+    _vacu = [nm for nm, bad in _bad_cases if bad == _tsf_txt]
+    check("★★ 元测试：每个坏样本都真的与好样本不同（否则那条应拒绝是空转的）",
+          not _vacu, f"这几个 replace 打空了：{_vacu}")
+    for _nm, _bad in _bad_cases:
+        check_raises("应拒绝：" + _nm, _bad, parser=tsf_transfer_mod)
+
+    # ── _plan_earthwork_transfer：锚 section_id 的出入口 ────────────────────
+    with tempfile.TemporaryDirectory() as _td15f:
+        check("无 .tsftxt 的目录 → transfer 也是空列表",
+              di.plan_project(_prj_out, project_dir=_td15f)["tables"]["earthwork_transfer"]
+              == [])
+    with tempfile.TemporaryDirectory() as _td15g:
+        shutil.copy(_tsf_fix, Path(_td15g) / "a.tsftxt")
+        _t15 = di.plan_project(_prj_out, project_dir=_td15g)["tables"]
+        check("★ 有 .tsftxt → transfer 出 3 行（不是 1 行 —— 与 factor 不同）",
+              len(_t15["earthwork_transfer"]) == 3, str(len(_t15["earthwork_transfer"])))
+        check("★★ transfer 行**不含** section_id（由 ensure_project 按 section_seq 映射）",
+              all("section_id" not in r for r in _t15["earthwork_transfer"]))
+        check("★★ 同一个文件同时出两个段：factor 1 行 + transfer 3 行",
+              len(_t15["earthwork_factor"]) == 1
+              and len(_t15["earthwork_transfer"]) == 3,
+              "factor=%d transfer=%d" % (len(_t15["earthwork_factor"]),
+                                         len(_t15["earthwork_transfer"])))
+        check("★ 出行带 remark 说明来源",
+              all("tsftxt" in (r.get("remark") or "")
+                  for r in _t15["earthwork_transfer"]))
+    with tempfile.TemporaryDirectory() as _td15h:
+        # ★ 只有 factor 没有 过程 → 必须拒绝，不能"有一张算一张"
+        _only_f = _tsf_txt.split("== TABLE 过程 ==")[0]
+        (Path(_td15h) / "a.tsftxt").write_text(_only_f, encoding="utf-8")
+        check("应拒绝：.tsftxt 里有系数没过程（**不能只导一半还当成功**）",
+              _raises(lambda: di.plan_project(_prj_out, project_dir=_td15h)))
+
+
     # ── 分工：工程级 vs 路段级 ────────────────────────────────────────────
     check("★ plan() 的表里**没有** earthwork_factor（按路段那步不该管工程级数据）",
           "earthwork_factor" not in di.plan({"segments": {}}, section_id=1)["tables"])
     check("★ ARCHIVE_TABLES 里有它（与 design_project 同组）",
           "earthwork_factor" in di.ARCHIVE_TABLES, str(di.ARCHIVE_TABLES))
     check("★ _IMPLEMENTED_SUFFIX 认 .tsftxt（**不是** .tsf —— 二进制确实还导不进去）",
-          di._IMPLEMENTED_SUFFIX.get(".tsftxt") == "earthwork_factor"
+          di._IMPLEMENTED_SUFFIX.get(".tsftxt")
+          == ("earthwork_factor", "earthwork_transfer")
           and ".tsf" not in di._IMPLEMENTED_SUFFIX,
           ".tsftxt=%s / .tsf 在不在=%s" % (di._IMPLEMENTED_SUFFIX.get(".tsftxt"),
                                           ".tsf" in di._IMPLEMENTED_SUFFIX))

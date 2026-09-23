@@ -33,7 +33,8 @@ from typing import Any
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
-from . import ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, tsf, wid, zdm
+from . import (ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, tsf, tsftransfer,
+               wid, zdm)
 
 VENDOR = "weidi-hintcad"
 
@@ -57,6 +58,7 @@ CAPABILITIES: tuple[str, ...] = (
     #   （实测踩过：加完 IMPLEMENTED/_PARSERS/SEGMENT_FILES/import 四处，
     #     build_ir 仍然返回 segments 里没有 earthwork_factor。）
     "earthwork_factor",
+    "earthwork_transfer",
 )
 
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
@@ -73,7 +75,10 @@ IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_e
                                 "cross_section",
                                 # v0.5 L 节：.tsf 土石方调配。★注意它的输入**不是厂商原始文件**，
                                 # 而是 tools/tsf2txt.py 摊出来的 .tsftxt 文本 —— 见 tsf.py 抬头。
-                                "earthwork_factor")
+                                "earthwork_factor",
+                                # ★ .tsftxt **一个文件出两个段**（系数 + 调配过程）—— 见 design_import 的
+                                #   _IMPLEMENTED_SUFFIX（值是**元组**不是单值，就是为了这件事）。
+                                "earthwork_transfer")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -93,6 +98,7 @@ _PARSERS: dict[str, Any] = {
     "roadbed_design_point": lj,
     "cross_section": hdm,
     "earthwork_factor": tsf,
+    "earthwork_transfer": tsftransfer,
 }
 
 
@@ -175,6 +181,9 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     #   适配器读的是**转换后的文本**，不是那个 Access 二进制。写成 .tsf 会让台账
     #   声称"这个文件能导"，而实际导入前还得先跑一遍转换器 —— 那就是**静默的谎**。
     "earthwork_factor": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
+    # ★ 同一个文件、同一个后缀，**第二个段** —— build_ir 是「每段查自己的后缀」，
+    #   所以共用后缀本来就支持，不需要泛化 SEGMENT_FILES。
+    "earthwork_transfer": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
 }
 
 
