@@ -45,7 +45,9 @@ import design_import as di                              # noqa: E402
 from adapters import base, detect_vendor, geom, weidi          # noqa: E402
 from adapters.errors import SourceInvalid                # noqa: E402
 from adapters.weidi import (ctr, dmx, jd, lj, pm, prj as prj_mod, sta, sup, tf,
-                              tsf as tsf_mod, tsftransfer as tsf_transfer_mod,
+                              tsf as tsf_mod, tsfborrow as tsf_borrow_mod,
+                              tsfspoil as tsf_spoil_mod,
+                              tsftransfer as tsf_transfer_mod,
                               wid, zdm)  # noqa: E402
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
@@ -672,10 +674,12 @@ def main() -> int:
         check("★ 等级 = L4（cross_section 就是 L4 的定义，.HDM 落地后第一次满足）",
               full["geometry_level"] == "L4"
               and sorted(weidi.IMPLEMENTED)
-              == ["alignment_element", "alignment_pi", "cross_section", "design_control",
+              == ["alignment_element", "alignment_pi", "borrow_pit", "cross_section",
+                  "design_control",
                   "earthwork_factor", "earthwork_section", "earthwork_transfer",
                   "profile_grade_point",
                   "profile_ground_point", "roadbed_design_point", "roadbed_width",
+                  "spoil_pit",
                   "station_sequence", "superelev_transition"],
               f"等级 {full['geometry_level']}／已实现 {sorted(weidi.IMPLEMENTED)}")
         gpts = full["segments"].get("profile_ground_point", [])
@@ -712,7 +716,9 @@ def main() -> int:
                   "厂商版本 5.84",   # ← .STA
                   "厂商版本 6.00", "厂商版本 6.00",
                   "厂商版本 6.00",   # ← .tsftxt 土石方调配（v0.5 L 节）
-                  "厂商版本 6.00",   # ← .tsftxt 调配过程（v0.5 M 节）—— **同一文件出两段**
+                  "厂商版本 6.00",   # ← .tsftxt 调配过程（v0.5 M 节）
+                  "厂商版本 6.00",   # ← .tsftxt 取土坑（v0.5 N 节）
+                  "厂商版本 6.00",   # ← .tsftxt 弃土坑（v0.5 N 节）
                   "厂商版本 7.0"],   # ← .tf 土石方量
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
@@ -853,7 +859,7 @@ def main() -> int:
         # ★ 它是**另一个文件类别**，不是 .tsf 的别名 —— 两者在台账里各占一行：
         #   `.tsf`     → pending（这个二进制确实还导不进去，要先转换）
         #   `.tsftxt`  → ok     （适配器读的就是它）
-        check("台账登记了 14 类文件（含未实现的）", len(full["source"]["files"]) == 14,
+        check("台账登记了 16 类文件（含未实现的）", len(full["source"]["files"]) == 16,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
@@ -2663,13 +2669,16 @@ def main() -> int:
     # ⚠ 16 → 19：.hda（2026-09-22 定「加」）+ .prj + .dtm（见第 14b 组）。
     #   本用例 `project_dir=None` ⇒ 磁盘补行不发生，故 19 里的 .prj/.dtm 是
     #   **第 14b 组**用临时目录单独验的；这里数的是**只看 .PRJ 时**的条数 = 17。
-    # 五张 → 六张 → 七张：v0.5 L 节加 earthwork_factor，M 节加 earthwork_transfer。
+    # 五张 → 六张 → 七张 → 九张：L 节 earthwork_factor、M 节 earthwork_transfer、
+    #   N 节 borrow_pit/spoil_pit（四张都来自同一个 .tsftxt）。
     #   本用例 project_dir=None ⇒ 目录里没有 .tsftxt，故**两张都是 0 行**
     #   （缺 .tsf 是正常的，不报错 —— 这与"有文件却解析失败"是两回事）。
-    check("七张表各 1/1/1/1/0/0 行 + design_file 17 行（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
+    check("九张表各 1/1/1/1/0/0/0/0 行 + design_file 17 行"
+          "（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
           cnt == {"design_project": 1, "road_line": 1, "road_section": 1,
                   "section_design_attr": 1, "design_file": 17,
-                  "earthwork_factor": 0, "earthwork_transfer": 0}, str(cnt))
+                  "earthwork_factor": 0, "earthwork_transfer": 0,
+                  "borrow_pit": 0, "spoil_pit": 0}, str(cnt))
     check("★ 元测试：路幅总宽 10.000 **不许**进 road_line.lane_width_m（那是单车道宽）",
           planned["tables"]["road_line"][0]["lane_width_m"] is None)
     check("★ 路幅总宽进 section_design_attr.roadway_width_m",
@@ -3033,7 +3042,7 @@ def main() -> int:
             _tf_row = next(_l for _l in _tsf_txt14.split("\n") if _l.startswith("23\t"))
 
             def _mk_tsftxt(*, seq=1, cut_s=200.0, cut_e=200.0):
-                """按真表头造一份最小 .tsftxt（系数 1 行 + 过程 1 行）。"""
+                """按真表头造一份最小 .tsftxt（4 张表各 1 行）。"""
                 _c = _tf_row.split("\t")
                 _c[0] = "1"                      # GCID
                 _c[1] = repr(cut_s)              # 取土段S
@@ -3042,11 +3051,47 @@ def main() -> int:
                 _c[4] = repr(cut_e)              # 弃土段E
                 _c[9] = "0"                      # 坑=0（路段内调运）
                 _c[30] = str(seq)                # 分段编号
+                # ⚠⚠ 每一行都必须带 `+`！第一版漏了 `+`，于是
+                #   `return` 的字符串到一半就**结束**，后面几行变成了
+                #   **独立的空语句** —— 语法合法、**不报错**，
+                #   但两张坑表根本没进字符串。这就是「静默丢数据」。
                 return ("HINTTF6.00_TSF_TXT_VER1\n"
-                        "== TABLE 土石系数 ==\n"
-                        "//[ 土方1 ][ 土方2 ][ 土方3 ][ 石方1 ][ 石方2 ][ 石方3 ]\n"
-                        "1.23\t1.16\t1.09\t0.92\t0.92\t0.92\n"
-                        "== TABLE 过程 ==\n" + _tf_hdr + "\n" + "\t".join(_c) + "\n")
+                        + "== TABLE 土石系数 ==\n"
+                        + "//[ 土方1 ][ 土方2 ][ 土方3 ][ 石方1 ][ 石方2 ][ 石方3 ]\n"
+                        + "1.23\t1.16\t1.09\t0.92\t0.92\t0.92\n"
+                        + "== TABLE 过程 ==\n" + _tf_hdr + "\n" + "\t".join(_c) + "\n"
+                        + "== TABLE 取土坑 ==\n"
+                        + "//[ 支线长度 ][ 松土 ][ 普通土 ][ 硬土 ][ 软石 ][ 次坚石 ]"
+                        + "[ 坚石 ][ 土方总量 ][ 石方总量 ][ 上路桩号 ]"
+                        + "[ 前经济分界点桩号 ][ 后经济分界点桩号 ]\n"
+                        + "100.0\t20.0\t20.0\t20.0\t20.0\t20.0\t0.0\t"
+                        + "99999892528.71431\t9999999999.0\t" + repr(cut_s) + "\t"
+                        + repr(cut_s) + "\t" + repr(cut_s) + "\n"
+                        + "== TABLE 弃土坑 ==\n"
+                        + "//[ 支线长度 ][ 总容量 ][ 上路桩号 ]"
+                        + "[ 前经济分界点桩号 ][ 后经济分界点桩号 ]\n"
+                        + "100.0\t999999999999999.0\t" + repr(cut_s) + "\t"
+                        + repr(cut_s) + "\t" + repr(cut_s) + "\n")
+
+            # ★★ 元测试：synth 里**必须真有这 4 张表**。
+            #   第一版 _mk_tsftxt 漏了几个 `+`，于是 return 的字符串到一半就结束了，
+            #   后面几行成了**独立的空语句** —— 语法合法、**不报错**，
+            #   但两张坑表根本没进字符串。**这就是静默丢数据**，只有这条能拦住。
+            _mk_probe = _mk_tsftxt(cut_s=200.0, cut_e=300.0)
+            _mk_tables = [l[len("== TABLE "):-3] for l in _mk_probe.split("\n")
+                          if l.startswith("== TABLE ")]
+            check("★★ 元测试：synth 里真有 4 张表（漏 `+` 会让字符串提前结束，静默丢掉后几张）",
+                  _mk_tables == ["土石系数", "过程", "取土坑", "弃土坑"], str(_mk_tables))
+
+            # ★★ 元测试：synth 里**必须真有这 4 张表**。
+            #   第一版 _mk_tsftxt 漏了几个 `+`，于是 return 的字符串到一半就结束了，
+            #   后面几行成了**独立的空语句** —— 语法合法、**不报错**，
+            #   但两张坑表根本没进字符串。**这就是静默丢数据**，只有这条能拦住。
+            _mk_tables = [l[len("== TABLE "):-3]
+                          for l in _mk_tsftxt(cut_s=200.0, cut_e=300.0).split("\n")
+                          if l.startswith("== TABLE ")]
+            check("★★ 元测试：synth 里真有 4 张表（漏 `+` 会让字符串提前结束，静默丢掉后几张）",
+                  _mk_tables == ["土石系数", "过程", "取土坑", "弃土坑"], str(_mk_tables))
 
             with _tf14.TemporaryDirectory() as _td14b:
                 # ① 合法：200 m 落在 100~500 m 内 → 落库，且**桩号从米转成 km**
@@ -3093,10 +3138,72 @@ def main() -> int:
                 check("★★★ 分段编号 99 对不上任何路段 → LoadError",
                       isinstance(_exc2, di.LoadError), repr(_exc2))
 
+                # ④ 取土坑/弃土坑：锚 section_id，锚法是**桩号落在哪个路段**
+                #    （这两张表源里没有「分段编号」—— 桩号就是唯一依据）
+                # ⚠ 注意：第 ① 步的 ensure_project **已经把坑表插进去了**
+                #   （四张表同一个 .tsftxt，一次全落）。
+                #   我第一版在这里又读一次 _b0 然后等 "+1" ——
+                #   而 ON CONFLICT(section_id, pit_no) 让重插**不新增行**，
+                #   于是这条永远不成立。**是测试写错了，不是代码错了。**
+                #   改成查**值**：只要行在、且值对，就说明这条链路通了。
+                check("★★ 取土坑按**桩号落点**锚到该路段（200 m ∈ 100~500 m），且只有 1 行",
+                      d14.scalar("SELECT count(*) FROM borrow_pit WHERE section_id=%s",
+                                 (sid,)) == 1)
+                check("★★ 弃土坑同上",
+                      d14.scalar("SELECT count(*) FROM spoil_pit WHERE section_id=%s",
+                                 (sid,)) == 1)
+                check("★★ 元测试：两条若没落库，下面的越界检查就是空转的",
+                      d14.scalar("SELECT count(*) FROM borrow_pit WHERE section_id=%s",
+                                 (sid,)) > 0)
+                _bk = d14.scalar("SELECT access_station_km FROM borrow_pit WHERE section_id=%s "
+                                 "ORDER BY pit_no DESC LIMIT 1", (sid,))
+                check("★★ 桩号从**米**转成 **km**，且**键名**也换了（200 m → 0.2）",
+                      _bk == Decimal("0.2"), str(_bk))
+                # ★★ 占位符**原样存**（不是 NULL，也不是「看起来合理」的数）。
+                #   ⚠ 列是 numeric(20,4)，故存进去会**舍入到 4 位小数**：
+                #     99999892528.71431 → 99999892528.7143。我第一版拿原值比，差一位。
+                #   故这里断言**哨兵形状**（≈1e11）而不是逐位相等 ——
+                #   这也正是设计意图：它本来就是「无限」，不是一个精确的方量。
+                _soil = d14.scalar("SELECT soil_total_m3 FROM borrow_pit WHERE section_id=%s "
+                                   "ORDER BY pit_no DESC LIMIT 1", (sid,))
+                check("★★ 占位符**原样存**（不是 NULL，也不是「看起来合理」的数）",
+                      _soil is not None and _soil > Decimal("1e10"),
+                      "%s —— 替源文件做主（改 NULL 或改小）都是错的" % _soil)
+                check("★★ 且它确实被 numeric(20,4) 舍入到 4 位小数（证明列宽够）",
+                      _soil == Decimal("99999892528.7143"), str(_soil))
+                check("★★ 弃土坑 1e15 的「总容量」也存得下（numeric(20,4)，全库最宽）",
+                      d14.scalar("SELECT capacity_m3 FROM spoil_pit WHERE section_id=%s "
+                                 "ORDER BY pit_no DESC LIMIT 1", (sid,))
+                      == Decimal("999999999999999.0"))
+                check("★ pct_6 是出厂默认 0（六项和 = 100）",
+                      d14.scalar("SELECT pct_6 FROM borrow_pit WHERE section_id=%s "
+                                 "ORDER BY pit_no DESC LIMIT 1", (sid,)) == Decimal("0"))
+
+                # ⑤ 坑的桩号落在所有路段之外 → LoadError
+                #   ⚠ 这里 900 m 会让 **transfer 先抛**（它的桩号校验在前），
+                #     所以这条实际验的是 transfer。坑表自己的越界路径由 ⑥ 覆盖。
+                (pathlib.Path(_td14b) / "ok.tsftxt").write_text(
+                    _mk_tsftxt(cut_s=900.0, cut_e=900.0), encoding="utf-8")
+                _exc3 = None
+                try:
+                    di.ensure_project(sp, d14, project_dir=_td14b)
+                except Exception as _e:                          # noqa: BLE001
+                    _exc3 = _e
+                check("★★★ 坑的桩号不落在任何路段 → LoadError（桩号定不了路段，不猜）",
+                      isinstance(_exc3, di.LoadError), repr(_exc3))
+
         finally:
             # 按 FK 反序清干净
             uid = f"{uniq}-uid"
             with d14.write_txn(writer="M2") as tx:      # FK 反序，同成同败
+                tx.execute("design_project",
+                           "DELETE FROM borrow_pit WHERE section_id IN "
+                           "(SELECT s.id FROM road_section s JOIN design_project p "
+                           " ON s.design_project_id = p.id WHERE p.project_uid=%(u)s)", {"u": uid})
+                tx.execute("design_project",
+                           "DELETE FROM spoil_pit WHERE section_id IN "
+                           "(SELECT s.id FROM road_section s JOIN design_project p "
+                           " ON s.design_project_id = p.id WHERE p.project_uid=%(u)s)", {"u": uid})
                 tx.execute("design_project",
                            "DELETE FROM earthwork_factor WHERE design_project_id IN "
                            "(SELECT id FROM design_project WHERE project_uid=%(u)s)", {"u": uid})
@@ -3261,6 +3368,45 @@ def main() -> int:
     for _nm, _bad in _bad_cases:
         check_raises("应拒绝：" + _nm, _bad, parser=tsf_transfer_mod)
 
+    # ── 段 borrow_pit / spoil_pit（.tsf「取土坑」「弃土坑」）──────────────────
+    #   ★★ 这两张表**几乎全是出厂默认值**，真值只有桩号 —— 断言就钉这一点。
+    print("\n第 15c 组  .tsf「取土坑」「弃土坑」→ borrow_pit / spoil_pit")
+    _bp = tsf_borrow_mod.parse(_tsf_txt, file="x.tsftxt")["rows"][0]
+    _sp = tsf_spoil_mod.parse(_tsf_txt, file="x.tsftxt")["rows"][0]
+    check("取土坑 12 列 / 弃土坑 5 列，一个不省",
+          len(_bp) == 12 and len(_sp) == 5, "%d / %d" % (len(_bp), len(_sp)))
+    check("★★ 真值：取土坑上路桩号 = 4100.000 m（与 transfer 的 source_kind=1 一致）",
+          _bp["access_station_m"] == 4100.0, str(_bp["access_station_m"]))
+    check("★★ 真值：弃土坑上路桩号 = 1900 m（**没有任何 transfer 行指向它**）",
+          _sp["access_station_m"] == 1900.0, str(_sp["access_station_m"]))
+    check("★★ 出厂默认：支线长度 100.0（两张表同值）",
+          _bp["access_road_length_m"] == 100.0 and _sp["access_road_length_m"] == 100.0)
+    check("★★ 出厂默认：pct_1..6 = 20/20/20/20/20/0，**六项和恰为 100**（是比例不是方量）",
+          [_bp["pct_%d" % k] for k in range(1, 7)] == [20.0] * 5 + [0.0]
+          and sum(_bp["pct_%d" % k] for k in range(1, 7)) == 100.0,
+          str([_bp["pct_%d" % k] for k in range(1, 7)]))
+    check("★★★ 元测试：那个 20/20/20/20/20/0 **不是**喂进算法的参数 —— "
+          "transfer 里 坑=1 的实际组成是 33.3/33.3/33.3",
+          all(abs(r["used_class_%d_m3" % k] / r["used_soil_m3"] - 1 / 3) < 1e-6
+              for r in _tf_out["rows"] if r["source_kind"] == 1 for k in (1, 2, 3)),
+          "若这条变了，说明纬地改了算法，本表的注释要跟着改")
+    check("★★ 占位符：土方总量 ≈1e11（不是容量）",
+          _bp["soil_total_m3"] > 1e10, str(_bp["soil_total_m3"]))
+    check("★★ 占位符：石方总量 ≈1e10",
+          _bp["rock_total_m3"] > 1e9, str(_bp["rock_total_m3"]))
+    check("★★★ 占位符：弃土坑总容量 ≈1e15 —— 需要 numeric(20,4)，全库最宽",
+          _sp["capacity_m3"] > 1e14, str(_sp["capacity_m3"]))
+    for _nm, _bad in [
+        ("缺「取土坑」表", _tsf_txt.split("== TABLE 取土坑 ==")[0]),
+        ("缺「弃土坑」表", _tsf_txt.split("== TABLE 弃土坑 ==")[0]),
+        ("取土坑未知列", _tsf_txt.replace("][ 松土 ]", "][ 啥土 ]")),
+        ("取土坑字段数不符",
+         _tsf_txt.replace("100.0\t20.0\t20.0\t20.0\t20.0\t20.0\t0.0\t",
+                          "100.0\t20.0\t20.0\t20.0\t20.0\t20.0\t")),
+    ]:
+        check_raises("应拒绝：" + _nm, _bad,
+                     parser=tsf_borrow_mod if "取土坑" in _nm else tsf_spoil_mod)
+
     # ── _plan_earthwork_transfer：锚 section_id 的出入口 ────────────────────
     with tempfile.TemporaryDirectory() as _td15f:
         check("无 .tsftxt 的目录 → transfer 也是空列表",
@@ -3296,7 +3442,8 @@ def main() -> int:
           "earthwork_factor" in di.ARCHIVE_TABLES, str(di.ARCHIVE_TABLES))
     check("★ _IMPLEMENTED_SUFFIX 认 .tsftxt（**不是** .tsf —— 二进制确实还导不进去）",
           di._IMPLEMENTED_SUFFIX.get(".tsftxt")
-          == ("earthwork_factor", "earthwork_transfer")
+          == ("earthwork_factor", "earthwork_transfer",
+              "borrow_pit", "spoil_pit")
           and ".tsf" not in di._IMPLEMENTED_SUFFIX,
           ".tsftxt=%s / .tsf 在不在=%s" % (di._IMPLEMENTED_SUFFIX.get(".tsftxt"),
                                           ".tsf" in di._IMPLEMENTED_SUFFIX))

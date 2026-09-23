@@ -41,6 +41,8 @@ from adapters.errors import SourceInvalid
 from adapters.weidi import lj as lj_mod
 from adapters.weidi import tsf as tsf_mod
 from adapters.weidi import tsftransfer as tsf_transfer_mod
+from adapters.weidi import tsfborrow as tsf_borrow_mod
+from adapters.weidi import tsfspoil as tsf_spoil_mod
 from adapters.weidi import tf as tf_mod
 
 # 落库器只写这几张表。白名单是刻意的：**新增映射必须在这里显式登记**，
@@ -1011,7 +1013,8 @@ _IMPLEMENTED_SUFFIX = {".sta": ("station_sequence",), ".jd": ("alignment_pi",),
                        # ★★ 值是**元组**：.tsftxt 一个文件出**两个段**。原先是 dict[str, str]，
                        #   一个后缀只能挂一个段 —— 那样 earthwork_transfer 一进 IMPLEMENTED，元测试
                        #   「IMPLEMENTED 的每个段都在 _IMPLEMENTED_SUFFIX 里」就会报它「漂了」。
-                       ".tsftxt": ("earthwork_factor", "earthwork_transfer")}
+                       ".tsftxt": ("earthwork_factor", "earthwork_transfer",
+                                    "borrow_pit", "spoil_pit")}
 
 #: 台账要不要收「**磁盘上有、`.PRJ` 里没声明**」的文件（v0.5 迁移 ⑨②）。
 #  值是 `file_kind_name` —— `.PRJ` 没给名字（它压根没提），这里给一个。
@@ -1249,7 +1252,11 @@ def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str
                                       #   与 design_file 同构：出行时不带 design_project_id，
                                       #   由 ensure_project 在事务里用 pid 补上。
                                       "earthwork_factor": _plan_earthwork_factor(project_dir),
-                                      "earthwork_transfer": _plan_earthwork_transfer(project_dir)},
+                                      "earthwork_transfer": _plan_earthwork_transfer(project_dir),
+                                      "borrow_pit": _plan_pit(project_dir, seg="borrow_pit",
+                                                             module=tsf_borrow_mod),
+                                      "spoil_pit": _plan_pit(project_dir, seg="spoil_pit",
+                                                            module=tsf_spoil_mod)},
         "skipped_files": skipped,
     }
 
@@ -1479,6 +1486,40 @@ def _plan_earthwork_transfer(project_dir: Any) -> list[dict]:
             for r in rows]
 
 
+def _plan_pit(project_dir: Any, *, seg: str, module: Any) -> list[dict]:
+    """扫 ``project_dir`` 找 `.tsftxt` → 取土坑/弃土坑的行（各 1 行）。
+
+    ⚠ **找不到就返回空列表，不报错** —— 大多数工程没有 .tsf，缺它是**正常**的。
+
+    ⚠ 行里**不含** ``section_id`` —— 由 :func:`ensure_project` 按 ``access_station_m``
+    **落在哪个路段的桩号范围**里来定（这两张表源里**没有**「分段编号」，桩号就是锚点）。
+    """
+    if not project_dir:
+        return []
+    d = pathlib.Path(project_dir)
+    if not d.is_dir():
+        return []
+    hits = sorted(p for p in d.iterdir()
+                  if p.is_file() and p.suffix.lower() == ".tsftxt")
+    if not hits:
+        return []
+    if len(hits) > 1:
+        raise SourceInvalid(
+            "目录里有 %d 个 .tsftxt 文件：%s —— 一套工程每段只有一个，"
+            "出现多个通常是把两套工程的文件混在了一起，请先清理。"
+            % (len(hits), "、".join(h.name for h in hits)))
+    text, _enc = base.read_text_any(hits[0])
+    if not module.detect(text):
+        raise SourceInvalid(f"魔数不匹配，可能不是 .tsftxt：{hits[0].name}",
+                            file=hits[0].name)
+    out = module.parse(text, file=hits[0].name)
+    rows = out[module.PAYLOAD_KEY]
+    # 源里没有坑序号列 —— 本适配器只处理单坑，故一律编 1 号。
+    # ⚠ 多坑时适配器会先拒绝（见 tsfborrow.py 的说明），不会走到这里。
+    return [dict(r, pit_no=1, remark=f"来源：{hits[0].name}（纬地 HintTF .tsf 转换文本）")
+            for r in rows]
+
+
 
 def _project_remark(prj: Mapping[str, Any]) -> str:
     bits = []
@@ -1604,6 +1645,38 @@ def ensure_project(prj: Mapping[str, Any], dao: Any, *,
             tx.insert("earthwork_transfer",
                       [dict(_rest, section_id=_seq2sid[seq], **_r)],
                       on_conflict=("section_id", "transfer_no"))
+
+        # ── 取土坑 / 弃土坑（.tsf N 节）──────────────────────────────────────
+        # ★★ 锚 section_id（用户定的「甲」），但**锚法与 transfer 不同**：
+        #    这两张表源里**没有**「分段编号」—— 唯一能定路段的依据是
+        #    **access_station_m 落在哪个路段的桩号范围**里。找不到就抛，**不猜**。
+        _PIT_STATION_KEYS = ("access_station_m", "econ_front_m", "econ_back_m")
+        for _tbl in ("borrow_pit", "spoil_pit"):
+            for row in t.get(_tbl, []):
+                _st = row.get("access_station_m")
+                if _st is None:
+                    raise LoadError(
+                        f"{_tbl} 的上路桩号是空的 —— 没有桩号就定不了路段，**不猜**。")
+                _st_km = _st / 1000.0
+                _hit = None
+                for _e in report["section_ids"]:
+                    _lo, _hi = _seq2range[_e["seq"]]
+                    if _lo <= _st_km <= _hi:
+                        _hit = _e["section_id"]
+                        break
+                if _hit is None:
+                    _ranges = {k: (round(v[0], 3), round(v[1], 3))
+                               for k, v in _seq2range.items()}
+                    raise LoadError(
+                        f"{_tbl} 的上路桩号 {_st_km:.3f} km 不落在本工程任何路段里"
+                        f"（路段范围 {_ranges}）—— 桩号定不了路段，**不猜**。")
+                # IR 里桩号是**米**，DDL 列是 km —— 值和**键名**都要换
+                # （只换值不换名会让 PG 报 column ... does not exist，上次 transfer 就栽在这）。
+                _pr = {k[:-2] + "_km": (None if row.get(k) is None else row[k] / 1000.0)
+                       for k in _PIT_STATION_KEYS}
+                _prest = {k: v for k, v in row.items() if k not in _PIT_STATION_KEYS}
+                tx.insert(_tbl, [dict(_prest, section_id=_hit, **_pr)],
+                          on_conflict=("section_id", "pit_no"))
         
         for row in t["design_file"]:
             # ★ 冲突键含 file_name（v0.5 迁移 ⑨②）：没码的行（file_kind_code IS NULL）

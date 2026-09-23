@@ -33,8 +33,8 @@ from typing import Any
 from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
-from . import (ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, tsf, tsftransfer,
-               wid, zdm)
+from . import (ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, tsf, tsfborrow,
+               tsfspoil, tsftransfer, wid, zdm)
 
 VENDOR = "weidi-hintcad"
 
@@ -59,6 +59,8 @@ CAPABILITIES: tuple[str, ...] = (
     #     build_ir 仍然返回 segments 里没有 earthwork_factor。）
     "earthwork_factor",
     "earthwork_transfer",
+    "borrow_pit",
+    "spoil_pit",
 )
 
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
@@ -78,7 +80,9 @@ IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_e
                                 "earthwork_factor",
                                 # ★ .tsftxt **一个文件出两个段**（系数 + 调配过程）—— 见 design_import 的
                                 #   _IMPLEMENTED_SUFFIX（值是**元组**不是单值，就是为了这件事）。
-                                "earthwork_transfer")
+                                "earthwork_transfer",
+                                "borrow_pit",
+                                "spoil_pit")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -99,6 +103,8 @@ _PARSERS: dict[str, Any] = {
     "cross_section": hdm,
     "earthwork_factor": tsf,
     "earthwork_transfer": tsftransfer,
+    "borrow_pit": tsfborrow,
+    "spoil_pit": tsfspoil,
 }
 
 
@@ -184,6 +190,8 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     # ★ 同一个文件、同一个后缀，**第二个段** —— build_ir 是「每段查自己的后缀」，
     #   所以共用后缀本来就支持，不需要泛化 SEGMENT_FILES。
     "earthwork_transfer": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
+    "borrow_pit": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
+    "spoil_pit": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
 }
 
 
