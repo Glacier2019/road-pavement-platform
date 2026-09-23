@@ -73,7 +73,8 @@ DOMAINS: dict[str, Domain] = {
         #      一次只做一张，是为了把整条链路先走通一遍再照抄。
         #    ★ 也是 `design_control` 之后**第二个「段名 ≠ 单张物理表名」的例外**：
         #      .tsf 是 1 文件 ↔ 多表（实测 20 张）。
-        "earthwork_factor"),
+        "earthwork_factor",
+        "earthwork_transfer"),
         # geometry_point 已于 v0.3 落地为物理表（原为逻辑占位），故此处不再登记
         (),
         "关系库",
@@ -138,7 +139,7 @@ CROSS_TABLES: tuple[str, ...] = (
 #       第二批（横断面/路基土方/构造物）顺延至 v0.5；其中「横断面地面线 .HDM」经确认不做。
 #       （原为 11 张："超高"已按教程 §13.5 提前落到 v0.3 的 superelev_transition，
 #         "路幅宽度"已按教程 §13.4 提前落到 v0.3 的 roadbed_width）
-EXPECTED_PHYSICAL_TABLES = 57
+EXPECTED_PHYSICAL_TABLES = 58
 
 # 各表的"设计归属模块"：用于写权守卫（谁有权写）与文档生成。
 # 不在本表里的表 = 只读表（catalog/字典/档案），默认拒绝写入。
@@ -167,7 +168,9 @@ TABLE_OWNER: dict[str, str] = {
     "land_use_width": "M2", "extra_fill": "M2", "design_control_text": "M2",
     "earthwork_section": "M2", "roadbed_design_point": "M2",
     "cross_section_ground_point": "M2",   # v0.5 K 节：.HDM 横断面地面线，同源（设计文件）
-    "earthwork_factor": "M2",             # v0.5 L 节：.tsf 土石方调配，同源（设计文件）
+    "earthwork_factor": "M2",
+    "earthwork_transfer": "M2",         # v0.5 M 节：.tsf 土石方调配过程，同源
+             # v0.5 L 节：.tsf 土石方调配，同源（设计文件）
     # GE 域**骨架四表**（v0.1 起就有，原先未登记 → 只读，任何服务都写不了）。
     # 为何现在必须放开：导入一条**新道路**必然要创建 road_line / road_section，
     # 原先只靠 90_seed_skeleton.sql 种入 —— 那就等于"只能导别人已经种好的路"，

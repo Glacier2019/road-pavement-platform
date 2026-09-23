@@ -43,11 +43,12 @@
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE slope_segment, ditch_segment,
 --                       standard_cross_section, roadbed_trench, structure_control,
 --                       earthwork_composition, land_use_width, extra_fill, design_control_text;
---   v0.5（本版）  57 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张 ＋ L 节 1 张
+--   v0.5（本版）  58 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张 ＋ L 节 1 张 ＋ M 节 1 张
 --                       J1 earthwork_section        逐桩土方断面（.tf，**74 列**）
 --                       J2 roadbed_design_point     逐桩路基设计断面（.lj，**24 列**）
 --                       K1 cross_section_ground_point 逐桩横断面地面线测点（.HDM）★后补，见下
 --                       L1 earthwork_factor         土石方压实系数（.tsf）★后补，见下
+--                       M1 earthwork_transfer      土石方调配过程（.tsf）★后补，见下
 --                 依据：纬地教程 v5.88 §13.9（土方数据文件）、§13.6（路基设计中间数据）。
 --                 ★★ 建表原则（用户明确要求）：**照数据文件的样式，好追溯** ——
 --                       文件里有的列全建（.tf 74 列里 44 列本工程全 0 也建）、
@@ -65,11 +66,13 @@
 --                       .STA 桩号序列的 332 个。I 节（.CTR）不能，因为 .CTR 的
 --                       分段桩号**不是** .STA 桩号序列的子集。
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE earthwork_section,
---                       roadbed_design_point, cross_section_ground_point, earthwork_factor;
+--                       roadbed_design_point, cross_section_ground_point, earthwork_factor,
+--                       earthwork_transfer;
 --                 迁移：已存在的库执行 sql/86_migrate_v04_ctr.sql、87_migrate_v05_lj_tf.sql、
 --                       88_migrate_v05_pi_station.sql、89_migrate_v05_hdm.sql、
 --                       91_migrate_v05_side_vocab.sql、92_migrate_v05_ledger_unlisted.sql、
---                       93_migrate_v05_earthwork_factor.sql（均幂等）
+--                       93_migrate_v05_earthwork_factor.sql、
+--                       94_migrate_v05_earthwork_transfer.sql（均幂等）
 --                 ★★ K1 的来历（一条**被推翻的"不做"**）：
 --                       本行原写「其中「横断面地面线（.HDM）」经确认**不做**（用户指示）」。
 --                       2026-09 用户改判为**要做** —— 理由与定性无关：M2 的 .HDM 解析器
@@ -1812,3 +1815,97 @@ COMMENT ON COLUMN earthwork_factor.factor_rock_1 IS '软石的压实系数（.ts
 COMMENT ON COLUMN earthwork_factor.factor_rock_2 IS '次坚石的压实系数（.tsf 列「石方2」）。本工程 0.92';
 COMMENT ON COLUMN earthwork_factor.factor_rock_3 IS '坚石的压实系数（.tsf 列「石方3」）。本工程 0.92';
 COMMENT ON COLUMN earthwork_factor.remark IS '备注。⚠ 本表**不设 CHECK 约束**要求系数 > 0 或 < 1 —— 源文件是设计输入，系数用户可改，硬约束会拒掉合法的中间稿。';
+
+
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- M 节：土石方调配过程（.tsf 的「过程」表）
+--
+-- ★★ 为什么单开 M 节、不并进 L 节：**同一个文件、不同的东西**。
+--    L1 earthwork_factor 是「**设计输入**」—— 全工程一组系数，用户可以在纬地里改。
+--    M1 earthwork_transfer 是「**算出来的成果**」—— 27 次调配，每次哪段土运到哪段、
+--    多少方、运多远。一个是输入、一个是输出，性质不同，故分节。
+--    （.tsf 是 1 文件 ↔ 多表，所以 L/M 两节同源 —— 这是 `design_control` 之后
+--      第二、第三个「段名 ≠ 单张物理表名」的例外。）
+--
+-- ★★ 锚 section_id，**不锚 design_project_id** —— 用户 2026-09 定的「乙」。
+--    按内容走，不按文件走：桩号 0 ~ 5805.421 km **正好覆盖路段 6 的全长**，
+--    所以它是路段级数据。仓库里**所有**带桩号的表都锚 section_id，
+--    破例会让人没法跟 earthwork_section / earthwork_composition 对账。
+--    ⚠ 代价：纬地的 `分段编号`（本工程全 = 1）要映射成我们的 road_section.id。
+--      映射错了会被抓 —— 桩号会超出该路段的范围。
+--
+-- ★★ 桩号**不是 .STA 的子集** —— 这是本表设计的关键，实测：
+--    68 个桩号里 65 个 ⊂ station_sequence，**3 个不在**：
+--        273.000 m（最近 .STA 280.000，差 7 m）
+--        333.000 m（最近 .STA 340.000，差 7 m）
+--        930.000 m（最近 .STA 940.000，差 10 m）
+--    .STA 是 20 m 整数倍，而这 3 个不是 —— 它们是**土方调配算法算出来的分段边界**，
+--    不是测量桩号，所以合法地落在两个 .STA 桩号之间。
+--    → 故本表**直接带 station_km**，不锚 station_sequence（与 I 节 .CTR 同一条规矩）。
+--
+-- ★★ `source_kind`（源列 `坑`）不是「坑的类型」，是「土从哪来」：
+--    0 = 路段内调运（挖方段 → 填方段），取土段是一个**段**；
+--    1 = 从取土坑取土，取土段退化为一个**点**。
+--    实测：23 行为 0、4 行为 1（GCID 23/24/26/27，取土点都是 4100.000 m，
+--    与 `取土坑.上路桩号 = '4100.000'` **完全一致**）。
+--    ⚠ 一开始我把它当成「坑的类型」写进注释 —— 是**取土段 S==E** 这个实测事实把它推翻的。
+--
+-- ★★ 六分类的来历：源列名自己就说清楚了 —— `用土1/2/3` + `用石4/5/6`，
+--    数字 **1–6 连续**，正好对上 `earthwork_composition.pct_1..6`
+--    （松土/普通土/硬土/软石/次坚石/坚石）。不是猜的。
+--
+-- ★★ 精度：桩号 numeric(12,6)（1 mm，与全库 33 处一致）；
+--    体积 numeric(14,4)（最大 113086.35 m³）；运距 numeric(12,4)（最大 3999.89 m）。
+--    ⚠ 运距**不等于两段中心的直线距离**（实测差最多 128 m）—— 纬地算的是沿路加权运距，
+--      故**原样存、不重算**。重算会得到一个"看起来对、其实不是纬地那个数"的值。
+--
+-- 实测规模：27 行（本工程 section_id=6）。回滚 = DROP TABLE earthwork_transfer;
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS earthwork_transfer (
+    id                            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    section_id                    bigint NOT NULL REFERENCES road_section(id),
+    transfer_no                   integer NOT NULL,   -- 源列 GCID：纬地的调配序号，1..27
+    section_seq                   smallint,           -- 源列 分段编号（纬地序号，非本库 id）
+    cut_start_km                      numeric(12,6) NOT NULL,   -- 源列 取土段S
+    cut_end_km                        numeric(12,6) NOT NULL,   -- 源列 取土段E
+    fill_start_km                     numeric(12,6) NOT NULL,   -- 源列 弃土段S
+    fill_end_km                       numeric(12,6) NOT NULL,   -- 源列 弃土段E
+    used_soil_m3                      numeric(14,4),            -- 源列 用土（松方）
+    used_rock_m3                      numeric(14,4),            -- 源列 用石（本工程全 0）
+    used_soil_compacted_m3            numeric(14,4),            -- 源列 用土(压实)
+    used_rock_compacted_m3            numeric(14,4),            -- 源列 用石(压实)
+    used_class_1_m3                   numeric(14,4),            -- 源列 用土1（松土）
+    used_class_2_m3                   numeric(14,4),            -- 源列 用土2（普通土）
+    used_class_3_m3                   numeric(14,4),            -- 源列 用土3（硬土）
+    used_class_4_m3                   numeric(14,4),            -- 源列 用石4（软石）
+    used_class_5_m3                   numeric(14,4),            -- 源列 用石5（次坚石）
+    used_class_6_m3                   numeric(14,4),            -- 源列 用石6（坚石）
+    used_class_1_compacted_m3         numeric(14,4),            -- 源列 用土1(压实)
+    used_class_2_compacted_m3         numeric(14,4),            -- 源列 用土2(压实)
+    used_class_3_compacted_m3         numeric(14,4),            -- 源列 用土3(压实)
+    used_class_4_compacted_m3         numeric(14,4),            -- 源列 用石4(压实)
+    used_class_5_compacted_m3         numeric(14,4),            -- 源列 用石5(压实)
+    used_class_6_compacted_m3         numeric(14,4),            -- 源列 用石6(压实)
+    haul_soil_m                       numeric(12,4),            -- 源列 土方运距（沿路加权，非直线）
+    haul_rock_m                       numeric(12,4),            -- 源列 石方运距
+    haul_class_1_m                    numeric(12,4),            -- 源列 土方1运距
+    haul_class_2_m                    numeric(12,4),            -- 源列 土方2运距
+    haul_class_3_m                    numeric(12,4),            -- 源列 土方3运距
+    haul_class_4_m                    numeric(12,4),            -- 源列 石方4运距
+    haul_class_5_m                    numeric(12,4),            -- 源列 石方5运距
+    haul_class_6_m                    numeric(12,4),            -- 源列 石方6运距
+    source_kind                   smallint,           -- 源列 坑：0=路段内调运 1=取土坑取土
+    remark                        text,
+    CONSTRAINT uq_earthwork_transfer_no UNIQUE (section_id, transfer_no)
+);
+COMMENT ON TABLE earthwork_transfer IS '土石方调配过程（纬地 HintTF 的 .tsf「过程」表）★设计**成果**（不是输入）。一行 = 一次调配：哪段土运到哪段、多少方、运多远。★锚 section_id（按内容走：桩号 0~5805.421 正好覆盖一个路段全长），**不锚 station_sequence** —— 实测 68 个桩号里 3 个不在 .STA 里（273/333/930 m），是调配算法算出的分段边界。⚠ 本表是 `design_control`、`earthwork_factor` 之后第三个「段名 ≠ 单张物理表名」的例外（.tsf 是 1 文件 ↔ 多表）';
+COMMENT ON COLUMN earthwork_transfer.transfer_no IS '纬地的调配序号（源列 GCID，实测 1–27，每行一个、无重复）。';
+COMMENT ON COLUMN earthwork_transfer.section_seq IS '纬地的**分段编号**（源列 分段编号，本工程全为 1）。⚠ 是纬地的序号，不是本库的 road_section.id —— 由落库器映射，映射错了会被桩号越界抓住。';
+COMMENT ON COLUMN earthwork_transfer.cut_start_km IS '取土段起点桩号 km（源列 取土段S）。⚠ source_kind=1 时它与 cut_end_km **相等** —— 取土坑退化成一个点。';
+COMMENT ON COLUMN earthwork_transfer.source_kind IS '土从哪来（源列 坑）：**0=路段内调运**（挖方段→填方段，取土段是一个段）、**1=从取土坑取土**（取土段退化成一个点）。实测 23 行为 0、4 行为 1（GCID 23/24/26/27，取土点都是 4100.000 m = 取土坑.上路桩号）。★ 不是「坑的类型」—— 一开始我这么以为，是「取土段 S==E」这个实测事实把它推翻的。';
+COMMENT ON COLUMN earthwork_transfer.used_soil_m3 IS '用土量 m³（源列 用土，**松方**）。实测 107.93 ~ 113086.35。恒等式（实测验证）：用土1+2+3 == 用土（偏差 ~1e-9 相对，是双精度舍入）。';
+COMMENT ON COLUMN earthwork_transfer.used_soil_compacted_m3 IS '用土（压实）m³（源列 用土(压实)）。= 用土 ÷ 加权系数（系数见 earthwork_factor）。';
+COMMENT ON COLUMN earthwork_transfer.used_class_1_m3 IS '松土的用量 m³（源列 用土1）。★ 源列名「用土1/2/3 + 用石4/5/6」数字 1–6 连续，正好对上 earthwork_composition.pct_1..6 的六分类。';
+COMMENT ON COLUMN earthwork_transfer.haul_soil_m IS '土方运距 m（源列 土方运距）。实测 17.67 ~ 3999.89。⚠ **不等于两段中心的直线距离**（实测差最多 128 m）—— 纬地算的是沿路加权运距，故**原样存、不重算**：重算会得到一个「看起来对、其实不是纬地那个数」的值。';
