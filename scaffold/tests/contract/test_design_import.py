@@ -2729,9 +2729,27 @@ def main() -> int:
     check("★★ 元测试：跳过理由**不能**只是「未给字段号」（那是表象，不是原因）",
           all("未给字段号" not in x for x in planned["skipped_files"]),
           str(planned["skipped_files"]))
-    check("★★ 元测试：.hda **不得**出现在 skipped 里（它已经进台账了）",
-          all(".hda" not in x for x in planned["skipped_files"]),
-          str(planned["skipped_files"]))
+    # ⚠⚠ 这条原来写的是 `all(".hda" not in x for x in skipped)` —— **判据是错的**。
+    #   它靠"跳过理由这段文字里有没有 `.hda` 三个字"来判断，于是
+    #   **改一句文案就能让它红/绿**：实测只是把 .cys 的描述写成
+    #   「与工程数据 .hda 的 … 成对」（那句话本身是对的、且有用），
+    #   这条检查就红了 —— 而 `.hda` 根本没有被跳过。
+    #   **一个会因文案改动而变红的检查，测的不是它声称的东西。**
+    #   → 改成**结构化**：从每条跳过理由里**提取出后缀**，再判后缀集合。
+    #     `skipped_files` 是给人看的 `list[str]`（首段就是 file_kind_name，
+    #     形如 `涵洞系统参数文件(*.cys)（…）`），故用 `(*.xxx)` 抓后缀。
+    def _skip_suffixes(items):
+        out = set()
+        for _x in items:
+            _m = re.search(r"\(\*\.([A-Za-z0-9]+)\)", _x)
+            if _m:
+                out.add("." + _m.group(1).lower())
+        return out
+    _sk = _skip_suffixes(planned["skipped_files"])
+    check("★★ 元测试：被跳过的后缀里**不得**有 .hda（它已经进台账了）",
+          ".hda" not in _sk, f"被跳过的后缀={sorted(_sk)}")
+    check("★★ 元测试：上面那条抓得到后缀（否则它是空转的）",
+          _sk == {".cys"}, f"被跳过的后缀={sorted(_sk)}")
     # ⚠ 上面那条原来断言的是「每行都有 file_kind_code（满足 NOT NULL）」——
     #   v0.5 迁移 ⑨② 之后**它不再成立**：没码的行是合法的（NULL = 纬地自己没给码）。
     #   断言改红是对的：它钉住的正是一个被推翻的前提。
