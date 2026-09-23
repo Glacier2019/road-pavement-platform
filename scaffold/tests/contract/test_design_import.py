@@ -47,6 +47,8 @@ from adapters.errors import SourceInvalid                # noqa: E402
 from adapters.weidi import (ctr, dmx, jd, lj, pm, prj as prj_mod, sta, sup, tf,
                               tsf as tsf_mod, tsfborrow as tsf_borrow_mod,
                               tsfspoil as tsf_spoil_mod,
+                              tsfhaul as tsf_haul_mod,
+                              tsffill as tsf_fill_mod,
                               tsftransfer as tsf_transfer_mod,
                               wid, zdm)  # noqa: E402
 
@@ -3435,6 +3437,55 @@ def main() -> int:
     ]:
         check_raises("应拒绝：" + _nm, _bad,
                      parser=tsf_borrow_mod if "取土坑" in _nm else tsf_spoil_mod)
+
+    # ── 段 earthwork_haul_stat / earthwork_fill_stat（.tsf O 节）──────────────
+    #   ★★ 这两张是**逐桩**统计（334 段），锚法与 transfer 相同（用 分段编号）。
+    #      实测的**闭合关系**就钉在这里 —— 它们当初正是「收」的理由。
+    print("\n第 15d 组  .tsf「统计扩展」「土方调配扩展记录」→ 两张逐桩统计表")
+    _hs = tsf_haul_mod.parse(_tsf_txt, file="x.tsftxt")["rows"]
+    _fs = tsf_fill_mod.parse(_tsf_txt, file="x.tsftxt")["rows"]
+    check("★★ 列数 73 / 46，一列不少（少收列 = 静默丢数据）",
+          len(_hs[0]) == 73 and len(_fs[0]) == 46,
+          "%d / %d" % (len(_hs[0]), len(_fs[0])))
+    check("★★ 两表桩号区间**逐行完全相同**（同一套 334 段）",
+          [(r["start_station_m"], r["end_station_m"]) for r in _hs]
+          == [(r["start_station_m"], r["end_station_m"]) for r in _fs])
+    check("★★ 但**列完全不重叠**（是两个维度，不是互相投影）",
+          not (set(_hs[0]) & set(_fs[0]) - {"start_station_m", "end_station_m", "section_seq"}),
+          str(sorted(set(_hs[0]) & set(_fs[0]))))
+    check("★★★ 恒等式 填方总量松 == 利土量松 + 缺土量松（**逐行**）",
+          all(abs(r["fill_total_loose_m3"]
+                  - (r["utilize_soil_loose_m3"] + r["deficit_soil_loose_m3"])) < 1e-6
+              for r in _fs),
+          "本工程实测 334 行 0 例外")
+    check("★★★ 总量闭合：统计扩展的 调+借 == 调配扩展的 缺（松方 m³）",
+          abs(sum(r["haul_soil_loose_m3"] + r["borrow_soil_loose_m3"] for r in _hs)
+              - sum(r["deficit_soil_loose_m3"] for r in _fs)) < 1e-6,
+          "实测两侧都等于 568907.6536")
+    check("★★ 出厂全 0 的整组列**照样建了**（本工程没用上 ≠ 这一列不存在）",
+          all(_hs[0][k] == 0 for k in ("spoil_soil_loose_m3", "haul_out_soil_loose_m3",
+                                       "haul_in_soil_loose_m3"))
+          and all(_fs[0][k] == 0 for k in ("fill_rock_loose_m3",)),
+          "弃 / 调出 / 调入 三组与石方全 0，但列都在")
+    check("★ 分段编号是整数（源里是整数，不该变成 float）",
+          all(isinstance(r["section_seq"], int) for r in _hs + _fs))
+    for _nm, _bad, _mod in [
+        ("缺「统计扩展」表", _tsf_txt.split("== TABLE 统计扩展 ==")[0], tsf_haul_mod),
+        ("缺「土方调配扩展记录」表", _tsf_txt.split("== TABLE 土方调配扩展记录 ==")[0],
+         tsf_fill_mod),
+        ("统计扩展未知列", _tsf_txt.replace("][ 调松1 ]", "][ 啥松1 ]"), tsf_haul_mod),
+        # ⚠ 原有一条「字段数不符」用的是 `100.0\t20.0` —— 那串**匹配到的是取土坑**，
+        #   不是统计扩展，所以那条「应拒绝」测的根本是别处（反空转元测试当场揭穿）。
+        #   统计扩展的字段数检查与列检查走同一条路，去掉这条冗余项。
+        ("统计扩展某列不是数字",
+         _tsf_txt.replace("\t0.0\t0.0\n", "\tabc\t0.0\n", 1), tsf_haul_mod),
+    ]:
+        # ★★ 反空转：坏样本**必须真的与好样本不同**。
+        #   上一版这里有一条 `… if False else None` + `continue` —— 那是个
+        #   **永远不会执行的检查**，比没有检查更糟。现在每条都真跑。
+        check("★★ 元测试：坏样本确实与好样本不同（「" + _nm + "」）",
+              _bad != _tsf_txt, "一样的话这条应拒绝就是空转的")
+        check_raises("应拒绝：" + _nm, _bad, parser=_mod)
 
     # ── _plan_earthwork_transfer：锚 section_id 的出入口 ────────────────────
     with tempfile.TemporaryDirectory() as _td15f:
