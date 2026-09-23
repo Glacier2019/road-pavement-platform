@@ -34,7 +34,7 @@ from ..base import make_ir
 from ..errors import ParseBlocked, SourceInvalid
 from .. import base
 from . import (ctr, dmx, hdm, jd, lj, pm, sta, sup, tf, tsf, tsfborrow,
-               tsfspoil, tsftransfer, wid, zdm)
+               tsfspoil, tsftransfer, tsfhaul, tsffill, wid, zdm)
 
 VENDOR = "weidi-hintcad"
 
@@ -61,6 +61,8 @@ CAPABILITIES: tuple[str, ...] = (
     "earthwork_transfer",
     "borrow_pit",
     "spoil_pit",
+    "earthwork_haul_stat",
+    "earthwork_fill_stat",
 )
 
 # 本适配器**已实现**的段。新增解析器时改这里，测试会逼 IR 与之同步。
@@ -82,7 +84,9 @@ IMPLEMENTED: tuple[str, ...] = ("station_sequence", "alignment_pi", "alignment_e
                                 #   _IMPLEMENTED_SUFFIX（值是**元组**不是单值，就是为了这件事）。
                                 "earthwork_transfer",
                                 "borrow_pit",
-                                "spoil_pit")
+                                "spoil_pit",
+                                "earthwork_haul_stat",
+                                "earthwork_fill_stat")
 
 # 段 → 解析器模块。新增一个段只需：① 写个模块（detect/parse/PAYLOAD_KEY/SEGMENT）
 # ② 在这里登记 ③ 加进 IMPLEMENTED。IR 结构、缺口推导、等级判定都不用动。
@@ -105,6 +109,8 @@ _PARSERS: dict[str, Any] = {
     "earthwork_transfer": tsftransfer,
     "borrow_pit": tsfborrow,
     "spoil_pit": tsfspoil,
+    "earthwork_haul_stat": tsfhaul,
+    "earthwork_fill_stat": tsffill,
 }
 
 
@@ -192,6 +198,8 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     "earthwork_transfer": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
     "borrow_pit": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
     "spoil_pit": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
+    "earthwork_haul_stat": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
+    "earthwork_fill_stat": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
 }
 
 

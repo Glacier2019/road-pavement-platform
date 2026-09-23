@@ -676,8 +676,8 @@ def main() -> int:
               and sorted(weidi.IMPLEMENTED)
               == ["alignment_element", "alignment_pi", "borrow_pit", "cross_section",
                   "design_control",
-                  "earthwork_factor", "earthwork_section", "earthwork_transfer",
-                  "profile_grade_point",
+                  "earthwork_factor", "earthwork_fill_stat", "earthwork_haul_stat",
+                  "earthwork_section", "earthwork_transfer", "profile_grade_point",
                   "profile_ground_point", "roadbed_design_point", "roadbed_width",
                   "spoil_pit",
                   "station_sequence", "superelev_transition"],
@@ -715,10 +715,12 @@ def main() -> int:
                   "厂商版本 5.83",   # ← .HDM 横断面地面线（v0.5 K 节）
                   "厂商版本 5.84",   # ← .STA
                   "厂商版本 6.00", "厂商版本 6.00",
-                  "厂商版本 6.00",   # ← .tsftxt 土石方调配（v0.5 L 节）
-                  "厂商版本 6.00",   # ← .tsftxt 调配过程（v0.5 M 节）
-                  "厂商版本 6.00",   # ← .tsftxt 取土坑（v0.5 N 节）
-                  "厂商版本 6.00",   # ← .tsftxt 弃土坑（v0.5 N 节）
+                  "厂商版本 6.00",   # ← .tsftxt 土石方调配（L 节）
+                  "厂商版本 6.00",   # ← .tsftxt 调配过程（M 节）
+                  "厂商版本 6.00",   # ← .tsftxt 取土坑（N 节）
+                  "厂商版本 6.00",   # ← .tsftxt 弃土坑（N 节）
+                  "厂商版本 6.00",   # ← .tsftxt 统计扩展（O 节）
+                  "厂商版本 6.00",   # ← .tsftxt 土方调配扩展记录（O 节）
                   "厂商版本 7.0"],   # ← .tf 土石方量
               str([f["note"] for f in full["source"]["files"] if f["parse_status"] == "ok"]))
         # ── 竖曲线：真实 12 个变坡点上的内插自检 ──
@@ -859,7 +861,7 @@ def main() -> int:
         # ★ 它是**另一个文件类别**，不是 .tsf 的别名 —— 两者在台账里各占一行：
         #   `.tsf`     → pending（这个二进制确实还导不进去，要先转换）
         #   `.tsftxt`  → ok     （适配器读的就是它）
-        check("台账登记了 16 类文件（含未实现的）", len(full["source"]["files"]) == 16,
+        check("台账登记了 18 类文件（含未实现的）", len(full["source"]["files"]) == 18,
               f"实为 {len(full['source']['files'])}")
         check("vendor_version 取自魔数", full["source"]["vendor_version"] == "5.84",
               f"实为 {full['source']['vendor_version']}")
@@ -2669,16 +2671,18 @@ def main() -> int:
     # ⚠ 16 → 19：.hda（2026-09-22 定「加」）+ .prj + .dtm（见第 14b 组）。
     #   本用例 `project_dir=None` ⇒ 磁盘补行不发生，故 19 里的 .prj/.dtm 是
     #   **第 14b 组**用临时目录单独验的；这里数的是**只看 .PRJ 时**的条数 = 17。
-    # 五张 → 六张 → 七张 → 九张：L 节 earthwork_factor、M 节 earthwork_transfer、
-    #   N 节 borrow_pit/spoil_pit（四张都来自同一个 .tsftxt）。
+    # 五张 → 六张 → 七张 → 九张 → 十一张：L 节 earthwork_factor、M 节 earthwork_transfer、
+    #   N 节 borrow_pit/spoil_pit、O 节 earthwork_haul_stat/earthwork_fill_stat
+#   （六张都来自同一个 .tsftxt）。
     #   本用例 project_dir=None ⇒ 目录里没有 .tsftxt，故**两张都是 0 行**
     #   （缺 .tsf 是正常的，不报错 —— 这与"有文件却解析失败"是两回事）。
-    check("九张表各 1/1/1/1/0/0/0/0 行 + design_file 17 行"
+    check("十一张表各 1/1/1/1/0/0/0/0/0/0 行 + design_file 17 行"
           "（.PRJ 声明 30 条 − 12 条空路径 − .cys + .hda）",
           cnt == {"design_project": 1, "road_line": 1, "road_section": 1,
                   "section_design_attr": 1, "design_file": 17,
                   "earthwork_factor": 0, "earthwork_transfer": 0,
-                  "borrow_pit": 0, "spoil_pit": 0}, str(cnt))
+                  "borrow_pit": 0, "spoil_pit": 0,
+                  "earthwork_haul_stat": 0, "earthwork_fill_stat": 0}, str(cnt))
     check("★ 元测试：路幅总宽 10.000 **不许**进 road_line.lane_width_m（那是单车道宽）",
           planned["tables"]["road_line"][0]["lane_width_m"] is None)
     check("★ 路幅总宽进 section_design_attr.roadway_width_m",
@@ -3041,6 +3045,28 @@ def main() -> int:
                            if _l.startswith("//[ GCID ]"))
             _tf_row = next(_l for _l in _tsf_txt14.split("\n") if _l.startswith("23\t"))
 
+            # ★ 两张逐桩统计表的**全列清单**（73 / 46 列）—— 适配器要求一列不少，
+            #   少给一列它就会拒绝（这正是「少收列 = 静默丢数据」的反面）。
+            _HAUL_COLS = ['起始桩号', '终止桩号', '调土量松', '调石量松', '调松1', '调松2', '调松3', '调松4', '调松5', '调松6', '调1', '调2', '调3', '调4', '调5', '调6', '借土量松', '借石量松', '借松1', '借松2', '借松3', '借松4', '借松5', '借松6', '借1', '借2', '借3', '借4', '借5', '借6', '弃土量松', '弃石量松', '弃松1', '弃松2', '弃松3', '弃松4', '弃松5', '弃松6', '弃1', '弃2', '弃3', '弃4', '弃5', '弃6', '调出土量松', '调出石量松', '调出松1', '调出松2', '调出松3', '调出松4', '调出松5', '调出松6', '调出1', '调出2', '调出3', '调出4', '调出5', '调出6', '调入土量松', '调入石量松', '调入松1', '调入松2', '调入松3', '调入松4', '调入松5', '调入松6', '调入1', '调入2', '调入3', '调入4', '调入5', '调入6', '分段编号']
+            _FILL_COLS = ['起始桩号', '终止桩号', '填方总量松', '填土量松', '填石量松', '填松1', '填松2', '填松3', '填松4', '填松5', '填松6', '填1', '填2', '填3', '填4', '填5', '填6', '利土量松', '利石量松', '利松1', '利松2', '利松3', '利松4', '利松5', '利松6', '利1', '利2', '利3', '利4', '利5', '利6', '缺土量松', '缺石量松', '缺松1', '缺松2', '缺松3', '缺松4', '缺松5', '缺松6', '缺1', '缺2', '缺3', '缺4', '缺5', '缺6', '分段编号']
+
+            def _mk_stat_block(*, name, cols, seq, cut_s, cut_e):
+                """造一张逐桩统计表的 `== TABLE` 块（表头一行 + 一行数据）。"""
+                vals = []
+                for c in cols:
+                    if c == "起始桩号":
+                        vals.append(repr(cut_s))
+                    elif c == "终止桩号":
+                        vals.append(repr(cut_e))
+                    elif c == "分段编号":
+                        vals.append(str(seq))
+                    else:
+                        vals.append("0.0")
+                return ("== TABLE %s ==\n" % name
+                        + "//" + "".join("[ %s ]" % c for c in cols) + "\n"
+                        + "\t".join(vals) + "\n")
+
+
             def _mk_tsftxt(*, seq=1, cut_s=200.0, cut_e=200.0):
                 """按真表头造一份最小 .tsftxt（4 张表各 1 行）。"""
                 _c = _tf_row.split("\t")
@@ -3071,17 +3097,11 @@ def main() -> int:
                         + "//[ 支线长度 ][ 总容量 ][ 上路桩号 ]"
                         + "[ 前经济分界点桩号 ][ 后经济分界点桩号 ]\n"
                         + "100.0\t999999999999999.0\t" + repr(cut_s) + "\t"
-                        + repr(cut_s) + "\t" + repr(cut_s) + "\n")
-
-            # ★★ 元测试：synth 里**必须真有这 4 张表**。
-            #   第一版 _mk_tsftxt 漏了几个 `+`，于是 return 的字符串到一半就结束了，
-            #   后面几行成了**独立的空语句** —— 语法合法、**不报错**，
-            #   但两张坑表根本没进字符串。**这就是静默丢数据**，只有这条能拦住。
-            _mk_probe = _mk_tsftxt(cut_s=200.0, cut_e=300.0)
-            _mk_tables = [l[len("== TABLE "):-3] for l in _mk_probe.split("\n")
-                          if l.startswith("== TABLE ")]
-            check("★★ 元测试：synth 里真有 4 张表（漏 `+` 会让字符串提前结束，静默丢掉后几张）",
-                  _mk_tables == ["土石系数", "过程", "取土坑", "弃土坑"], str(_mk_tables))
+                        + repr(cut_s) + "\t" + repr(cut_s) + "\n"
+                            + _mk_stat_block(name="统计扩展", cols=_HAUL_COLS,
+                                             seq=seq, cut_s=cut_s, cut_e=cut_e)
+                            + _mk_stat_block(name="土方调配扩展记录", cols=_FILL_COLS,
+                                             seq=seq, cut_s=cut_s, cut_e=cut_e))
 
             # ★★ 元测试：synth 里**必须真有这 4 张表**。
             #   第一版 _mk_tsftxt 漏了几个 `+`，于是 return 的字符串到一半就结束了，
@@ -3090,8 +3110,9 @@ def main() -> int:
             _mk_tables = [l[len("== TABLE "):-3]
                           for l in _mk_tsftxt(cut_s=200.0, cut_e=300.0).split("\n")
                           if l.startswith("== TABLE ")]
-            check("★★ 元测试：synth 里真有 4 张表（漏 `+` 会让字符串提前结束，静默丢掉后几张）",
-                  _mk_tables == ["土石系数", "过程", "取土坑", "弃土坑"], str(_mk_tables))
+            check("★★ 元测试：synth 里真有 6 张表（漏 `+` 会让字符串提前结束，静默丢掉后几张）",
+                  _mk_tables == ["土石系数", "过程", "取土坑", "弃土坑",
+                                 "统计扩展", "土方调配扩展记录"], str(_mk_tables))
 
             with _tf14.TemporaryDirectory() as _td14b:
                 # ① 合法：200 m 落在 100~500 m 内 → 落库，且**桩号从米转成 km**
@@ -3196,6 +3217,14 @@ def main() -> int:
             # 按 FK 反序清干净
             uid = f"{uniq}-uid"
             with d14.write_txn(writer="M2") as tx:      # FK 反序，同成同败
+                tx.execute("design_project",
+                           "DELETE FROM earthwork_haul_stat WHERE section_id IN "
+                           "(SELECT s.id FROM road_section s JOIN design_project p "
+                           " ON s.design_project_id = p.id WHERE p.project_uid=%(u)s)", {"u": uid})
+                tx.execute("design_project",
+                           "DELETE FROM earthwork_fill_stat WHERE section_id IN "
+                           "(SELECT s.id FROM road_section s JOIN design_project p "
+                           " ON s.design_project_id = p.id WHERE p.project_uid=%(u)s)", {"u": uid})
                 tx.execute("design_project",
                            "DELETE FROM borrow_pit WHERE section_id IN "
                            "(SELECT s.id FROM road_section s JOIN design_project p "
@@ -3443,7 +3472,8 @@ def main() -> int:
     check("★ _IMPLEMENTED_SUFFIX 认 .tsftxt（**不是** .tsf —— 二进制确实还导不进去）",
           di._IMPLEMENTED_SUFFIX.get(".tsftxt")
           == ("earthwork_factor", "earthwork_transfer",
-              "borrow_pit", "spoil_pit")
+              "borrow_pit", "spoil_pit",
+              "earthwork_haul_stat", "earthwork_fill_stat")
           and ".tsf" not in di._IMPLEMENTED_SUFFIX,
           ".tsftxt=%s / .tsf 在不在=%s" % (di._IMPLEMENTED_SUFFIX.get(".tsftxt"),
                                           ".tsf" in di._IMPLEMENTED_SUFFIX))

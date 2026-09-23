@@ -43,6 +43,8 @@ from adapters.weidi import tsf as tsf_mod
 from adapters.weidi import tsftransfer as tsf_transfer_mod
 from adapters.weidi import tsfborrow as tsf_borrow_mod
 from adapters.weidi import tsfspoil as tsf_spoil_mod
+from adapters.weidi import tsfhaul as tsf_haul_mod
+from adapters.weidi import tsffill as tsf_fill_mod
 from adapters.weidi import tf as tf_mod
 
 # 落库器只写这几张表。白名单是刻意的：**新增映射必须在这里显式登记**，
@@ -1014,7 +1016,8 @@ _IMPLEMENTED_SUFFIX = {".sta": ("station_sequence",), ".jd": ("alignment_pi",),
                        #   一个后缀只能挂一个段 —— 那样 earthwork_transfer 一进 IMPLEMENTED，元测试
                        #   「IMPLEMENTED 的每个段都在 _IMPLEMENTED_SUFFIX 里」就会报它「漂了」。
                        ".tsftxt": ("earthwork_factor", "earthwork_transfer",
-                                    "borrow_pit", "spoil_pit")}
+                                    "borrow_pit", "spoil_pit",
+                                    "earthwork_haul_stat", "earthwork_fill_stat")}
 
 #: 台账要不要收「**磁盘上有、`.PRJ` 里没声明**」的文件（v0.5 迁移 ⑨②）。
 #  值是 `file_kind_name` —— `.PRJ` 没给名字（它压根没提），这里给一个。
@@ -1256,7 +1259,13 @@ def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str
                                       "borrow_pit": _plan_pit(project_dir, seg="borrow_pit",
                                                              module=tsf_borrow_mod),
                                       "spoil_pit": _plan_pit(project_dir, seg="spoil_pit",
-                                                            module=tsf_spoil_mod)},
+                                                            module=tsf_spoil_mod),
+                                      "earthwork_haul_stat": _plan_stat(
+                                          project_dir, seg="earthwork_haul_stat",
+                                          module=tsf_haul_mod),
+                                      "earthwork_fill_stat": _plan_stat(
+                                          project_dir, seg="earthwork_fill_stat",
+                                          module=tsf_fill_mod)},
         "skipped_files": skipped,
     }
 
@@ -1486,13 +1495,11 @@ def _plan_earthwork_transfer(project_dir: Any) -> list[dict]:
             for r in rows]
 
 
-def _plan_pit(project_dir: Any, *, seg: str, module: Any) -> list[dict]:
-    """扫 ``project_dir`` 找 `.tsftxt` → 取土坑/弃土坑的行（各 1 行）。
+def _read_tsftxt(project_dir: Any, *, seg: str, module: Any) -> list[dict]:
+    """在 ``project_dir`` 里找唯一的 `.tsftxt`，用 ``module`` 解析出**原始行**。
 
     ⚠ **找不到就返回空列表，不报错** —— 大多数工程没有 .tsf，缺它是**正常**的。
-
-    ⚠ 行里**不含** ``section_id`` —— 由 :func:`ensure_project` 按 ``access_station_m``
-    **落在哪个路段的桩号范围**里来定（这两张表源里**没有**「分段编号」，桩号就是锚点）。
+    ⚠ 有多个 `.tsftxt` 就抛：一套工程每段只有一个，多个通常是把两套混在了一起。
     """
     if not project_dir:
         return []
@@ -1513,12 +1520,30 @@ def _plan_pit(project_dir: Any, *, seg: str, module: Any) -> list[dict]:
         raise SourceInvalid(f"魔数不匹配，可能不是 .tsftxt：{hits[0].name}",
                             file=hits[0].name)
     out = module.parse(text, file=hits[0].name)
-    rows = out[module.PAYLOAD_KEY]
+    return [dict(r, remark=f"来源：{hits[0].name}（纬地 HintTF .tsf 转换文本）")
+            for r in out[module.PAYLOAD_KEY]]
+
+
+def _plan_stat(project_dir: Any, *, seg: str, module: Any) -> list[dict]:
+    """逐桩统计表（`.tsf` O 节：统计扩展 / 土方调配扩展记录）—— 各 334 行。
+
+    ★ 与 :func:`_plan_pit` 的关键差别：这两张**有** `分段编号`，故锚法与
+      `earthwork_transfer` **相同**（`section_seq` → `road_section.id`），
+      **不是**按桩号落点找路段。行里也**不**补 `pit_no`。
+    """
+    return _read_tsftxt(project_dir, seg=seg, module=module)
+
+
+def _plan_pit(project_dir: Any, *, seg: str, module: Any) -> list[dict]:
+    """扫 ``project_dir`` 找 `.tsftxt` → 取土坑/弃土坑的行（各 1 行）。
+
+    ⚠ 行里**不含** ``section_id`` —— 由 :func:`ensure_project` 按 ``access_station_m``
+    **落在哪个路段的桩号范围**里来定（这两张表源里**没有**「分段编号」，桩号就是锚点）。
+    """
+    rows = _read_tsftxt(project_dir, seg=seg, module=module)
     # 源里没有坑序号列 —— 本适配器只处理单坑，故一律编 1 号。
     # ⚠ 多坑时适配器会先拒绝（见 tsfborrow.py 的说明），不会走到这里。
-    return [dict(r, pit_no=1, remark=f"来源：{hits[0].name}（纬地 HintTF .tsf 转换文本）")
-            for r in rows]
-
+    return [dict(r, pit_no=1) for r in rows]
 
 
 def _project_remark(prj: Mapping[str, Any]) -> str:
@@ -1678,6 +1703,33 @@ def ensure_project(prj: Mapping[str, Any], dao: Any, *,
                 tx.insert(_tbl, [dict(_prest, section_id=_hit, **_pr)],
                           on_conflict=("section_id", "pit_no"))
         
+
+        # ── 逐桩统计 2 张（.tsf O 节）──────────────────────────────────────
+        # ★★ 锚 section_id，锚法与 earthwork_transfer **相同**（用 分段编号），
+        #    与上面两张坑表**不同**（坑表没分段编号，只能按桩号落点找）。
+        # ⚠ 桩号列源里是**米**，DDL 是 km —— 值和**键名**都要换。
+        _STAT_STATION_KEYS = ("start_station_m", "end_station_m")
+        for _tbl in ("earthwork_haul_stat", "earthwork_fill_stat"):
+            for row in t.get(_tbl, []):
+                _seq = row.get("section_seq")
+                if _seq not in _seq2sid:
+                    raise LoadError(
+                        f"{_tbl} 的分段编号 {_seq!r} 对不上任何路段"
+                        f"（本工程只有 {sorted(_seq2sid)}）—— "
+                        f"纬地的分段编号与本库 road_section 对不上，**不猜**。")
+                _lo, _hi = _seq2range[_seq]
+                for _k in _STAT_STATION_KEYS:
+                    _v = row.get(_k)
+                    if _v is not None and not (_lo <= _v / 1000.0 <= _hi):
+                        raise LoadError(
+                            f"{_tbl} 的 {_k} = {_v} m 落在路段 {_seq} "
+                            f"（{_lo}~{_hi} km）之外 —— 多半是分段编号映射错了。")
+                _sr = {k[:-2] + "_km": (None if row.get(k) is None else row[k] / 1000.0)
+                       for k in _STAT_STATION_KEYS}
+                _srest = {k: v for k, v in row.items()
+                      if k not in _STAT_STATION_KEYS}
+                tx.insert(_tbl, [dict(_srest, section_id=_seq2sid[_seq], **_sr)],
+                      on_conflict=("section_id", "start_station_km"))
         for row in t["design_file"]:
             # ★ 冲突键含 file_name（v0.5 迁移 ⑨②）：没码的行（file_kind_code IS NULL）
             #   靠**文件名**做身份 —— 否则重导时 ON CONFLICT 对 NULL 行永不触发，会插重复。

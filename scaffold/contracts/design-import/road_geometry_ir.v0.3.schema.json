@@ -70,7 +70,9 @@
         "earthwork_factor",
         "earthwork_transfer",
         "borrow_pit",
-        "spoil_pit"
+        "spoil_pit",
+        "earthwork_haul_stat",
+        "earthwork_fill_stat"
       ]
     },
     "level": {
@@ -365,6 +367,22 @@
           },
           "minItems": 1,
           "description": "弃土坑（`.tsf` 的「弃土坑」表，纬地 HintTF）。**本工程只有 1 行，且完全没被用上**：它的 `access_station_m` 实测是 `1900`，而 `earthwork_transfer` 里**没有任何一行指向它**（4 条 `source_kind=1` 全指向取土坑的 4100.000）。★★ 与取土坑同样：**几乎全是出厂默认值** —— `access_road_length_m = 100.0`（与取土坑同值），`capacity_m3 = 999999999999999.0` 是**「无限」占位符**（≈1e15，需要 `numeric(20,4)`），不是容量。★ 仍然收它：不收的话，`earthwork_transfer` 里将来出现指向弃土坑的行就没有落点；但**必须把「这是默认值/占位符」如实标出来**，不能让它看起来像设计参数。"
+        },
+        "earthwork_haul_stat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/earthwork_haul_stat_point"
+          },
+          "minItems": 1,
+          "description": "逐桩土方调运统计（`.tsf` 的「统计扩展」表，纬地 HintTF）。**334 行 × 73 列**，每 20 m 一段。★ 本桩段「调出去 / 借进来」—— 调配**流向**。⚠ 本工程只用到土的 1/2/3 类，石方与「弃/调出/调入」三组**全 0** —— 但**照样全收**（少收列 = 静默丢数据）。"
+        },
+        "earthwork_fill_stat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/earthwork_fill_stat_point"
+          },
+          "minItems": 1,
+          "description": "逐桩填方来源统计（`.tsf` 的「土方调配扩展记录」表）。**334 行 × 46 列**。★ 本桩段「填 / 利用 / 缺」—— 填方**来源**。★ 恒等式 `fill_total == utilize + deficit`（334 行 0 例外）。与 `earthwork_haul_stat` 桩号区间完全相同，但**列完全不重叠**。"
         }
       }
     },
@@ -1397,6 +1415,496 @@
         "capacity_m3": {
           "type": ["number", "null"],
           "description": "总容量 m³（源列 `总容量`）。⚠⚠ **「无限」占位符** ≈1e15（实测 999999999999999.0），**不是容量** —— 需要 `numeric(20,4)`，`numeric(18,4)` 都装不下（只有 14 位整数）。"
+        }
+      }
+    },
+    "earthwork_haul_stat_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "逐桩土方调运统计的一行（`.tsf`「统计扩展」表，**334 行 × 73 列**）。★ 本桩段「调出去 / 借进来」—— 调配**流向**。⚠ 本工程只用到土的 1/2/3 类；`*_rock_*` / `*_loose_4..6_m3` / `*_4..6_m3` 以及**整组** `spoil_*` / `haul_out_*` / `haul_in_*` **全 0**，但一列不少。",
+      "properties": {
+        "start_station_m": {
+          "type": ["number", "null"],
+          "description": "源列 `起始桩号`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "end_station_m": {
+          "type": ["number", "null"],
+          "description": "源列 `终止桩号`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "borrow_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `借6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "spoil_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `弃6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_out_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调出6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "haul_in_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `调入6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "section_seq": {
+          "type": ["integer", "null"],
+          "description": "源列 `分段编号`（纬地序号，**非**本库 `road_section.id`；落库时映射）。"
+        }
+      }
+    },
+    "earthwork_fill_stat_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "逐桩填方来源统计的一行（`.tsf`「土方调配扩展记录」表，**334 行 × 46 列**）。★ 本桩段「填 / 利用 / 缺」—— 填方**来源**。★ `fill_total_loose_m3 == utilize_soil_loose_m3 + deficit_soil_loose_m3`（334 行 0 例外）。",
+      "properties": {
+        "start_station_m": {
+          "type": ["number", "null"],
+          "description": "源列 `起始桩号`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "end_station_m": {
+          "type": ["number", "null"],
+          "description": "源列 `终止桩号`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_total_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填方总量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "fill_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `填6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "utilize_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `利6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_soil_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺土量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_rock_loose_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺石量松`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_loose_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺松1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_loose_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺松2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_loose_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺松3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_loose_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺松4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_loose_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺松5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_loose_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺松6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_1_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺1`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_2_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺2`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_3_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺3`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_4_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺4`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_5_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺5`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "deficit_6_m3": {
+          "type": ["number", "null"],
+          "description": "源列 `缺6`。⚠ 松方口径（`_loose_`）；无后缀的 1..6 是压实方；4/5/6 类（石方）本工程全 0。"
+        },
+        "section_seq": {
+          "type": ["integer", "null"],
+          "description": "源列 `分段编号`（纬地序号，**非**本库 `road_section.id`；落库时映射）。"
         }
       }
     },
