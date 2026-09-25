@@ -146,6 +146,7 @@ def main() -> int:
     PAGES = {
         "geometry.html": 'const GW = "/gw"',
         "import.html": 'const GW = "/gw"',      # 读路段列表仍经 /gw → M6
+        "tables.html": 'const GW = ""',         # 表盘点经 /gw（见第 5 组）
         "index.html": 'const GW = ""',
     }
     have = sorted(p.name for p in M9_DIR.glob("*.html"))
@@ -199,6 +200,57 @@ def main() -> int:
     ok("元测试：未登记的页面会被认出来（清单检查非摆设）",
        sorted(["geometry.html", "index.html", "sneaky.html"]) != sorted(PAGES))
 
+    # ------------------------------------------------- 3c) 表盘点页的边界
+    # 这一页回答的是「库里的表是不是每张都该显示」。它最容易犯的错**不是**
+    # 写死地址，而是**把口径写错**：数成物理表（多出几十行分区）、
+    # 或把「空表」当成错误藏起来。两者都不会报错，只会让人读到错的结论。
+    print("\n=== 3c) 表盘点页：口径必须与 catalog 真源一致 ===")
+    _tbl = (M9_DIR / "tables.html").read_text(encoding="utf-8")
+    # 页面的取数口是 /gw（它要 M6 的数据），不是 M9 自己的接口
+    ok("表盘点页经 /gw 取数（不直连 M6 的 8001）",
+       "/gw/v1/catalog/tables" in _tbl, "页面上没有 /gw/v1/catalog/tables")
+    ok("表盘点页说明了「逻辑表 ≠ 物理表」（分区不单独列）",
+       "分区" in _tbl and "实现细节" in _tbl)
+    ok("表盘点页把「空表不是错误、是链路没接」写清楚",
+       "链路还没接" in _tbl)
+    ok("表盘点页按「有数据 / 空表」分两张表，而不是一张平表",
+       '$("withData")' in _tbl and '$("emptyTbl")' in _tbl)
+    # 域代号→中文名必须**从 /v1/catalog 取**。页面里再抄一份域表，
+    # M3 改了域名就会一直显示旧名字，而没有任何东西会红。
+    ok("域中文名从 /v1/catalog 取，页面里没有另抄一份域表",
+       "/gw/v1/catalog\"" in _tbl and "DOMAIN_NAME[dom.code]" in _tbl)
+    # 上游字段要转义后才能进 innerHTML —— 不转义就是一个注入口子
+    ok("表盘点页对上游字符串做了转义（esc()）",
+       "function esc(" in _tbl and "esc(it.table)" in _tbl)
+    ok("取数失败时如实报错，不静默显示成 0 行",
+       "未能取到盘点结果" in _tbl and "showErr" in _tbl)
+    # 元测试：把分区说明删掉，上面那条必须红
+    ok("元测试：删掉分区说明后必须被认出来（非摆设）",
+       "实现细节" not in _tbl.replace("是 PostgreSQL 的实现细节", "", 1))
+    # 元测试：把 esc() 去掉，上面那条必须红
+    ok("元测试：去掉 esc() 后必须被认出来（非摆设）",
+       "function esc(" not in _tbl.replace("function esc(v) {", "", 1))
+
+    # ------------------------------------------------- 3d) 不直连库与「只经 rpdao」的口径
+    # ⚠ 这一组**离线**跑，只验"结构上做不到"，不连数据库。
+    #   需要真实行数的断言在脚本外面（见 tests/contract/test_dao_contract.py
+    #   的对应组），二者分工：这里钉口径，那里钉数值。
+    print("\n=== 3d) 表盘点的口径（离线部分）===")
+    _repo_src = (ROOT / "modules" / "M3-rpdao" / "rpdao" / "repo.py").read_text(encoding="utf-8")
+    _pool_src = (ROOT / "modules" / "M3-rpdao" / "rpdao" / "pool.py").read_text(encoding="utf-8")
+    ok("分区根表登记在 M3（catalog 一侧），不在页面或 M6 里",
+       "PARTITIONED_ROOTS" in _repo_src and "PARTITIONED_ROOTS" not in _tbl)
+    ok("分区数现查 pg_inherits，不是写死的常量",
+       "pg_inherits" in _pool_src)
+    ok("table_census 的表名只从 ALL_TABLES 来，不收调用方给的表名",
+       "def table_census(self) -> list[dict[str, Any]]" in _pool_src
+       and "from .catalog import ALL_TABLES" in _pool_src
+       and "for i, t in enumerate(ALL_TABLES)" in _pool_src)
+    ok("table_census 用 UNION ALL 一次查完（不是逐表 62 次往返）",
+       '" UNION ALL ".join(parts)' in _pool_src)
+    ok("拼进 SQL 的表名过了 quote_ident（标识符白名单双保险）",
+       "quote_ident(t)" in _pool_src)
+
     # ------------------------------------------------- 4) 真请求
     print("\n=== 4) 真请求（TestClient + 本地 stub 上游）===")
     srv, base = _start_stub()
@@ -214,6 +266,27 @@ def main() -> int:
     ok("/geometry → 200 且是 HTML", r.status_code == 200 and "<title>" in r.text,
        f"{r.status_code}")
     ok("/geometry 的内容确实是那个页面", "GE 道路几何" in r.text)
+    # 表盘点页：路由真的在，且内容真的是那一页。
+    # ★ 这条曾经**本该**在而实际不在：路由写好了、页面文件写好了，但
+    #   Dockerfile 漏了一行 COPY —— 容器里根本没这个文件，GET 直接 500。
+    #   契约测试跑在宿主机上、读的是仓库里的文件，**照样全绿**。
+    #   所以这里补的不是"路由存在"，而是"页面在容器里也存在"（见下面的
+    #   镜像清单断言），两者缺一不可。
+    r = client.get("/tables")
+    ok("/tables → 200 且是 HTML", r.status_code == 200 and "<title>" in r.text,
+       f"{r.status_code}")
+    ok("/tables 的内容确实是那一页", "数据表盘点" in r.text)
+    ok("首页链到 /tables（入口真的点得到）", 'href="/tables"' in client.get("/").text)
+    ok("表盘点页链回首页", 'href="/"' in client.get("/tables").text)
+    # 镜像清单：页面文件必须真的被 COPY 进镜像，否则宿主机测试全绿、容器里 500。
+    _dockerfile = (M9_DIR / "Dockerfile").read_text(encoding="utf-8")
+    _missing = [p.name for p in M9_DIR.glob("*.html") if p.name not in _dockerfile]
+    ok("每个页面都被 Dockerfile COPY 进镜像（漏了会让容器里 500、宿主机测试却全绿）",
+       not _missing, f"未 COPY：{_missing}")
+    ok("元测试：漏 COPY 时必须被认出来（非摆设）",
+       [p.name for p in M9_DIR.glob("*.html")
+        if p.name not in _dockerfile.replace("COPY tables.html ./", "", 1)] == ["tables.html"])
+
     # 两个页面互相可达：点得到才算"导航"，不然只是一句口号
     ok("首页链到 /geometry（导航真的连上了）", 'href="/geometry"' in client.get("/").text)
     ok("几何页链回首页", 'href="/"' in client.get("/geometry").text)

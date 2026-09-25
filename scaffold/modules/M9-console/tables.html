@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据表盘点 · 平台管理台 · M9</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --ink:#1c1f23; --muted:#6b7280;
+    --accent:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --bad:#b42318; --chip:#eef2f7;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",
+    "Source Han Sans SC","Microsoft YaHei",sans-serif}
+  header{padding:18px 24px 14px;background:var(--card);border-bottom:1px solid var(--line)}
+  h1{margin:0 0 4px;font-size:18px;font-weight:650}
+  .path{color:var(--muted);font-size:12.5px}
+  .path code{font-family:var(--mono);background:var(--chip);padding:1px 5px;border-radius:4px}
+  nav{display:flex;gap:4px;padding:0 24px;background:var(--card);
+    border-bottom:1px solid var(--line)}
+  nav a{display:block;padding:9px 13px;color:var(--muted);text-decoration:none;font-size:13.5px;
+    border-bottom:2px solid transparent}
+  nav a:hover{color:var(--ink)}
+  nav a.here{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+  main{padding:18px 24px 48px;max-width:1400px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:16px 18px;margin-bottom:16px}
+  h2{margin:0 0 12px;font-size:15px;font-weight:620;display:flex;align-items:center;gap:8px}
+  h2 .n{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    background:var(--chip);padding:2px 7px;border-radius:20px;font-weight:500}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:5px 9px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  th{color:var(--muted);font-weight:600;background:#fafbfc}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;
+    background:var(--chip);color:var(--muted)}
+  .badge.ok{background:#e6f4ea;color:var(--ok)}
+  .badge.warn{background:#fff4e0;color:var(--warn)}
+  .badge.bad{background:#fde8e6;color:var(--bad)}
+  .muted{color:var(--muted)}
+  .mono{font-family:var(--mono)}
+  .empty{padding:22px 8px;color:var(--muted);text-align:center}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:4px}
+  .stat{border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:#fafbfc}
+  .stat .k{color:var(--muted);font-size:12px}
+  .stat .v{font-family:var(--mono);font-size:22px;font-weight:600;line-height:1.35}
+  .stat .v.ok{color:var(--ok)}
+  .stat .v.warn{color:var(--warn)}
+  #err{display:none;background:#fde8e6;border:1px solid #f5c2bd;color:var(--bad);
+    border-radius:10px;padding:14px 18px;margin-bottom:16px}
+  #err code{font-family:var(--mono);background:#fff;padding:1px 5px;border-radius:4px}
+  footer{color:var(--muted);font-size:12.5px;padding:0 24px 40px;max-width:1400px}
+</style>
+</head>
+<body>
+<header>
+  <h1>数据表盘点</h1>
+  <div class="path">
+    数据来源：本页 → <code>/gw/v1/catalog/tables</code> → M6 → M3 rpdao → PostgreSQL。
+    <strong>本页不接触数据库</strong>——M9 容器里既没有 SQL，也没有 PG_DSN。
+  </div>
+</header>
+<nav>
+  <a href="/">首页</a>
+  <a href="/tables" class="here">数据表盘点</a>
+  <a href="/geometry">GE 道路几何</a>
+  <a href="/import">设计数据导入</a>
+  <a href="/docs">接口文档</a>
+</nav>
+<main>
+  <div id="err"></div>
+
+  <section>
+    <h2>口径 <span class="n">为什么不是「库里的每张表」</span></h2>
+    <p class="muted" style="margin:0;font-size:12.8px">
+      这个页面数的是 <strong>逻辑表</strong>，不是物理表。两处差别都不是细节：
+      <br>① <span class="mono">wim_axle_record</span> 是<strong>声明式分区表</strong>，
+      物理上是 1 个父表 ＋ 若干个月分区 ＋ 1 个兜底分区。分区是 PostgreSQL 的实现细节，
+      不是平台的对象类型——平台对外只有「WIM 过车记录」这一张，它按
+      <span class="mono">pass_time</span> 落进不同格子里。把分区逐张列出来，
+      屏幕上会多出几十行<strong>恒空且看不懂</strong>的名字。
+      <br>② <strong>「没有数据」不是「表坏了」</strong>，是「这条链路还没接」。
+      所以下面把<strong>有数据</strong>与<strong>空表</strong>分成两张表 ——
+      真正要修的是后者，混在一起就看不出该修什么。
+    </p>
+  </section>
+
+  <section>
+    <h2>汇总 <span class="n">GET /v1/catalog/tables</span></h2>
+    <div id="stats" class="stats"><div class="empty">正在盘点…</div></div>
+  </section>
+
+  <section>
+    <h2>有数据的表 <span class="n" id="nWith">—</span></h2>
+    <div id="withData"><div class="empty">正在盘点…</div></div>
+  </section>
+
+  <section>
+    <h2>空表 <span class="n" id="nEmpty">—</span></h2>
+    <p class="muted" style="margin:0 0 10px;font-size:12.8px">
+      这 些表结构都在（DDL 已建），但没有一行数据。
+      <strong>它们不是错误</strong>——是「解析器/接入链路还没做」。
+      按域归组看，就能看出缺口集中在哪一块。
+    </p>
+    <div id="emptyTbl"><div class="empty">正在盘点…</div></div>
+  </section>
+</main>
+<footer>
+  行数口径：<span class="mono">count(*)</span> 精确计数（非统计信息估算）。
+  分区数单列，<strong>不计入</strong>表数——它是同一张逻辑表的物理格子数。
+  取行内容请走 <a href="/geometry">GE 道路几何</a> 等页面，本页只数数、不看内容。
+</footer>
+
+<script>
+const GW = "";                      // 本页只打 M9 自己的转发口，不经外部地址
+const $ = (id) => document.getElementById(id);
+
+// 上游（M6/M3）吐出来的字符串要塞进 innerHTML，必须先转义。
+// 不转义就是一个注入口子：任何上游字段都能往这张表里塞标签。
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function showErr(msg, hint) {
+  $("err").style.display = "block";
+  $("err").innerHTML = "<strong>取数失败</strong>：" + esc(msg) +
+    (hint ? "<br><span class='muted'>" + esc(hint) + "</span>" : "");
+}
+
+function stat(k, v, cls) {
+  return '<div class="stat"><div class="k">' + esc(k) + "</div>" +
+    '<div class="v ' + (cls || "") + '">' + esc(v) + "</div></div>";
+}
+
+// 域代号 → 中文名，直接取自 M6 /v1/catalog 的域表；跨域支撑表没有域，显示为「跨域」。
+const DOMAIN_NAME = {};
+
+function domainCell(code) {
+  if (!code) return '<span class="badge">跨域</span>';
+  const nm = DOMAIN_NAME[code];
+  return '<span class="mono">' + esc(code) + "</span>" +
+    (nm ? ' <span class="muted">' + esc(nm) + "</span>" : "");
+}
+
+// 分区根表要**显式标出来**：它的行数分布在各月分区里，
+// 看到 "9 行" 而不知道它按时间分区，会误以为数据量只有这么点。
+function partitionCell(it) {
+  if (!it.is_partitioned) return '<span class="muted">—</span>';
+  return '<span class="badge warn">按月分区</span> <span class="mono muted">' +
+    esc(it.partition_key) + " × " + esc(it.partition_count) + " 格</span>";
+}
+
+function table(items, cols) {
+  const head = "<tr>" + cols.map((c) => "<th" + (c.num ? ' class="num"' : "") + ">" +
+    esc(c.title) + "</th>").join("") + "</tr>";
+  const body = items.map((it) => "<tr>" + cols.map((c) => {
+    const v = c.get(it);
+    return c.num ? '<td class="num">' + v + "</td>"
+                 : (c.raw ? "<td>" + v + "</td>" : "<td>" + esc(v) + "</td>");
+  }).join("") + "</tr>").join("");
+  return "<table><thead>" + head + "</thead><tbody>" + body + "</tbody></table>";
+}
+
+const WITH_COLS = [
+  { title: "表名", get: (it) => '<span class="mono">' + esc(it.table) + "</span>", raw: true },
+  { title: "对象域", get: (it) => domainCell(it.domain), raw: true },
+  { title: "行数", num: true, get: (it) => esc(it.row_count) },
+  { title: "分区", get: (it) => partitionCell(it), raw: true },
+];
+
+const EMPTY_COLS = [
+  { title: "表名", get: (it) => '<span class="mono">' + esc(it.table) + "</span>", raw: true },
+  { title: "对象域", get: (it) => domainCell(it.domain), raw: true },
+  { title: "分区", get: (it) => partitionCell(it), raw: true },
+];
+
+function render(d) {
+  const items = d.items || [];
+  const withData = items.filter((i) => i.has_data)
+    .sort((a, b) => b.row_count - a.row_count);
+  const empty = items.filter((i) => !i.has_data);
+
+  $("stats").innerHTML =
+    stat("逻辑表", d.logical_table_count) +
+    stat("有数据", d.with_data_count, "ok") +
+    stat("空表", d.empty_count, d.empty_count ? "warn" : "ok") +
+    stat("月分区格", d.physical_partition_count) +
+    stat("已登记模块", Object.keys(DOMAIN_NAME).length ? Object.keys(DOMAIN_NAME).length + " 域" : "—");
+
+  $("nWith").textContent = withData.length + " 张";
+  $("nEmpty").textContent = empty.length + " 张";
+  $("withData").innerHTML = withData.length
+    ? table(withData, WITH_COLS) : '<div class="empty">一张有数据的表都没有</div>';
+
+  // 空表按域分组：散着看只能看到一串名字，
+  // 按域归组才能看出「缺口集中在哪一块」（例如某个域整块都没接）。
+  if (!empty.length) {
+    $("emptyTbl").innerHTML = '<div class="empty">没有空表——所有已建表都有数据</div>';
+    return;
+  }
+  const groups = {};
+  for (const it of empty) {
+    const k = it.domain || "（跨域支撑表）";
+    (groups[k] = groups[k] || []).push(it);
+  }
+  $("emptyTbl").innerHTML = Object.keys(groups).sort().map((k) => {
+    const g = groups[k];
+    return '<h3 style="margin:14px 0 6px;font-size:13.5px;font-weight:620">' +
+      (DOMAIN_NAME[k] ? '<span class="mono">' + esc(k) + "</span> " + esc(DOMAIN_NAME[k])
+                      : esc(k)) +
+      ' <span class="muted" style="font-weight:400">· ' + g.length + " 张</span></h3>" +
+      table(g, EMPTY_COLS);
+  }).join("");
+}
+
+async function loadDomains() {
+  // 域代号→中文名从 /v1/catalog 取，**不在页面里再抄一份**：
+  // 抄一份就意味着 M3 改了域名，页面会一直显示旧名字而没人发现。
+  try {
+    const r = await fetch(GW + "/gw/v1/catalog");
+    if (!r.ok) return;
+    const d = await r.json();
+    for (const dom of (d.domains || [])) DOMAIN_NAME[dom.code] = dom.name;
+  } catch (e) { /* 拿不到就用代号显示，不阻断主表 */ }
+}
+
+async function load() {
+  try {
+    await loadDomains();
+    const r = await fetch(GW + "/gw/v1/catalog/tables");
+    if (!r.ok) throw new Error("/gw/v1/catalog/tables → HTTP " + r.status);
+    render(await r.json());
+  } catch (e) {
+    $("stats").innerHTML = '<div class="empty">未能取到盘点结果</div>';
+    $("withData").innerHTML = '<div class="empty">未能取到盘点结果</div>';
+    $("emptyTbl").innerHTML = '<div class="empty">未能取到盘点结果</div>';
+    showErr(e.message, "本页经 /gw 转发到 M6（统一数据出口），再经 M3 rpdao 取数。" +
+      "两者任一不可达都会在这里报出来——不静默、不假装 0 行。");
+  }
+}
+load();
+</script>
+</body>
+</html>

@@ -50,8 +50,9 @@ except ImportError:  # rpdao.pool 需要它；缺了就装上最小桩（本测�
     print("⚠ 未检测到 psycopg，已用桩替代（本测试不触库，不影响结论）\n")
 
 from rpdao import (  # noqa: E402
-    ALL_TABLES, CROSS_TABLES, DOMAINS, ContractViolation, Dao, NotFound,
-    UnknownDomain, UnknownTable, domain_of, selfcheck,
+    ALL_TABLES, CROSS_TABLES, DOMAINS, EXPECTED_PHYSICAL_TABLES, PARTITIONED_ROOTS,
+    ContractViolation, Dao, NotFound, UnknownDomain, UnknownTable, domain_of,
+    list_tables, selfcheck,
 )
 from rpdao.pool import quote_ident  # noqa: E402
 from rpdao import repo as repo_mod  # noqa: E402
@@ -412,6 +413,49 @@ def main() -> int:
     ok("cross_section 已挪进 SEGMENT_ANCHOR（不是被删掉）",
        repo_mod.GeRepository.SEGMENT_ANCHOR.get("cross_section")
        == ("cross_section_ground_point", "section_id"))
+
+    # ------------------------------------------------- 7) 全域盘点（表数口径）
+    # 这一组钉的是「库里的表到底有几张、哪几张有数据」这个口径。
+    # 它为什么值得单开一组：这个问题的**错误答案不会报错** ——
+    # 把物理表当成逻辑表数，会得到 100+ 张且其中几十张恒空，
+    # 读的人会以为平台是死的；把空表藏起来，又会让人以为已经全接完了。
+    # 两种都"跑得通"，所以只能用断言把口径钉死。
+    print("\n=== 7) 全域盘点：逻辑表 vs 物理表 ===")
+    ok("PARTITIONED_ROOTS 只登记分区根表，且带分区键",
+       PARTITIONED_ROOTS == {"wim_axle_record": "pass_time"},
+       str(PARTITIONED_ROOTS))
+    ok("分区根表在 ALL_TABLES 里（不会漏数）",
+       all(t in ALL_TABLES for t in PARTITIONED_ROOTS))
+    ok("list_tables() 与 ALL_TABLES 是同一份口径（不是各拼一遍）",
+       list_tables() == ALL_TABLES)
+    ok("list_tables() 张数 == EXPECTED_PHYSICAL_TABLES",
+       len(list_tables()) == EXPECTED_PHYSICAL_TABLES,
+       f"{len(list_tables())} vs {EXPECTED_PHYSICAL_TABLES}")
+    # ★ 分区**不在**逻辑表清单里 —— 这是整件事的要点。
+    #   哪天有人把分区也登记进 catalog，这条会红。
+    ok("逻辑表清单里没有任何月分区名（*_p2025xx / *_pdefault）",
+       not any(re.match(r".*_p\d{6}$", t) or t.endswith("_pdefault")
+               for t in ALL_TABLES))
+    # ---- 口径的机器可读版：M6 的 /v1/catalog/tables 就是照这几个字段报数的
+    _pool_src = (ROOT / "modules" / "M3-rpdao" / "rpdao" / "pool.py").read_text(
+        encoding="utf-8")
+    for _field in ("row_count", "is_partitioned", "partition_key", "partition_count"):
+        ok(f"table_census 报出 {_field}（口径字段齐全）", _field in _pool_src)
+    # ★ 反空转：table_census 必须**真的去查库**。一个永远返回 62 行常量的实现
+    #   能骗过上面每一条断言，这条是专门用来挡它的。
+    _census_body = _pool_src.split("def table_census")[1].split("def partition_counts")[0]
+    _parts_body = _pool_src.split("def partition_counts")[1].split("def pool_stats")[0]
+    ok("table_census 里确实有查库调用（不是返回写死的清单）",
+       "self.query(" in _census_body)
+    ok("partition_counts 里确实有查库调用（不是返回写死的常量）",
+       "self.query(" in _parts_body)
+    # 元测试：把 census 里的查库换成常量清单，上面那条必须红
+    _fake = _census_body.replace("self.query(\" UNION ALL \".join(parts)", "rows = []");
+    ok("元测试：把 census 换成写死清单后必须被认出来（非摆设）",
+       "self.query(" not in _fake)
+    # 元测试：把月分区混进逻辑表清单，上面那条必须红
+    ok("元测试：把月分区混进逻辑表清单时必须被认出来（非摆设）",
+       bool(re.match(r".*_p\d{6}$", "wim_axle_record_p202511")))
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0

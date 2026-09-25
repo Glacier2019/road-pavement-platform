@@ -66,6 +66,7 @@
 </header>
 <nav>
   <a href="/" class="here">首页</a>
+  <a href="/tables">数据表盘点</a>
   <a href="/geometry">GE 道路几何</a>
   <a href="/import">设计数据导入</a>
   <a href="/docs">接口文档</a>
@@ -76,6 +77,14 @@
   <section>
     <h2>入口 <span class="n">已做 / 未做，如实分开</span></h2>
     <div class="cards">
+      <div class="card">
+        <a href="/tables">数据表盘点</a>
+        <p>平台上有哪些表、哪些<strong>有数据</strong>、哪些是<strong>空表</strong>。
+           数的是 <span class="mono">62</span> 张<strong>逻辑表</strong>，
+           不是物理表——<span class="mono">wim_axle_record</span> 的几十个月分区
+           是 PostgreSQL 的实现细节，不是平台的对象类型，逐张列出来只会让人以为平台是空的。
+           空表<strong>不是错误</strong>，是链路还没接，所以与有数据的分开列。</p>
+      </div>
       <div class="card">
         <a href="/geometry">GE 道路几何</a>
         <p>按路段看桩号序列、交点链、线元链、纵断面，以及几何完整度等级 L0–L4。

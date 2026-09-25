@@ -12,10 +12,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py ./
-# 几何浏览页：自包含 HTML（内联 JS/CSS，无构建步骤），随镜像一起带
+# 各页面：自包含 HTML（内联 JS/CSS，无构建步骤），随镜像一起带。
+# ⚠ 新增页面**必须在这里加一行**，否则路由在、页面文件不在 ——
+#   表现是 GET 该页返回 500「页面文件缺失」，而其它页一切正常，
+#   很容易被当成路由写错了去查 app.py。实测踩过一次。
 COPY geometry.html ./
 COPY index.html ./
 COPY import.html ./
+COPY tables.html ./
 # 配置外置：config/ 随镜像带默认值，生产由 volume/环境变量覆盖（五件套第 3 件）
 COPY config/ ./config/
 

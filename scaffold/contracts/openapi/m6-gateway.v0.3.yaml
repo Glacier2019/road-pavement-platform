@@ -32,6 +32,25 @@ paths:
         "200":
           description: domains / cross_tables / object_types
 
+  /v1/catalog/tables:
+    get:
+      summary: 逐张逻辑表盘点：行数 / 分区根表 / 是否已有数据
+      description: >-
+        平台「到底有哪些表、哪些有数据」的唯一数据源。**数的是逻辑表，不是物理表**：
+        wim_axle_record 是声明式分区表，物理上是 1 个父表 ＋ 若干月分区 ＋ 1 个兜底分区；
+        分区是 PostgreSQL 的实现细节，不是平台对象类型，故只报父表一行，
+        分区数与分区键单列在 partition_count / partition_key 字段里。
+        判「有没有数据」用 row_count > 0。真源为 M3 的 catalog.ALL_TABLES 与
+        repo.PARTITIONED_ROOTS；行数由 M3 现查（UNION ALL 一次查完，非逐表往返）。
+      responses:
+        "200":
+          description: >-
+            logical_table_count / with_data_count / empty_count /
+            physical_partition_count / items[]（table, domain, row_count,
+            has_data, is_partitioned, partition_key, partition_count）
+        "503":
+          description: 存储不可用
+
   /v1/objects/{object_type}:
     get:
       summary: 按对象类型查档案对象

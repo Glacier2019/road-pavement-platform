@@ -63,3 +63,4 @@ scaffold/work/*
 !scaffold/work/README.md
 !scaffold/work/*/
 !scaffold/work/*/README.md
+.dsh/

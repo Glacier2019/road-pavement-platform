@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, TYPE_CHECKING
 
-from .catalog import DOMAINS, Domain
+from .catalog import ALL_TABLES, DOMAINS, Domain
 from .errors import ContractViolation, NotFound, UnknownTable
 from .pool import quote_ident
 
@@ -532,6 +532,33 @@ class GeRepository(DomainRepository):
 
 
 _BUILDERS = {"LO": LoRepository, "GE": GeRepository}
+
+
+# ---------------------------------------------------------------------- 全域盘点
+#: 物理表 → 分区键。**只有声明式分区表（分区根表）才有条目**，其余按普通表算。
+#:
+#: 为什么需要这条注释级的常量：``wim_axle_record`` 是**声明式分区表**，物理下落成
+#: 1 个父表 ＋ N 个月分区 ＋ 1 个 pdefault。若把物理表逐张列出来，界面上会冒出
+#: 几十张 ``wim_axle_record_p202511`` 这类**恒空**的表 —— 那是 PostgreSQL 的实现细节，
+#: 不是平台的对象类型。平台对外只有一个"WIM 过车记录"，它按 ``pass_time`` 落进
+#: 不同月份格子里。所以口径是：**逻辑表 = 父表**，分区不单独计数
+#: （父表的 count(*) 本来就含全部分区的行，重复列出来既冗余又误导）。
+#:
+#: 这里**刻意不写死分区数**：分区随数据增长增删，把 "39" 写进代码，第一次滚动
+#: 分区就过期。只记"它是分区根表"这个**稳定事实**，分区数在需要时从
+#: ``pg_inherits`` 现查（见 :meth:`Dao.partition_counts`）。
+PARTITIONED_ROOTS: dict[str, str] = {
+    "wim_axle_record": "pass_time",
+}
+
+
+def list_tables() -> tuple[str, ...]:
+    """平台对外可数的**逻辑表**全集：7 域已建表 ＋ 跨域支撑表，与 ``ALL_TABLES`` 同一份。
+
+    存在的意义是给"盘点有哪些表"一个**有名字的入口**，而不是让每处调用方自己去拼
+    ``DOMAINS + CROSS_TABLES`` —— 每多一处拼接，就多一次"忘了算跨域表"的机会。
+    """
+    return ALL_TABLES
 
 
 def build_repository(code: str, dao: "Dao") -> DomainRepository:

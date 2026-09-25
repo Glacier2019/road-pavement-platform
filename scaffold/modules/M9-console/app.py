@@ -69,6 +69,7 @@ INGEST_TIMEOUT_S = float(os.getenv("INGEST_TIMEOUT_S", "120"))
 #: 只转发这些前缀。**这不是通用代理**：只有 GET，且必须落在 M6 的 API 命名空间内 ——
 #: 目的是让页面与 M9 同源（不必给 M6 放开 CORS），而不是把 M9 变成任意转发器。
 GATEWAY_ALLOWED_PREFIXES = ("v1/",)
+TABLES_PAGE = pathlib.Path(__file__).with_name("tables.html")
 GEOMETRY_PAGE = pathlib.Path(__file__).with_name("geometry.html")
 IMPORT_PAGE = pathlib.Path(__file__).with_name("import.html")
 INDEX_PAGE = pathlib.Path(__file__).with_name("index.html")
@@ -241,6 +242,24 @@ def index_page() -> HTMLResponse:
     if not INDEX_PAGE.exists():
         raise HTTPException(500, f"页面文件缺失：{INDEX_PAGE.name}")
     return HTMLResponse(INDEX_PAGE.read_text(encoding="utf-8"))
+
+
+@app.get("/tables", response_class=HTMLResponse, include_in_schema=False)
+def tables_page() -> HTMLResponse:
+    """数据表盘点页（自包含 HTML：内联 JS + CSS，无构建步骤、无新依赖）。
+
+    回答那个很容易答错的问题：「库里的表是不是每张都该显示出来？」
+    · **不是**。``wim_axle_record`` 是分区表，物理上 1 父 + 39 子，逐张列出来
+      屏幕上会多出几十行恒空的、看不懂的名字。
+    · 该显示的是 **62 张逻辑表**，并**按有没有数据分开**：空表不是错误，
+      是链路还没接——但混在一起就分不清「本来就没有」和「应该有却没有」。
+
+    取数与 /geometry 同一条链：本页 → ``/gw`` → M6 → M3 rpdao。
+    M9 依旧没有任何 SQL、也没有 PG_DSN。
+    """
+    if not TABLES_PAGE.exists():
+        raise HTTPException(500, f"页面文件缺失：{TABLES_PAGE.name}")
+    return HTMLResponse(TABLES_PAGE.read_text(encoding="utf-8"))
 
 
 @app.get("/geometry", response_class=HTMLResponse, include_in_schema=False)

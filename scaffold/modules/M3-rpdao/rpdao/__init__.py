@@ -16,7 +16,15 @@
 """
 from __future__ import annotations
 
-from .catalog import ALL_TABLES, CROSS_TABLES, DOMAINS, Domain, domain_of, selfcheck
+from .catalog import (
+    ALL_TABLES,
+    CROSS_TABLES,
+    DOMAINS,
+    EXPECTED_PHYSICAL_TABLES,
+    Domain,
+    domain_of,
+    selfcheck,
+)
 from .errors import (
     ContractViolation,
     DaoError,
@@ -26,7 +34,13 @@ from .errors import (
     UnknownTable,
 )
 from .pool import Dao
-from .repo import DomainRepository, GeRepository, LoRepository
+from .repo import (
+    PARTITIONED_ROOTS,
+    DomainRepository,
+    GeRepository,
+    LoRepository,
+    list_tables,
+)
 
 __version__ = "0.2.0"
 
@@ -43,6 +57,8 @@ __all__ = [
     "Domain",
     "domain_of",
     "selfcheck",
+    "PARTITIONED_ROOTS",
+    "list_tables",
     "DaoError",
     "StorageUnavailable",
     "UnknownDomain",

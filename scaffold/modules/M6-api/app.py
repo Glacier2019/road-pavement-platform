@@ -35,6 +35,7 @@ from rpdao import (
     StorageUnavailable,
     UnknownDomain,
     UnknownTable,
+    domain_of,
 )
 
 dao = Dao(os.getenv("PG_DSN"), app_name="rp-api")
@@ -97,6 +98,63 @@ def catalog() -> dict[str, Any]:
         ],
         "cross_tables": list(CROSS_TABLES),
         "object_types": sorted(OBJECT_TYPES),
+    }
+
+
+@app.get("/v1/catalog/tables", tags=["运维"],
+         summary="逐张逻辑表盘点：行数 / 分区根表 / 是否已有数据")
+def catalog_tables() -> dict[str, Any]:
+    """**62 张逻辑表逐张数行数** —— 回答「平台上到底有哪些表、哪些有数据」。
+
+    这个接口存在的理由，是一个很容易答错的问题：「数据库里那么多表，
+    是不是每张都该在管理台上显示出来？」
+
+    答案是否，而且理由分两层，缺一层都会把控制台做坏：
+
+      ① **物理表 ≠ 逻辑表**。``wim_axle_record`` 是声明式分区表，物理上落成
+         1 个父表 ＋ 39 个月分区 ＋ 1 个兜底分区。若照物理表逐张列，界面会多出
+         40 行**恒空**且无法理解的名字（``wim_axle_record_p202511``）。
+         分区是 PostgreSQL 的实现细节，不是平台的对象类型 —— 平台对外只有
+         「WIM 过车记录」这一张，它按时间落进不同格子里。
+      ② **有数据的和没数据的必须分开看**。没有数据不是「表坏了」，
+         是「这条链路还没接」。把两者混在一张平表里，读的人分不清
+         「本来就没有」与「应该有却没有」—— 而后者才是要修的东西。
+
+    所以返回里同时给出：逐表行数、它属于哪个域、是否为分区根表（附分区数与
+    分区键）、以及汇总计数。**判「有没有数据」用行数 > 0，不用非空值占比** ——
+    后者会把「有 1 行但该行某列为空」误判成没数据，且口径随列而变，无法比较。
+
+    本接口只读、只数数，不返回任何行内容；取行内容请走 /v1/objects/...。
+    """
+    try:
+        rows = dao.table_census()
+    except DaoError as exc:
+        raise _http(exc) from exc
+
+    # 域归属直接问 M3 的目录，**不在这里再维护一份映射** ——
+    # 多一份映射就多一次「DDL 加了表、这里忘了加」的机会。
+    items = []
+    for r in rows:
+        table = r["table_name"]
+        items.append({
+            "table": table,
+            "domain": domain_of(table),          # 跨域支撑表为 null，是正常的
+            "row_count": int(r["row_count"]),
+            "has_data": int(r["row_count"]) > 0,
+            "is_partitioned": r["is_partitioned"],
+            "partition_key": r["partition_key"],
+            "partition_count": r["partition_count"],
+        })
+
+    with_data = [i for i in items if i["has_data"]]
+    partitioned = [i for i in items if i["is_partitioned"]]
+    return {
+        "logical_table_count": len(items),
+        "with_data_count": len(with_data),
+        "empty_count": len(items) - len(with_data),
+        # 分区数单列：它**不是**表数的一部分，是同一张逻辑表的物理格子数
+        "physical_partition_count": sum(i["partition_count"] for i in partitioned),
+        "items": items,
     }
 
 
