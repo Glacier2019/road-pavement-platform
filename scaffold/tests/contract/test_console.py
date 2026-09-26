@@ -211,8 +211,8 @@ def main() -> int:
        "/gw/v1/catalog/tables" in _tbl, "页面上没有 /gw/v1/catalog/tables")
     ok("表盘点页说明了「逻辑表 ≠ 物理表」（分区不单独列）",
        "分区" in _tbl and "实现细节" in _tbl)
-    ok("表盘点页把「空表不是错误、是链路没接」写清楚",
-       "链路还没接" in _tbl)
+    ok("表盘点页把「空表不是错误」写清楚",
+       "它们不是错误" in _tbl)
     ok("表盘点页按「有数据 / 空表」分两张表，而不是一张平表",
        '$("withData")' in _tbl and '$("emptyTbl")' in _tbl)
     # 域代号→中文名必须**从 /v1/catalog 取**。页面里再抄一份域表，
@@ -231,6 +231,57 @@ def main() -> int:
     ok("元测试：去掉 esc() 后必须被认出来（非摆设）",
        "function esc(" not in _tbl.replace("function esc(v) {", "", 1))
 
+
+    # ------------------------------------------- 3e) 空表页：缺口归因的呈现（契约④）
+    # ⚠ 这一组钉的是**呈现**，判定逻辑本身在 test_gap_attribution.py 里钉。
+    #   分开的理由：判定错了会给出错误建议；呈现错了会**把正确判定藏起来**。
+    #   后者更隐蔽 —— 数据全对，但用户看不到。
+    print("\n=== 3e) 空表页：缺口归因的呈现（契约④）===")
+    ok("页面另取一路 /gw/v1/catalog/gaps（与盘点分开）",
+       "/gw/v1/catalog/gaps" in _tbl, "页面没有取归因")
+    # ★ 取不到归因**不许拖垮整页**，但也不许装作没有这回事。
+    #   依赖链长度不同：盘点只到 M6→M3；归因还多一跳 M2。
+    ok("归因取不到时降级为「只列空表」，不拖垮整页",
+       "d.gaps_error" in _tbl and "d.gaps_items || empty" in _tbl)
+    ok("降级时说清楚「这不等于这些表没有空因」",
+       "这不是「这些表没有空因」" in _tbl)
+    # ★ 用接口给的次序，**不许页面自己再排一遍**。
+    #   再排一遍就会出现「页面次序」与「接口声称的次序」不一致，
+    #   复核者拿 priority_keys 复算时对不上 —— 排序就不可证伪了。
+    # ⚠ 判"页面有没有自己重排"，要查**代码**里有没有 sort —— 不能查
+    #   priority_keys 这个字样，因为注释里正解释着"为何不自己排"（实测误报过）。
+    _tbl_code = "\n".join(ln.split("//")[0] for ln in _tbl.splitlines())
+    ok("空表用接口给的次序（页面不自己重排）",
+       "d.gaps_items || empty" in _tbl_code
+       and ".sort(" not in _tbl_code.split("const ordered")[1].split(";")[0])
+    # ★ 措辞边界（spec 明令）：source_present 只表示"收到过"，
+    #   不表示"导入一定能成"。写"可以导入"就是给用户一个会落空的承诺。
+    ok("空因文案说的是「源已收到」，**不是**「可以导入」",
+       "源已收到" in _tbl and "可以导入" not in _tbl,
+       "出现了「可以导入」这种超范围承诺")
+    # ★ unknown 必须显眼：它是"系统判不出来"，不是"没有空因"。
+    ok("unknown 在页面里单列且标红（不并入其他类）",
+       "判不出来" in _tbl and "bad" in _tbl and "gaps_unknown" in _tbl)
+    ok("页面对 unknown 有明确说明（优先人看）",
+       "系统自己承认没判出来" in _tbl)
+    ok("空因标签覆盖全部七个取值（不多不少）",
+       all(k in _tbl for k in ("has_data", "source_ready_not_imported",
+                                "source_needs_conversion", "source_absent",
+                                "module_not_built", "upstream_pending", "unknown")))
+    ok("空表行给出归属模块与建议动作（能直接派活）",
+       "function ownerCell" in _tbl and "it.action" in _tbl)
+    # 元测试：把 unknown 从标签表里删掉，"七值齐全"那条必须红。
+    #  ⚠ 断言要对着**同一条判据**（七值齐全），不是对着"判不出来"这个字样 ——
+    #    后者在页头说明里也出现，删标签不会让它消失，元测试就永远是绿的。
+    import re as _re
+    _no_unk = _re.sub(r"\n\s*unknown:\s*\{[^}]*\},", "", _tbl, count=1)
+    ok("元测试：删掉 unknown 标签后「七值齐全」会被认出来（非摆设）",
+       "unknown:" not in _no_unk and _no_unk != _tbl)
+    # 元测试：把接口次序换成自己按域排，上面那条必须红
+    _resort = _tbl.replace("const ordered = (d.gaps_items || empty);",
+                           "const ordered = empty.slice().sort();", 1)
+    ok("元测试：改成页面自己重排后必须被认出来（非摆设）",
+       "d.gaps_items || empty" not in _resort)
     # ------------------------------------------------- 3d) 不直连库与「只经 rpdao」的口径
     # ⚠ 这一组**离线**跑，只验"结构上做不到"，不连数据库。
     #   需要真实行数的断言在脚本外面（见 tests/contract/test_dao_contract.py

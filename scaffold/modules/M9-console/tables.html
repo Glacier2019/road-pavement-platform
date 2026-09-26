@@ -39,6 +39,15 @@
   .badge.ok{background:#e6f4ea;color:var(--ok)}
   .badge.warn{background:#fff4e0;color:var(--warn)}
   .badge.bad{background:#fde8e6;color:var(--bad)}
+  /* 空因标签。四色对应四种"能不能马上做"：
+       go=源齐全可立刻动 / warn=要写代码或要文件 / muted=得等别人 / bad=判不出来。
+     分色是为了让人扫一眼就知道先挑哪几行，而不是逐行读文字。 */
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;
+    white-space:nowrap;background:var(--chip);color:var(--muted)}
+  .pill.ok{background:#e6f4ea;color:var(--ok)}
+  .pill.go{background:#e3efff;color:#1655b8}
+  .pill.warn{background:#fff4e0;color:var(--warn)}
+  .pill.bad{background:#fde8e6;color:var(--bad);font-weight:600}
   .muted{color:var(--muted)}
   .mono{font-family:var(--mono)}
   .empty{padding:22px 8px;color:var(--muted);text-align:center}
@@ -100,10 +109,12 @@
   <section>
     <h2>空表 <span class="n" id="nEmpty">—</span></h2>
     <p class="muted" style="margin:0 0 10px;font-size:12.8px">
-      这 些表结构都在（DDL 已建），但没有一行数据。
-      <strong>它们不是错误</strong>——是「解析器/接入链路还没做」。
-      按域归组看，就能看出缺口集中在哪一块。
+      这些表结构都在（DDL 已建），但没有一行数据。<strong>它们不是错误</strong>。
+      下表按<strong>建议次序</strong>排：先看「能不能马上做」，
+      再比「源齐不齐」，最后按域。<strong>排最后、标红的「判不出来」要优先人看</strong>——
+      那是系统自己承认没判出来，不是「没有空因」。
     </p>
+    <div id="gapStats" class="stats" style="margin-bottom:14px"></div>
     <div id="emptyTbl"><div class="empty">正在盘点…</div></div>
   </section>
 </main>
@@ -175,7 +186,37 @@ const EMPTY_COLS = [
   { title: "表名", get: (it) => '<span class="mono">' + esc(it.table) + "</span>", raw: true },
   { title: "对象域", get: (it) => domainCell(it.domain), raw: true },
   { title: "分区", get: (it) => partitionCell(it), raw: true },
+  { title: "空因", get: (it) => reasonCell(it), raw: true },
+  { title: "归属模块", get: (it) => ownerCell(it), raw: true },
+  { title: "建议动作", get: (it) => esc(it.action || "—") },
 ];
+
+// 空因 → 中文名 + 底色。
+//  ⚠ 底色不是装饰：它让「源齐全、只差一次导入」（可立刻做）与
+//    「要写代码/要等别人」（短期做不了）**一眼分开** —— 这正是本页的目的。
+const REASON = {
+  has_data:                  { t: "有数据",        c: "ok" },
+  source_ready_not_imported: { t: "源已收到·未导入", c: "go" },
+  source_needs_conversion:   { t: "源已收到·待转换", c: "go" },
+  source_absent:             { t: "源缺失",        c: "warn" },
+  module_not_built:          { t: "适配器未实现",  c: "warn" },
+  upstream_pending:          { t: "等上游产出",    c: "muted" },
+  unknown:                   { t: "判不出来",      c: "bad" },
+};
+
+function reasonCell(it) {
+  const r = REASON[it.empty_reason] || { t: it.empty_reason || "—", c: "bad" };
+  const tip = (it.suffixes && it.suffixes.length)
+    ? "来源段：" + it.segments.join("、") + "　后缀：" + it.suffixes.join("、")
+    : (it.segments && it.segments.length ? "来源段：" + it.segments.join("、") : "不对应任何导入段");
+  return '<span class="pill ' + r.c + '" title="' + esc(tip) + '">' + esc(r.t) + "</span>";
+}
+
+function ownerCell(it) {
+  if (!it.owner) return '<span class="muted">未登记</span>';
+  const p = it.phase ? ' <span class="muted">· ' + esc(it.phase) + "</span>" : "";
+  return '<span class="mono">' + esc(it.owner) + "</span>" + p;
+}
 
 function render(d) {
   const items = d.items || [];
@@ -190,31 +231,43 @@ function render(d) {
     stat("月分区格", d.physical_partition_count) +
     stat("已登记模块", Object.keys(DOMAIN_NAME).length ? Object.keys(DOMAIN_NAME).length + " 域" : "—");
 
+  // 「能不能马上做」的分解：把空表按空因分开数。
+  //  ★ unknown **必须显眼**（INV-4）：它是"系统判不出来"，不是"没有空因"。
+  //    默认折叠或并进别的类里，就会让一个真实的诊断缺口看起来像不存在。
+  const rc = d.gaps_reason_counts || {};
+  const soon = (rc.source_ready_not_imported || 0) + (rc.source_needs_conversion || 0);
+  const unk = d.gaps_unknown || 0;
+  $("gapStats").innerHTML =
+    stat("可立刻动手", soon, soon ? "ok" : "") +
+    stat("要写适配器", rc.module_not_built || 0) +
+    stat("等上游产出", rc.upstream_pending || 0) +
+    stat("源缺失", rc.source_absent || 0) +
+    stat("判不出来", unk, unk ? "bad" : "ok") +
+    (d.gaps_error
+      ? '<div class="stat" style="background:#fde8e6;border-color:#f5c6c2">' +
+        '<div class="k">归因不可用</div><div class="v bad" style="font-size:13px">' +
+        esc(d.gaps_error) + "</div>" +
+        '<div class="k" style="margin-top:4px">表的盘点仍然有效；' +
+        "下面只列空表、不显示空因。<b>这不是「这些表没有空因」。</b></div></div>"
+      : "");
+
   $("nWith").textContent = withData.length + " 张";
   $("nEmpty").textContent = empty.length + " 张";
   $("withData").innerHTML = withData.length
     ? table(withData, WITH_COLS) : '<div class="empty">一张有数据的表都没有</div>';
 
-  // 空表按域分组：散着看只能看到一串名字，
-  // 按域归组才能看出「缺口集中在哪一块」（例如某个域整块都没接）。
+  // 空表**按建议次序排**（就是接口返回的顺序），不再按域分组 ——
+  //  分组的读法是「缺口集中在哪一块」，排序的读法是「先动哪条」。
+  //  本页要回答的是后者。次序由三键决定，接口已排好且可复核（priority_keys）。
   if (!empty.length) {
     $("emptyTbl").innerHTML = '<div class="empty">没有空表——所有已建表都有数据</div>';
     return;
   }
-  const groups = {};
-  for (const it of empty) {
-    const k = it.domain || "（跨域支撑表）";
-    (groups[k] = groups[k] || []).push(it);
-  }
-  $("emptyTbl").innerHTML = Object.keys(groups).sort().map((k) => {
-    const g = groups[k];
-    return '<h3 style="margin:14px 0 6px;font-size:13.5px;font-weight:620">' +
-      (DOMAIN_NAME[k] ? '<span class="mono">' + esc(k) + "</span> " + esc(DOMAIN_NAME[k])
-                      : esc(k)) +
-      ' <span class="muted" style="font-weight:400">· ' + g.length + " 张</span></h3>" +
-      table(g, EMPTY_COLS);
-  }).join("");
-}
+  // ⚠ 用 gaps 的结果，**不是**自己按 domain 再排一次。
+  //  再排一次就会出现"页面看到的次序"与"接口声称的次序"不一致，
+  //  而复核者拿 priority_keys 复算时对不上 —— 排序就不可证伪了。
+  const ordered = (d.gaps_items || empty);
+  $("emptyTbl").innerHTML = table(ordered, EMPTY_COLS);
 
 async function loadDomains() {
   // 域代号→中文名从 /v1/catalog 取，**不在页面里再抄一份**：
@@ -232,7 +285,26 @@ async function load() {
     await loadDomains();
     const r = await fetch(GW + "/gw/v1/catalog/tables");
     if (!r.ok) throw new Error("/gw/v1/catalog/tables → HTTP " + r.status);
-    render(await r.json());
+    const d = await r.json();
+
+    // 缺口归因单独取一路。**取不到不该让整页垮掉** ——
+    //  表数与行数是主信息，归因是补充；归因的依赖链更长（M6 → M2 → design_file），
+    //  它挂了不代表表的盘点也挂了。故这里 catch 住，降级为"只有空表清单、没有空因"，
+    //  但**必须把降级说出来**，不能让读者以为"这些表就是没有空因"。
+    try {
+      const g = await fetch(GW + "/gw/v1/catalog/gaps?empty_only=true");
+      if (g.ok) {
+        const gj = await g.json();
+        d.gaps_items = gj.items;
+        d.gaps_reason_counts = gj.reason_counts;
+        d.gaps_unknown = gj.unknown_count;
+      } else {
+        d.gaps_error = "HTTP " + g.status;
+      }
+    } catch (e2) {
+      d.gaps_error = e2.message;
+    }
+    render(d);
   } catch (e) {
     $("stats").innerHTML = '<div class="empty">未能取到盘点结果</div>';
     $("withData").innerHTML = '<div class="empty">未能取到盘点结果</div>';
