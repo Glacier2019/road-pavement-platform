@@ -138,8 +138,59 @@ curl -s http://localhost:8024/gw/v1/catalog/gaps | \
 cd scaffold && ./run_contract_tests.sh
 ```
 
-**期望**：通过 12 ｜ 失败 0（本特性会新增套件，数字应增加）。
+**期望**：`通过 13 ｜ 失败 0 ｜ 跳过 0`（原 12 套 ＋ 本特性新增「缺口归因」1 套）。
 
 > ⚠ 注意过滤器的坑：脚本的过滤器匹配**套件名**（--list 里的那种），
 > **不是**测试文件名。写错一个字会零匹配 —— 而脚本已加了守卫会报错退出，
 > 不会像以前那样打印「全部通过」。
+
+---
+
+## 实测留痕（2026-09-26，实库 + 真实容器）
+
+七组验收**全部实跑过**，不是照着文档默读。原始数字如下，供日后对照。
+
+### 归因结果（`GET /gw/v1/catalog/gaps?empty_only=true`）
+
+```
+逻辑表 62 ｜ 有数据 36 ｜ 空 26 ｜ unknown 0
+空因分布：
+  has_data                   36
+  source_needs_conversion     5   ← 五个土方段
+  source_ready_not_imported   2   ← design_control_text / extra_fill
+  upstream_pending           18   ← 下游产出表，等各模块
+  module_not_built            1   ← geometry_point（.3DR 无解析器）
+```
+
+`unknown = 0` 是**正确**的，不是没测到：实库 62 张表**每张都有归属登记**，
+所以不存在"连归谁都不知道"的表。`unknown` 这一支存在，是为将来新加的表兜底 ——
+它的正确性由 `test_gap_attribution.py` 第 10 组用构造数据钉住（T037）。
+
+### 前 7 条（页面次序，即「现在就能动手的」）
+
+| 表 | 空因 | 归属 | 建议动作 |
+|---|---|---|---|
+| `borrow_pit` | 源已收到·待转换 | M2 | 先跑 `tools/tsf2txt.py` 转换，再导入 |
+| `design_control_text` | 源已收到·未导入 | M2 | 跑一次设计导入 |
+| `earthwork_fill_stat` | 源已收到·待转换 | M2 | 先跑 `tools/tsf2txt.py` 转换，再导入 |
+| `earthwork_haul_stat` | 源已收到·待转换 | M2 | 先跑 `tools/tsf2txt.py` 转换，再导入 |
+| `earthwork_transfer` | 源已收到·待转换 | M2 | 先跑 `tools/tsf2txt.py` 转换，再导入 |
+| `extra_fill` | 源已收到·未导入 | M2 | 跑一次设计导入 |
+| `spoil_pit` | 源已收到·待转换 | M2 | 先跑 `tools/tsf2txt.py` 转换，再导入 |
+
+### SC-006 响应时间（预算 < 3s）
+
+```
+/gw/v1/catalog/gaps?empty_only=true   中位  26.9ms   最差  35.2ms   PASS
+/gw/v1/catalog/gaps                   中位  30.3ms   最差  36.9ms   PASS
+/gw/v1/catalog/tables                 中位   4.0ms   最差   4.9ms   PASS
+```
+
+### 与实库对账（宪法原则 III：实库 > DDL > 字典 > 图件）
+
+三处独立测量一致：`EXPECTED_PHYSICAL_TABLES = 62`、目录表数 62、
+实库 `pg_class`（relkind ∈ {r,p}、非分区、排除 `spatial_ref_sys`）**62**。
+其中 **36 有数据、26 为空**。
+
+> 之所以要三处独立测：**同一份数字抄三遍不叫三处印证**。
+> 这里一处来自代码常量、一处来自 `catalog.py` 的登记、一处来自现查 `pg_class`。

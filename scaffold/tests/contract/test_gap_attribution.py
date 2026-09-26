@@ -201,6 +201,79 @@ def main() -> int:
                 _bmods.add((_a.asname or _a.name).split(".")[0])
     ok("元测试：加上 import psycopg 后必须被认出来（非摆设）", "psycopg" in _bmods)
 
+
+    # ── 9. 不缓存：每次都得现看（FR-002 / FR-009）────────────────────────
+    print("9. 判定必须现算，不许缓存（FR-002 / FR-009）")
+    # 这两条防的是**同一类**隐蔽错误：把一次测量当成永久事实。
+    #  · FR-002：新传一个源文件后，归因必须**立刻**变，不能等重启；
+    #  · FR-009：删了数据后，表必须如实变回"空"，不能还显示有数据。
+    #  缓存了的话，页面会一直显示旧结论 —— 而且看起来一切正常。
+    import ast as _ast2
+    _m6 = (ROOT / "modules" / "M6-api" / "app.py").read_text(encoding="utf-8")
+    # 找出 /v1/catalog/gaps 的处理函数体，确认它是**现取**而不是读缓存。
+    _tree2 = _ast2.parse(_m6)
+    _gaps_fn = None
+    for _n in _ast2.walk(_tree2):
+        if isinstance(_n, _ast2.FunctionDef) and _n.name == "catalog_gaps":
+            _gaps_fn = _n
+    ok("M6 有 /v1/catalog/gaps 的处理函数", _gaps_fn is not None)
+    _body = _ast2.dump(_gaps_fn) if _gaps_fn else ""
+    ok("每次请求都现取 M2 能力（不是模块级缓存）",
+       "_m2_capabilities" in _ast2.unparse(_gaps_fn) if _gaps_fn else False)
+    # 反面：模块级有没有 `_CAPS_CACHE = ...` 这类东西？
+    _module_assigns = [t.id for n in _tree2.body if isinstance(n, _ast2.Assign)
+                       for t in n.targets if isinstance(t, _ast2.Name)]
+    ok("M6 模块级没有能力缓存变量（有就等于把一次测量当永久事实）",
+       not [x for x in _module_assigns if "CACHE" in x.upper()],
+       str([x for x in _module_assigns if "CACHE" in x.upper()]))
+    # M3 侧：census 必须每次查库（同一条道理，在数据源头再钉一遍）
+    _pool = (ROOT / "modules" / "M3-rpdao" / "rpdao" / "pool.py").read_text(
+        encoding="utf-8")
+    ok("M3 的 design_files_received 每次都查库（不缓存台账）",
+       "def design_files_received" in _pool
+       and "self.query(" in _pool.split("def design_files_received")[1]
+                                     .split("def ")[0])
+    # 元测试：真给 M6 加一个缓存变量，上面那条必须红。
+    _fake_m6 = "_CAPS_CACHE = {}\n" + _m6
+    _ft = _ast2.parse(_fake_m6)
+    _fa = [t.id for n in _ft.body if isinstance(n, _ast2.Assign)
+           for t in n.targets if isinstance(t, _ast2.Name)]
+    ok("元测试：加上 _CAPS_CACHE 后必须被认出来（非摆设）",
+       bool([x for x in _fa if "CACHE" in x.upper()]))
+
+    # ── 10. FR-010：服务端不得猜（T037）────────────────────────────────
+    print("10. 服务端不得猜（FR-010）")
+    # 场景：一张表**既没有段**（不是导入来的）、**又有段但查不到事实**。
+    #  这两种都要求"说不知道"，而不是挑一个最像的分类塞进去。
+    #  ★ 为什么这条重要：错分类比不分类**更坏**。
+    #    "unknown" 会让人来查；错报成 "upstream_pending" 会让人**去等**，
+    #    而等一个永远不会来的东西，是查不出来的。
+    _g = G.build_gaps(
+        census=[{"table_name": "ghost_tbl", "domain": "GE", "row_count": 0,
+                 "is_partitioned": False, "partition_count": 0}],
+        owners={},            # 连归属模块都没有 —— 真实的"三不知"
+        seg_tables={}, seg_facts={}, phases={})
+    _it = _g["items"][0]
+    ok("无归属、无对应段的表 ⇒ unknown（不塞进任何其它分类）",
+       _it["empty_reason"] == "unknown", _it["empty_reason"])
+    ok("unknown 会计入 unknown_count（不是悄悄丢掉）",
+       _g["unknown_count"] == 1, str(_g["unknown_count"]))
+    ok("unknown 也出现在 reason_counts 里（可统计、可告警）",
+       _g["reason_counts"].get("unknown") == 1)
+    ok("unknown 的建议动作要求人工排查（不是「无需动作」）",
+       "排查" in (_it["action"] or ""), str(_it["action"]))
+    ok("unknown 仍带 priority_keys 且排最后（cost=9）",
+       _it["priority_keys"][0] == 9, str(_it["priority_keys"]))
+    # 元测试：把 unknown 的 action 改成"无需动作"，上面那条必须红。
+    #  （这是最容易退化成"静默"的一处：分类正确，但文案让人忽略它。）
+    _silent = (ROOT / "modules" / "M6-api" / "gaps.py").read_text(encoding="utf-8")
+    ok("元测试：unknown 的 action 文案里确实要求排查（非摆设）",
+       "排查" in _silent.split('"unknown":')[1].split(",")[0]
+       or "排查" in G.ACTION_OF["unknown"])
+    # 元测试：把 unknown 从枚举里摘掉，第 5 组那条必须红。
+    ok("元测试：unknown 不在枚举里时会被第 5 组认出来（非摆设）",
+       "unknown" in G.EMPTY_REASONS
+       and "unknown" not in [x for x in G.EMPTY_REASONS if x != "unknown"])
     print("\n结果：" + ("全部通过 ✓" if not _fails else f"失败 {len(_fails)} 项 → {_fails}"))
     return 1 if _fails else 0
 

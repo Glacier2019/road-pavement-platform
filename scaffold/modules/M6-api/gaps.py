@@ -62,7 +62,8 @@ _ACTION_COST: dict[str, int] = {
 
 
 def _classify(*, row_count: int, segments: list[str],
-              seg_facts: dict[str, dict[str, Any]]) -> str:
+              seg_facts: dict[str, dict[str, Any]],
+              known: bool = True) -> str:
     """判空因。**短路顺序是被钉住的**，改动前先读下面这段。
 
     ⚠⚠ 顺序必须是 [has_data] → [有对应段?] → [source] → [implemented]
@@ -83,8 +84,16 @@ def _classify(*, row_count: int, segments: list[str],
     # ② 无对应段 ⇒ 它不是导入来的，是别的模块算出来的（下游产出表）。
     #    必须在判"源缺失"**之前**分流：把 alarm_record 报成"源缺失"
     #    会让人去外面找一份根本不存在的外部数据。
+    #
+    #  ⚠ 但"无对应段"有**两种**含义，不能用一句话答完（T037 实测撞到）：
+    #      · 我知道这张表归谁、也知道它是算出来的 ⇒ upstream_pending
+    #        （这是正常的等待，动作明确：等上游做完）
+    #      · 我连它归谁都不知道           ⇒ unknown
+    #        （这是**认知缺口**，不是等待）
+    #    两者报成一样，第二类就会被伪装成"在等上游" → 等一个永远不会来的东西，
+    #    而且**永远查不出来**（因为看起来一切正常）。用 known（有归属登记）区分。
     if not segments:
-        return "upstream_pending"
+        return "upstream_pending" if known else "unknown"
 
     facts = [seg_facts[s] for s in segments if s in seg_facts]
     if not facts:
@@ -142,7 +151,10 @@ def build_gaps(
         t = row["table_name"]
         segs = sorted(table_to_segs.get(t, []))
         rc = int(row["row_count"])
-        reason = _classify(row_count=rc, segments=segs, seg_facts=seg_facts)
+        # known = 这张表在 TABLE_OWNER 里有归属登记。
+        #  用它区分"知道是下游产出表"与"连归谁都不知道"（见 _classify ② ）。
+        reason = _classify(row_count=rc, segments=segs, seg_facts=seg_facts,
+                           known=bool(owners.get(t)))
         facts = [seg_facts[s] for s in segs if s in seg_facts]
         suffs = sorted({f["suffix"] for f in facts if f.get("suffix")})
         owner = owners.get(t)
