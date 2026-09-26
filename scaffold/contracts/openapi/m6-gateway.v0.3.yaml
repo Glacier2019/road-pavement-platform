@@ -51,6 +51,59 @@ paths:
         "503":
           description: 存储不可用
 
+  /v1/catalog/gaps:
+    get:
+      summary: 逐张逻辑表的缺口归因：为什么空 / 归谁 / 先动哪条
+      description: >-
+        从「哪些表是空的」推进到「每条空链该谁接」。归因需要三类事实，
+        分属两个模块，**谁也不能替谁**：
+        · 表里有几行 / 表的归属模块 → M3 rpdao（平台内唯一接触存储处）；
+        · 段实现了没 / 源收到没 → M2（解析器与导入台账都在它那边）。
+        故本接口在 M6 做**纯拼装**：M3 出表事实、M2 出段事实，按「段 ↔ 表」合并。
+        让 M3 去读磁盘、或让 M2 去查库都能更快写完，但都会破坏「平台内唯一接触
+        存储处」这条硬线 —— 而那条线正是四组学生能并行开发的前提。
+        
+        ★ 最要紧也最容易判错的一处：**「源在不在」不是看磁盘，看 design_file 台账**。
+        M2 的导入入口是上传，文件落在临时目录、请求结束即销毁，服务端没有持久的
+        设计目录 —— 扫磁盘会**恒得 false**，把「源已收到」错判成「源缺失」，
+        而且不报错。故 source_state 取自 M2 的 design_file（经 /v1/design/capabilities）。
+        
+        ★ 措辞边界：source_present 只表示**收到过该文件**，
+        **不**表示「导入一定能成功」。对外文案只能说「源已收到/已具备」，
+        **不得**说「可以导入」—— 后者是给用户一个会落空的承诺。
+        
+        本接口只读，不返回任何行内容，也不提供写操作。
+      parameters:
+        - name: empty_only
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: true = 只返回空表（有数据的表仍计入汇总计数，只是不在 items 里）
+      responses:
+        "200":
+          description: >-
+            logical_table_count / with_data_count / empty_count / unknown_count /
+            reason_counts / items[]（table, domain, row_count, has_data,
+            is_partitioned, partition_count, owner, phase, empty_reason,
+            segments, suffixes, source_present, action, priority_keys）
+            
+            empty_reason 为封闭枚举：has_data / source_ready_not_imported /
+            source_needs_conversion / source_absent / module_not_built /
+            upstream_pending / unknown。扩枚举须走契约变更。
+            
+            priority_keys 是三键数组 [改动模块数, 源是否具备, 域序]，
+            **必须**暴露：复核者要靠它独立复算排序（否则排序不可证伪）。
+            同输入必得同一次序 —— 三键之后以表名字典序决胜。
+            
+            source_present 是三态：true / false / null（null = 该表不对应任何段，
+            即下游产出表，与「源缺失」是两件事，不得压缩成 false）。
+        "503":
+          description: >-
+            上游不可用，**并点名是哪一个**：M3 挂了是「所有数据都拿不到」，
+            M2 挂了是「只有归因算不全」，两者排查方向完全不同。
+
   /v1/objects/{object_type}:
     get:
       summary: 按对象类型查档案对象

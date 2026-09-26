@@ -20,6 +20,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY modules/M3-rpdao/rpdao /app/rpdao
 
 COPY modules/M6-api/app.py ./
+# 空表缺口归因（纯拼装：无 SQL、不 import M2）——独立成文件便于单测
+COPY modules/M6-api/gaps.py ./
+
+# 模块登记表（M9 的唯一真源）：归因里要报每张空表的归属模块与所处阶段。
+# ⚠ 必须 COPY 进来：容器里读不到宿主机的 modules.yaml 时 _module_phases() 会静默
+#   返回 {}，phase 就永远是 null —— 又一个"本地跑得通、容器里静默降级"的坑。
+COPY modules/M9-console/config/modules.yaml /app/modules.yaml
+
+# PyYAML：读上面那张登记表用，requirements.txt 里没有。
+RUN pip install --no-cache-dir "PyYAML>=6,<7"
 
 EXPOSE 8000
 

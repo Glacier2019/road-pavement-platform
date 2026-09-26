@@ -202,6 +202,120 @@ SEGMENT_FILES: dict[str, tuple[str, str]] = {
     "earthwork_fill_stat": (".tsftxt", "土石方调配文件（.tsf 转换文本）"),
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 段 → 目标物理表（本模块**唯一**的段↔表映射入口）
+#
+# ## 为什么默认是「段名 == 表名」
+#
+# 这不是这里定的规矩，是**上游契约已经定死的**。见
+# contracts/design-import/road_geometry_ir.v0.3.schema.json 对 segment 的说明：
+#   > 几何段名 —— 一律用 GE 域**物理表名**，使「段 ↔ 表」映射唯一且可自动核对
+#   > （不另造一套别名）
+#
+# ★★ 于是这里**不许**再手抄一张完整的「段 → 表」对照表。理由是本仓库的旧账：
+#   _IMPLEMENTED_SUFFIX 的注释里记着它曾漏掉 .ctr/.tf/.lj 三个**已经实现**的
+#   后缀，把已实现的段标成 pending ——「表是手抄的，就会漂」。
+#   再抄一张全量对照表 = 对同一件事的第四份陈述（另三份：IR schema 的约定、
+#   SEGMENT_FILES 的后缀→段、design_import 里逐段的 tx.insert），必然漂。
+#
+# ## 例外必须逐个登记，且由测试钉住完整性
+#
+# 默认规则覆盖不到的段，必须在 SEGMENT_TABLE_GROUPS 里显式列出：
+#   · 漏登记 ⇒ 那段对应的表被判成"没有对应表"（upstream_pending）
+#     ⇒ **段还在、表也还在，但两者的联系静默消失**。
+#   · 登记了一个不存在的表 ⇒ 归因会指向一张查不到的表。
+# 两个方向各有一条测试钉住（tests/contract/test_gap_attribution.py）。
+#
+# ⚠ 两个例外**性质不同**，注释里写清楚，免得后来人以为漏了：
+#   · cross_section 是**改名**：段名 ≠ 表名，但仍是一段↔一表。
+#   · design_control 是**段组**：一段↔**九表**（关键字驱动的 .CTR，
+#     9 张表在源文件里同属一个 .CTR，拆开会让"一文件→一段"的对账断掉）。
+SEGMENT_TABLE_GROUPS: dict[str, tuple[str, ...]] = {
+    # 段名 ≠ 表名，一段仍只对一表。表名照内容走：内容实测是**外业测量**的地面线
+    # （高差 −31 ~ +23 m），与 profile_ground_point（← .DMX 纵断面地面线）一纵一横同构。
+    "cross_section": ("cross_section_ground_point",),
+    # 一段 ↔ 九表。9 张表全部真实存在于实库，也全在 M3 的 ALL_TABLES 里（已实测）。
+    "design_control": ("slope_segment", "ditch_segment", "standard_cross_section",
+                       "roadbed_trench", "structure_control", "earthwork_composition",
+                       "land_use_width", "extra_fill", "design_control_text"),
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 需要**先转换**才能导入的后缀：原始后缀 → (转换后后缀, 转换工具, 说明)
+#
+# 为什么要有这张表
+# ---------------------------------------------------------------------------
+# 有些源文件我们**已经收到了**，但适配器吃的不是它的原始形态：
+#   earthwork_* 五段的适配器读 `.tsftxt`，而工程给的是 `.tsf`（Access 二进制）。
+# 缺了这张表，归因只能报两种情况，**两种都会误导**：
+#   · 报 source_absent（"源缺失"）⇒ 用户去找一份**已经在手上**的文件；
+#   · 报 source_ready_not_imported（"跑一次导入就行"）⇒ 用户直接导，
+#     而适配器找不到 .tsftxt，**白跑一趟还不知道为什么**。
+# 真话是第三种：**源已收到，但要先跑一次转换**。
+#
+# ★ 后缀规则不是另造的：tsf2txt.py 实证用 `src.suffix + "txt"`，
+#   `.tsf` → `.tsftxt` 正由此而来。这里把那条隐含规则**显式登记**，
+#   免得它只活在工具的默认参数里、别处无从得知。
+#
+# ⚠ 转换工具是**一次性工具，不进 M2 运行时**（见 tsf2txt.py 抬头）——
+#   所以这里指的是"运维要跑的命令"，不是 M2 自己能做的事。
+CONVERSION_REQUIRED: dict[str, tuple[str, str, str]] = {
+    ".tsf": (".tsftxt", "tools/tsf2txt.py",
+             "纬地 HintTF 土石方调配文件（Access/Jet 4 二进制）→ 摊成自描述文本"),
+}
+
+
+def converted_affix(suffix: str) -> str | None:
+    """适配器实际吃的后缀 —— 若这个后缀需要先转换，返回转换后的那个。
+
+    `suffix` 大小写不敏感（`.PRJ` 与 `.prj` 都见过）。
+    """
+    s = (suffix or "").lower()
+    hit = CONVERSION_REQUIRED.get(s)
+    return hit[0] if hit else None
+
+
+def source_suffix_of(adapter_suffix: str) -> str | None:
+    """适配器吃的后缀 → 它的**原始**来源后缀（若需要转换）。
+
+    ⚠ 这是上面 `converted_affix` 的**反向**查询，两件事都要，别合并：
+      · `converted_affix(.tsf)` → `.tsftxt`：拿到文件后，**该转成什么**；
+      · `source_suffix_of(.tsftxt)` → `.tsf`：适配器缺 `.tsftxt` 时，
+        **回头去台账里找哪个原始文件**。归因用的是后者。
+
+    背景（实测踩到的）：SEGMENT_FILES 里土方五段登记的后缀是 `.tsftxt`
+#   —— 那是"适配器实际读什么"，**不是**"工程会给什么"。
+#   工程给的是 `.tsf`。只查前者会得出"源缺失"，而源其实早收到了。
+    """
+    s = (adapter_suffix or "").lower()
+    for raw, (converted, _tool, _desc) in CONVERSION_REQUIRED.items():
+        if converted.lower() == s:
+            return raw
+    return None
+
+
+def segment_tables(segment: str) -> tuple[str, ...]:
+    """段 → 它落的物理表。**唯一**入口 —— 别处不许再判断一次。
+
+    未登记的段走默认规则「段名 == 表名」（IR schema 定的）。
+    ⚠ 默认规则**不校验表是否真的存在** —— 那是另一件事，由调用方或测试去核。
+    这里只负责"按约定翻译"。
+    """
+    if segment in SEGMENT_TABLE_GROUPS:
+        return SEGMENT_TABLE_GROUPS[segment]
+    return (segment,)
+
+
+def segment_tables_map() -> dict[str, tuple[str, ...]]:
+    """全部已声明段的段→表映射（含默认规则展开）。
+
+    遍历 CAPABILITIES 而不是 IMPLEMENTED：**声称支持的段也要能归因** ——
+    否则"声明支持但没解析器"这个真实状态在归因里会消失。
+    与 SEGMENT_FILES / SEGMENT_TABLE_GROUPS 取并集，避免遗漏只用后者登记的段。
+    """
+    keys = sorted(set(CAPABILITIES) | set(SEGMENT_FILES) | set(SEGMENT_TABLE_GROUPS))
+    return {s: segment_tables(s) for s in keys}
+
 
 def build_ir(project_dir: str | pathlib.Path, *,
              project_name: str | None = None) -> dict[str, Any]:
@@ -409,6 +523,9 @@ def build_ir(project_dir: str | pathlib.Path, *,
     )
 
 
-__all__ = ["VENDOR", "CAPABILITIES", "IMPLEMENTED", "SEGMENT_FILES", "build_ir",
+__all__ = ["VENDOR", "CAPABILITIES", "IMPLEMENTED", "SEGMENT_FILES",
+           "SEGMENT_TABLE_GROUPS", "segment_tables", "segment_tables_map",
+           "CONVERSION_REQUIRED", "converted_affix", "source_suffix_of",
+           "build_ir",
            "sta", "jd", "pm", "prj", "dmx", "zdm", "sup", "wid", "ctr",
            "lj", "tf"]

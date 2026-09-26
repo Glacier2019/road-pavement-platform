@@ -17,17 +17,22 @@ SQL、表名白名单、指标口径（求和/占比）现在都在 M3 内，改
 """
 from __future__ import annotations
 
+import json
 import os
+import pathlib
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 
+import gaps
+
 from rpdao import (
     ALL_TABLES,
     CROSS_TABLES,
     DOMAINS,
+    TABLE_OWNER,
     ContractViolation,
     Dao,
     DaoError,
@@ -156,6 +161,117 @@ def catalog_tables() -> dict[str, Any]:
         "physical_partition_count": sum(i["partition_count"] for i in partitioned),
         "items": items,
     }
+
+
+#: M2 的段能力出口。归因要用它的三件事：段实现了没、源收到没、段→哪些表。
+#  ★ 经 HTTP 取，不 import —— M6 与 M2 之间只认契约（硬线 II）。
+M2_BASE = os.getenv("M2_BASE", "http://ingest:8000").rstrip("/")
+#: 取 M2 的超时。给得短一点：归因是给人看的，宁可报"取不到"也不要页面卡住。
+GET_TIMEOUT_S = float(os.getenv("M2_TIMEOUT_S", "5"))
+
+
+def _m2_capabilities() -> dict[str, Any]:
+    """取 M2 的段能力。失败时**抛 503 并点名 M2**，不吞。
+
+    为什么必须点名：M3 挂了是"所有数据都拿不到"，M2 挂了是"只有归因算不全"，
+    两者的排查方向完全不同。混成一句"服务不可用"会让人查错方向。
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"{M2_BASE}/v1/design/capabilities"
+    try:
+        with urllib.request.urlopen(url, timeout=GET_TIMEOUT_S) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise HTTPException(
+            503, f"取不到 M2 的段能力（{url}）：{exc} —— 缺口分类无法完成") from exc
+
+
+def _module_phases() -> dict[str, str]:
+    """模块登记表里的 phase。
+
+    ⚠ 取自 M9 的登记文件 —— 它是**唯一真源**，这里不另抄一份到代码里。
+    读不到就返回空：phase 只是次要字段，不该拖垮整个归因接口。
+    """
+    p = pathlib.Path(os.getenv("MODULES_YAML", "/app/modules.yaml"))
+    if not p.is_file():
+        return {}
+    try:
+        import yaml
+        doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    return {m.get("module"): str(m.get("phase"))
+            for m in (doc.get("modules") or [])
+            if m.get("module") and m.get("phase") is not None}
+
+
+@app.get("/v1/catalog/gaps", tags=["运维"],
+          summary="逐张逻辑表的缺口归因：为什么空 / 归谁 / 先动哪条")
+def catalog_gaps(
+    empty_only: bool = Query(False, description="true = 只返回空表"),
+) -> dict[str, Any]:
+    """**空表缺口归因** —— 从"哪些表是空的"推进到"每条空链该谁接"。
+
+    ## 为什么这件事必须跨模块拼装
+
+    归因需要三类事实，分属两个模块，谁也不能替谁：
+      · 表里有几行 / 表的归属模块  → M3 rpdao（唯一接触存储处）
+      · 段实现了没 / 源收到没      → M2（解析器与导入台账都在它那边）
+
+    让 M3 去读磁盘、或让 M2 去查库都能更快写完，但都会破坏"平台内唯一接触
+    存储处"这条线 —— 而那条线正是四组学生能并行开发的前提。
+
+    ## ★ 最容易判错、也最要紧的一处
+
+    「源在不在」**不是看磁盘**，是看 M2 的 design_file 台账。导入入口是上传，
+    文件落在临时目录里、请求结束即销毁 —— 扫磁盘会恒得 false，把"源已收到"
+    错判成"源缺失"，而且**不报错**。
+
+    本接口只读；不返回任何行内容，也不提供写操作。
+    """
+    try:
+        census = dao.table_census()
+    except DaoError as exc:
+        raise _http(exc) from exc
+
+    caps = _m2_capabilities()
+
+    # 段 → 表：**由 M2 给**（唯一入口）。M6 不自己推"段名==表名"这条约定 ——
+    # 它有已登记的例外（cross_section 改名、design_control 一段九表），
+    # 把约定写死在 M6 就等于又多一份会漂的陈述。
+    seg_tables: dict[str, tuple[str, ...]] = {}
+    seg_facts: dict[str, dict[str, Any]] = {}
+    for s in caps.get("segments") or []:
+        seg = s.get("segment")
+        if not seg:
+            continue
+        seg_tables[seg] = tuple(s.get("tables") or (seg,))
+        seg_facts[seg] = {
+            "suffix": s.get("suffix") or "",
+            "kind": s.get("kind") or "",
+            "implemented": bool(s.get("implemented")),
+            "source_state": s.get("source_state") or "absent",
+            "source_file": s.get("source_file"),
+            "source_note": s.get("source_note"),
+            "effective_suffix": s.get("effective_suffix"),
+        }
+
+    result = gaps.build_gaps(
+        census=[{"table_name": r["table_name"],
+                 "domain": domain_of(r["table_name"]),
+                 "row_count": r["row_count"],
+                 "is_partitioned": r["is_partitioned"],
+                 "partition_count": r["partition_count"]} for r in census],
+        owners=dict(TABLE_OWNER),
+        seg_tables=seg_tables,
+        seg_facts=seg_facts,
+        phases=_module_phases(),
+    )
+    if empty_only:
+        result["items"] = [i for i in result["items"] if not i["has_data"]]
+    return result
 
 
 # ----------------------------------------------------------------- 对象查询

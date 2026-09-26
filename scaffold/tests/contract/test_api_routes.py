@@ -46,6 +46,11 @@ CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.3.yaml"
 # PYTHONPATH=/app 负责，见 modules/M6-api/Dockerfile）。
 if str(ROOT / "modules" / "M3-rpdao") not in sys.path:
     sys.path.insert(0, str(ROOT / "modules" / "M3-rpdao"))
+# M6 自己的目录也要进去：app.py 现在 `import gaps`（同目录的兄弟模块），
+# 而本测试是**按路径**加载 app.py 的，不经过包机制 —— 不放进 sys.path 就找不到。
+# 容器里由 WORKDIR /app 天然满足，所以这是个"只在测试里才暴露"的差异。
+if str(ROOT / "modules" / "M6-api") not in sys.path:
+    sys.path.insert(0, str(ROOT / "modules" / "M6-api"))
 
 from rpdao import NotFound  # noqa: E402  （须在上面 sys.path 就位之后）
 

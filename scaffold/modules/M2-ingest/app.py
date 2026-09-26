@@ -468,6 +468,108 @@ _MAX_FILE_BYTES = 64 * 1024 * 1024
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 段能力：GET /v1/design/capabilities
+#
+# 为什么这个接口必须存在
+# -------------------------------------------------------------------------------
+# IMPLEMENTED / SEGMENT_FILES / 「收到了哪些文件」三件事**只有 M2 同时知道**。
+# M6 要用它们做空表归因，但 M6 **不许 import 本模块** —— 那会造成代码依赖，
+# 破坏"模块可拔插"（换掉 M2 就得改 M6）。所以走 HTTP，让它成为**契约**。
+#
+# ★ 「收到了哪些文件」的真源是 design_file 表，**不是磁盘**：
+#   导入入口是上传，文件落在 tempfile 里、请求结束即销毁，
+#   服务端没有持久的设计目录。扫磁盘会恒得 false。
+#   而 M2 本就是七域数据的**唯一写入方**，读自己写入的记录不越线。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#: 判「源收到了没」时看哪些 parse_status。
+#  ok/blocked 都算**收到过**：blocked 是"收到了但结构上读不了"，
+#  那是**另一件事**（要专有工具），不是"没给"。把两者混为一谈，
+#  就会让人去要一份**已经在库里登记过**的文件。
+_RECEIVED_STATUSES = frozenset({"ok", "blocked", "pending"})
+
+
+def _design_files_index() -> dict[str, dict[str, Any]]:
+    """后缀 → 该后缀**收到过**的文件信息。"""
+    idx: dict[str, dict[str, Any]] = {}
+    with WriteDao(PG_DSN, app_name="rp-ingest-capabilities").open() as dao:
+        rows = dao.design_files_received()
+    for r in rows:
+        name = r.get("file_name") or ""
+        suf = pathlib.Path(name).suffix.lower()
+        if not suf:
+            continue
+        st = (r.get("parse_status") or "").lower()
+        prev = idx.get(suf)
+        # 同一后缀有多个文件时，只要有一个可用就算收到 ——
+#      这里问的是"有没有"，不是"用哪个"（后者是 IR 的告警，两回事）。
+        if prev is None or (st in _RECEIVED_STATUSES
+                            and prev["parse_status"] not in _RECEIVED_STATUSES):
+            idx[suf] = {"file_name": name, "parse_status": st}
+    return idx
+
+
+@app.get("/v1/design/capabilities", tags=["设计导入"],
+          summary="每个设计文件段的支持状态与源文件状态")
+def design_capabilities() -> dict[str, Any]:
+    """报"这个段你们处理得了吗？源在不在？"。
+
+    ★ 措辞边界（契约里定死的）：source_state 只表示**收到过这个文件**，
+      **不**表示"导入一定能成功"（文件可能损坏、魔数不符、内容为空）。
+      对外文案必须说"源已收到"，**不得**说"可以导入" ——
+      后者是给用户一个会落空的承诺。
+    """
+    try:
+        files = _design_files_index()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("段能力：读 design_file 失败：%s", exc)
+        raise HTTPException(503, f"读不到设计导入台账（design_file）：{exc}") from exc
+
+    segments: list[dict[str, Any]] = []
+    for seg in weidi.CAPABILITIES:
+        suffix, kind = weidi.SEGMENT_FILES.get(seg, ("", ""))
+        suf_l = (suffix or "").lower()
+        # 适配器**实际**吃哪个后缀 = SEGMENT_FILES 里登记的那个（如 .tsftxt）。
+        effective = suf_l
+        # 它是否需要**先转换**？若需要，回头去台账里找**原始**文件（如 .tsf）。
+        #  ⚠ 方向别搞反：converted_affix(.tsf)→.tsftxt 是"拿到文件后转成什么"，
+        #    这里要的是"缺 .tsftxt 时该去找哪个原始文件"，用 source_suffix_of。
+        raw_suffix = weidi.source_suffix_of(effective)
+
+        hit = files.get(effective) if effective else None
+        state = "received" if hit else "absent"
+        note = None
+        if not hit and raw_suffix:
+            raw = files.get(raw_suffix)
+            if raw:
+                state = "pending"
+                note = ("已收到 %s，但适配器读的是 %s；导入前须先跑一次转换器"
+                        % (raw["file_name"], effective))
+            else:
+                note = ("未收到 %s，也未收到其转换产物 %s" % (raw_suffix, effective))
+
+        segments.append({
+            "segment": seg,
+            "suffix": suffix,
+            "kind": kind,
+            "tables": list(weidi.segment_tables(seg)),
+            # ★ supported 与 implemented **都要报**：两者故意不同。
+            #   "声明支持、还没解析器"是**正常状态**，只报一个就丢失了它。
+            "supported": seg in weidi.CAPABILITIES,
+            "implemented": seg in weidi.IMPLEMENTED,
+            "effective_suffix": effective or None,
+            "source_state": state,
+            "source_file": hit["file_name"] if hit else None,
+            "source_note": note,
+        })
+
+    return {
+        "received_suffixes": sorted(files),
+        "segments": segments,
+    }
+
+
 @app.post("/v1/design/import", tags=["设计导入"],
           summary="上传一个纬地设计文件 → 解析成 IR → 落进 GE 表")
 async def design_import_route(

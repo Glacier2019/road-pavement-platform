@@ -21,6 +21,7 @@ from .catalog import (
     CROSS_TABLES,
     DOMAINS,
     EXPECTED_PHYSICAL_TABLES,
+    TABLE_OWNER,
     Domain,
     domain_of,
     selfcheck,
@@ -32,6 +33,7 @@ from .errors import (
     StorageUnavailable,
     UnknownDomain,
     UnknownTable,
+    WriteGuardError,
 )
 from .pool import Dao
 from .repo import (

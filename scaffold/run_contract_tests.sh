@@ -50,6 +50,7 @@ TESTS=(
   "design-导入|契约⑤：设计导入 IR + 纬地适配器 + 落库器（应通过/应拒绝两侧）|M2|PYDAO|tests/contract/test_design_import.py"
   "m9-集成面|M9 集成面：页面只经 /gw 取数、不直连库、转发的边界（应通过/应拒绝两侧）|M9|CONSOLE|tests/contract/test_console.py"
   "m1-装库一致|契约②补漏：全新装 DDL 与 DDL+migration 升级必须得到同一套 schema|M1/M3|DAO|tests/contract/test_ddl_migration_parity.py"
+  "缺口归因|契约④：空表缺口归因（判定短路顺序 / 排序确定性 / 硬线）|M6|PY|tests/contract/test_gap_attribution.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

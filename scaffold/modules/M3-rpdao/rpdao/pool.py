@@ -173,6 +173,40 @@ class Dao:
         )
         return {r["table_name"]: int(r["n"]) for r in rows}
 
+    def design_files_received(self) -> list[dict[str, Any]]:
+        """**收到过**哪些设计文件 —— 空因归因里"源在不在"的唯一证据源。
+
+        为什么真源是这张表、而不是扫磁盘
+        ------------------------------------------------------------------
+        M2 的导入入口是**上传**（``POST /v1/design/import``），文件落在
+        ``tempfile.TemporaryDirectory`` 里、请求结束即销毁 —— 服务端**没有**
+        任何持久的设计文件目录。所以"扫一下磁盘看源在不在"这个做法
+        在运行时会得到**恒为 false** 的结果，把"源已收到"错判成"源缺失"。
+
+        而 ``design_file`` 记的是**事实**：每次导入收到过什么文件、解析成什么样。
+        它是"我们收到过什么"的唯一真源（宪法原则 III：实库 > 文件 > 文档）。
+
+        ⚠ 只读，且**不含任何表名参数** —— 调用方给不进表名，同 ``table_census``。
+        """
+        return self.query(
+            "SELECT file_name, file_kind_code, file_kind_name, parse_status, "
+            "       design_project_id "
+            "FROM design_file "
+            "ORDER BY file_name"
+        )
+
+    def design_parse_status_counts(self) -> dict[str, int]:
+        """``parse_status`` → 文件数。给归因判定用的轻量聚合。
+
+        与 ``design_files_received`` 分开，是因为归因**大多是看状态**、
+        少数才要看文件名；让常见的那个便宜一点。
+        """
+        rows = self.query(
+            "SELECT coalesce(parse_status, '(null)') AS status, count(*) AS n "
+            "FROM design_file GROUP BY 1 ORDER BY 1"
+        )
+        return {r["status"]: int(r["n"]) for r in rows}
+
     def pool_stats(self) -> dict[str, int]:
         return {
             "pool_size": self._pool.get_stats().get("pool_size", 0),

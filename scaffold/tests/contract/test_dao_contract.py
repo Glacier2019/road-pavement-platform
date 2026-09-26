@@ -457,6 +457,38 @@ def main() -> int:
     ok("元测试：把月分区混进逻辑表清单时必须被认出来（非摆设）",
        bool(re.match(r".*_p\d{6}$", "wim_axle_record_p202511")))
 
+    # ---- 导出完整性：__all__ 里声明的名字必须真的可导入
+    #  ★ 这是**真实缺陷的回归钉子**（2026-09-25 实测发现）：
+    #    TABLE_OWNER 与 WriteGuardError 都写在 __all__ 里，却**从没被 import** ——
+    #    于是 `from rpdao import TABLE_OWNER` 报 ImportError，而 __all__ 里明明有它。
+    #    为什么能漏这么久：__all__ 只被 `from rpdao import *` 用到，
+    #    而全仓库没人这么写；每个调用方都是显式点名导入，撞上才算。
+    #    两处都是合法 Python，静态检查挡不住，只有真去 import 一次才发现。
+    _init_src = (ROOT / "modules" / "M3-rpdao" / "rpdao" / "__init__.py").read_text(
+        encoding="utf-8")
+    _tree = ast.parse(_init_src)
+    _imported: set[str] = set()
+    for _n in ast.walk(_tree):
+        if isinstance(_n, ast.ImportFrom):
+            for _a in _n.names:
+                _imported.add(_a.asname or _a.name)
+        elif isinstance(_n, ast.Import):
+            for _a in _n.names:
+                _imported.add((_a.asname or _a.name).split(".")[0])
+    _all_names = [e.value for n in _tree.body
+                  if isinstance(n, ast.Assign)
+                  and getattr(n.targets[0], "id", "") == "__all__"
+                  for e in n.value.elts]
+    _missing = [x for x in _all_names if x not in _imported and x != "__version__"]
+    ok("__all__ 里每个名字都真的被 import 了（否则 from rpdao import X 会炸）",
+       not _missing, f"声明了却没 import：{_missing}")
+    # 元测试：把 TABLE_OWNER 从 import 列表里拿掉，上面那条必须红
+    _broken = _init_src.replace("    TABLE_OWNER,\n", "    # TABLE_OWNER,\n", 1)
+    _btree = ast.parse(_broken)
+    _b_imported = {(a.asname or a.name) for n in ast.walk(_btree)
+                   if isinstance(n, ast.ImportFrom) for a in n.names}
+    ok("元测试：把 TABLE_OWNER 从 import 里拿掉后必须被认出来（非摆设）",
+       "TABLE_OWNER" not in _b_imported and _broken != _init_src)
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
 

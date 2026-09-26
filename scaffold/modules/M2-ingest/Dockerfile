@@ -30,6 +30,11 @@ COPY modules/M2-ingest/adapters /app/adapters
 COPY modules/M2-ingest/design_import.py ./
 COPY modules/M2-ingest/models.py modules/M2-ingest/violations.py modules/M2-ingest/app.py ./
 
+# 一次性转换工具 tools/tsf2txt.py **刻意不进镜像**：它是运维在导入前手工跑的
+# （.tsf → .tsftxt），不是运行时的一部分；放进来会诱使别人以为服务能自己转换。
+# 但 /v1/design/capabilities 要引用它的后缀规则 —— 那条规则已显式登记在
+# adapters/weidi/__init__.py 的 CONVERSION_REQUIRED 里（adapters/ 已整目录 COPY）。
+
 # 契约⑤ 的 schema：端点拿它校验自己产出的 IR 过不过契约。
 # 放在 /app/contracts/design-import/，与 IR_SCHEMA_PATH 的默认值对应。
 COPY contracts/design-import /app/contracts/design-import
