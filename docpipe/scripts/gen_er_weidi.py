@@ -5,7 +5,8 @@
 
 与 gen_er.py 的区别：
   · gen_er.py 是**设计文档版**（12 域 35 表，含 QU 语义域等尚未落地的表）
-  · 本脚本是**实测版**：表/字段/外键全部从 scaffold/sql/10_ddl_v0.5.sql 解析，
+  · 本脚本是**实测版**：表/字段/外键全部从当前 DDL 真源解析（路径由
+    contract_truth.ddl_file() 动态解析，不写死版本号），
     域分组从契约③ scaffold/modules/M3-rpdao/rpdao/catalog.py 读取 —— 与代码同源，不会漂移。
 
 产出（output/）：
@@ -24,12 +25,19 @@ import sys
 ROOT = pathlib.Path("/data/cy/shujuku")
 # ⚠ 原写 v0.3 —— 那个路径现在是个**空目录**（误操作留下的），脚本直接
 #   IsADirectoryError 跑不起来。真源已到 v0.5。
-DDL = ROOT / "scaffold" / "sql" / "10_ddl_v0.5.sql"
-#: 当前 DDL 版本标签（只用于图上的文字与下面的自洽断言）。
-DDL_VERSION = "v0.5"
-#: 期望表数。v0.3=42 → v0.4=53 → v0.5=55。
-EXPECTED_TABLES = 56
-CATALOG = ROOT / "scaffold" / "modules" / "M3-rpdao" / "rpdao" / "catalog.py"
+# DDL 路径见上方 contract_truth（已改为动态解析，不再写死 v0.5）
+#: ⚠ 版本与表数**从真源读**，不再手写。
+#:   实测教训：这里曾写死 "v0.5" / 56，而 DDL 早已到 v0.5 的 62 表 ——
+#:   下面的自洽断言随即报 "表数应为 56（v0.5），实为 62"。
+#:   断言**是对的**（它抓住了漂移），错的是那个手写的 56。
+#:   现在两者都来自 contract_truth：图上的字与断言用的是同一个数。
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import contract_truth as _ct          # noqa: E402
+
+DDL = _ct.ddl_file()
+DDL_VERSION = _ct.ddl_version()
+EXPECTED_TABLES = _ct.physical_tables()
+CATALOG = _ct._CATALOG_DIR / "rpdao" / "catalog.py"
 OUT = ROOT / "output"
 
 # ────────────────────────────────────────────────────────────
