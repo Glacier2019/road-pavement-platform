@@ -57,6 +57,14 @@ docpipe/*
 docpipe/scripts/*
 !docpipe/scripts/gen_er_weidi.py
 
+# 提交信息的临时文件：本仓库的工作流是「写 .cmsg → git commit -F .cmsg → 删」，
+# 而 git add -A 会在文件被删前把它扫进去 —— **已踩两次**（f6aff88 的 .cmsg3、
+# 1ba103f 的 .cmsg），两次都得 git rm --cached + amend 才发现。
+# 根因是"忘删"不可靠，故直接忽略，让这条路径**不可能**再进提交。
+.cmsg
+.cmsg*
+*.cmsg
+
 # work/ 只提交各目录的 README（说明"这个目录干嘛的"），
 # 里面学生的实验脚本/造数记录/草稿全部忽略，避免合并冲突。
 scaffold/work/*
