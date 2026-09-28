@@ -1,5 +1,5 @@
 -- ============================================================================
--- 路面性能数据库（Road Pavement Performance Database）— DDL v0.5
+-- 路面性能数据库（Road Pavement Performance Database）— DDL v0.6
 -- ============================================================================
 -- 项目：福建省交通运输科技计划项目 2025Y095《智慧公路路面结构断面监测与
 --       数据融合养护管理技术研究》研究内容（3）路面性能数据库科学架构
@@ -43,7 +43,7 @@
 --                 兼容：纯新增，无破坏性变更。回滚 = DROP TABLE slope_segment, ditch_segment,
 --                       standard_cross_section, roadbed_trench, structure_control,
 --                       earthwork_composition, land_use_width, extra_fill, design_control_text;
---   v0.5（本版）  62 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张 ＋ L 节 1 张 ＋ M 节 1 张 ＋ N 节 2 张 ＋ O 节 2 张
+--   v0.5          62 表：v0.4 全部保留（未改一列）＋ 新开 J 节 2 张 ＋ K 节 1 张 ＋ L 节 1 张 ＋ M 节 1 张 ＋ N 节 2 张 ＋ O 节 2 张
 --                       J1 earthwork_section        逐桩土方断面（.tf，**74 列**）
 --                       J2 roadbed_design_point     逐桩路基设计断面（.lj，**24 列**）
 --                       K1 cross_section_ground_point 逐桩横断面地面线测点（.HDM）★后补，见下
@@ -87,6 +87,29 @@
 --                       「段能解析、表不存在」= 静默丢数据，比明说"不做"更糟。
 --                       定性（横断面**地面线**／外业测量，非设计面）有三份独立证据，
 --                       见 K 节抬头 —— 名称照内容走：cross_section_ground_point。
+--   v0.6（本版）  62 表（**表数不变**）：v0.5 全部保留 ＋ **A9 桩号脱离路段、重锚到路线**
+--                 ★ 本版是**第一次"不改表数、只改结构"的工单** —— 所以
+--                   test_ddl_dict_catalog.py 的 EXPECTED_PHYSICAL_TABLES 不需要动，
+--                   但迁移一致性（DDL 全新装 == DDL + migration）**照样要过**。
+--                 改动（契约变更工单 #3，Q1–Q3 已获导师批准 2026-09-20）：
+--                   ① station_sequence.section_id  → DROP NOT NULL        （放宽）
+--                   ② station_sequence 新增 line_id REFERENCES road_line （新增，可空）
+--                   ③ section_id 的 FK             → ON DELETE SET NULL   （放宽）
+--                   ④ 补部分唯一索引 uq_station_line_local                 （收紧）
+--                      UNIQUE (line_id, station_local_km) WHERE line_id IS NOT NULL
+--                 缘由：桩号是野外客观存在的基准，路段是被设计出来的产物。
+--                       把不变的挂在可变的下面 —— 删一个路段，332 个桩号跟着没了。
+--                       改后层级：road_line ──< station_sequence >── road_section
+--                                路线是桩号的**锚**，路段只是**引用**它。
+--                 ★ ④ 为什么必须做（最容易被漏掉的一条）：
+--                       既有 UNIQUE (section_id, station_local_km) 在 section_id 改可空后
+--                       会**静默失效一部分** —— PostgreSQL 里 NULL 在 UNIQUE 中彼此不相等，
+--                       于是三条 (NULL, 0.000) 能同时插进去，而这恰好是本次要支持的新场景
+--                       （「路段还没定」的桩号）。④ 把唯一性层级从路段上移到路线。
+--                       既有约束**保留不动**：它在路段锚定下仍然正确，两条各管一层。
+--                 兼容：列只增不删、约束只放宽；④ 是新增索引且带 WHERE 子句，
+--                       不要求先回填数据、不影响任何既存行。
+--                 迁移：sql/97_migrate_v06_station_line.sql（幂等；含回滚段）
 --   v0.3          44 表：v0.2 全部保留 ＋ 第一批 10 张新表（GE 域完整化）
 --                       ＋ A16 superelev_transition 超高过渡（原列在 v0.4 待办，提前落地）
 --                       ＋ A17 roadbed_width 路幅宽度（原列在 v0.4 待办，提前落地）
@@ -410,9 +433,21 @@ CREATE TABLE IF NOT EXISTS section_design_attr (
 COMMENT ON TABLE section_design_attr IS '路段设计属性（.PRJ〔项目分段〕）；一改线形即新增冗余列，故独立成表而非并入 road_section';
 
 -- A9. 桩号序列 ★全线桩号基准（一等实体）
+-- ★ v0.6（工单 #3）：桩号**脱离路段**，重锚到**路线**。
+--   层级：road_line ──< station_sequence >── road_section
+--         路线是桩号的**锚**；路段只是**引用**桩号（可空、删路段置空）。
+--   理由：桩号是野外客观存在的基准，路段是被设计出来的产物；
+--         把不变的挂在可变的下面，删一个路段就会带走全部桩号。
 CREATE TABLE IF NOT EXISTS station_sequence (
     id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    section_id          bigint NOT NULL REFERENCES road_section(id),
+    -- ★ 可空：桩号不属于任何路段也成立。
+    --   ON DELETE SET NULL：路段消失时**保留桩号**（FR-002），只把归属置空。
+    --   用 RESTRICT 会让「删路段」退化成「必须先手工清理桩号」，等于问题没解决。
+    section_id          bigint REFERENCES road_section(id) ON DELETE SET NULL,
+    -- ★ 路线锚定（v0.6 新增）。可空是**有意的**：
+    --   保留「先导桩号文件、后建路线档案」这个合法顺序；
+    --   强制 NOT NULL 会逼着导入方先造一条占位路线，那是假数据。
+    line_id             bigint REFERENCES road_line(id),
     station_seq_no      integer NOT NULL,                 -- .STA 原始编号
     station_local_km    numeric(12,6) NOT NULL,           -- 相对桩号（0 起，设计口径）
     station_absolute_km numeric(12,6),                    -- 绝对桩号（路网统一口径，如 4635.710）
@@ -420,13 +455,28 @@ CREATE TABLE IF NOT EXISTS station_sequence (
     station_type        varchar(16) DEFAULT 'integer',    -- integer 整桩/jiazi 加桩/equation 断链点/endpoint 起终点
     is_integer_station  boolean DEFAULT true,             -- 是否整桩（20m 整桩 vs 加桩）
     remark              text,
+    -- ★ 这一条**保留不动**：它在路段锚定下仍然正确（同一路段内桩号不重复）。
+    --   ⚠ 但 section_id 改可空后，它对 section_id IS NULL 的行**静默失效** ——
+    --   PostgreSQL 里 NULL 在 UNIQUE 中彼此不相等，三条 (NULL, 0.000) 能同时插入。
+    --   兜底见下方部分唯一索引 uq_station_line_local。两条约束各管一层。
     UNIQUE (section_id, station_local_km)
 );
-COMMENT ON TABLE station_sequence IS '桩号序列＝全线桩号基准（一等实体）；来源 .STA 逐桩号序列。其余逐桩数据表以 station_id FK 锚定本表';
+COMMENT ON TABLE station_sequence IS '桩号序列＝全线桩号基准（一等实体）；来源 .STA 逐桩号序列。其余逐桩数据表以 station_id FK 锚定本表。★v0.6 起锚定 road_line（路线），section_id 降为可空的「引用」——路段增删不影响桩号';
+COMMENT ON COLUMN station_sequence.line_id IS '路线锚定（v0.6 工单 #3）。可空：允许「先导桩号、后建路线」。唯一性由 uq_station_line_local 在路线层级表达';
+COMMENT ON COLUMN station_sequence.section_id IS '路段归属（v0.6 起可空）。★ 路段是**引用**桩号，不是桩号的容器：删路段只置空，不删桩号';
 COMMENT ON COLUMN station_sequence.station_local_km IS '相对桩号：设计口径，0 起（纬地工程 0.000→5805.421）';
 COMMENT ON COLUMN station_sequence.station_absolute_km IS '绝对桩号：路网统一口径（G228 试验段 K4635+000 系）。★相对/绝对双列显式物化，不存单个 offset 由读时计算——有断链时线性假设不成立';
 CREATE INDEX IF NOT EXISTS idx_station_section_local ON station_sequence(section_id, station_local_km);
 CREATE INDEX IF NOT EXISTS idx_station_absolute      ON station_sequence(station_absolute_km);
+-- ★ v0.6：唯一性上移到**路线**层级（工单 #3 Q1）。
+--   部分索引：只约束已锚定路线的行 —— 于是它不要求先回填数据就能建上，
+--   而「同路线内桩号不重复」这一点重新有了保障。
+--   注：不用 UNIQUE(line_id, station_local_km) 全量约束，是因为 line_id 可空，
+--   全量约束对 NULL 行同样不生效，等于白建。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_station_line_local
+    ON station_sequence (line_id, station_local_km) WHERE line_id IS NOT NULL;
+-- 按路线查桩号（FR-003 的查询路径）。
+CREATE INDEX IF NOT EXISTS idx_station_line_local ON station_sequence(line_id, station_local_km);
 
 -- A10. 断链（长链/短链）★一等实体的必要配套
 CREATE TABLE IF NOT EXISTS station_equation (

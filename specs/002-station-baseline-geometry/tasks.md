@@ -116,19 +116,40 @@ research.md 的实测结论改变了本特性的工作性质，**执行前务必
 
 ## Phase 4: User Story 1 - 桩号脱离路段独立存在 (Priority: P1)
 
-**⚠️ 本阶段被工单阻塞** —— FR-001 改动 `station_sequence.section_id` 为可空 + 新增路线锚定，
-**触碰现有表，属契约②变更**。按宪法原则 IV 与仓库冻结设计纪律（「学生不参与设计决策」），
-**须先由导师裁决工单，再执行本阶段**。
+**✅ 已完成（2026-09-20）** —— 工单 #3 已获导师批准（Q1–Q3 三项均按建议通过），
+本阶段 T019–T023 全部实施并验证。
+
+工单：[`工单-03-桩号脱离路段重锚路线（草稿）.md`](工单-03-桩号脱离路段重锚路线（草稿）.md)
+
+| 项 | 结果 |
+|---|---|
+| DDL | `v0.5 → v0.6`（**表数不变 62**，首次「只改结构不加表」的工单） |
+| 迁移 | `sql/97_migrate_v06_station_line.sql`（对 v0.6 全新装是**空操作**，parity 测试确认） |
+| 实库回填 | 332/332 桩号经 `road_section.line_id` 反推 `line_id` |
+| 契约测试 | `test_station_baseline.py` 新增（29 条断言）；总套件 **15/15** |
+
+**★ 这五条任务里最值得记住的，是两条"差一点就写成空转"的断言：**
+
+1. 第 4 组原先取 `_lines[0]`，而库里 id 最小的路线（G228）有 **0 个桩号** ——
+   于是「查到 0 == 声明 0」成立，整组空转却读起来全绿。
+   改成先挑**有桩号**的路线，并加了一条前置断言把各路线的桩号数打出来。
+2. Q1 的元测试原先只断言「插入报错了」—— 但任何约束报错都算数，
+   那样它并没有在验证 `uq_station_line_local` 到底有没有生效。
+   改成断言**报错信息里出现该索引名**：
+   `duplicate key value violates unique constraint "uq_station_line_local"`。
+
+   ★ 这一点有实质区别：本次插入的 `section_id` 是 `NULL`，而 NULL 在 UNIQUE 里
+   彼此不相等 —— **旧约束恰恰拦不住它**，能拦住的只有新索引。
 
 **Goal**: 桩号不再挂在易变的路段下；路段增删不影响已导入桩号
 
 **Independent Test**: 删除一个路段，桩号应完好无损（当前会级联失败）
 
-- [ ] T019 [US1] **（工单前置：导师批准后方可执行）** 起草并提交契约变更工单：`station_sequence.section_id` 改可空、新增路线锚定列、影响面与回滚路径
-- [ ] T020 [US1] 新增 migration：`station_sequence.section_id` 改可空 + 路线锚定（**迁移不可变**，新增文件，不改历史迁移）
-- [ ] T021 [US1] 修改 FK 方向于 `scaffold/sql/10_ddl_v0.5.sql`（或新 migration）：路段删除 MUST NOT 级联删除桩号（FR-002）
-- [ ] T022 [US1] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 实现按路线查询桩号集合（FR-003）
-- [ ] T023 [P] [US1] 在 `scaffold/tests/contract/test_station_baseline.py` 测试：断言删除路段后桩号仍在（FR-002）；断言两条相距数千公里的路线互不混淆（FR-003）
+- [x] T019 [US1] **（工单前置：导师批准后方可执行）** 起草并提交契约变更工单：`station_sequence.section_id` 改可空、新增路线锚定列、影响面与回滚路径
+- [x] T020 [US1] 新增 migration：`station_sequence.section_id` 改可空 + 路线锚定（**迁移不可变**，新增文件，不改历史迁移）
+- [x] T021 [US1] 修改 FK 方向于 `scaffold/sql/10_ddl_v0.6.sql`（或新 migration）：路段删除 MUST NOT 级联删除桩号（FR-002）
+- [x] T022 [US1] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 实现按路线查询桩号集合（FR-003）
+- [x] T023 [P] [US1] 在 `scaffold/tests/contract/test_station_baseline.py` 测试：断言删除路段后桩号仍在（FR-002）；断言两条相距数千公里的路线互不混淆（FR-003）
 
 ---
 

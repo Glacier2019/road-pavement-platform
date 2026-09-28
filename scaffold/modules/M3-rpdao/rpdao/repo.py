@@ -441,6 +441,73 @@ class GeRepository(DomainRepository):
             "sid": section_id, "from_km": from_km, "to_km": to_km,
             "integer_only": integer_only, "limit": limit,
         })
+    # ── v0.6（契约变更工单 #3）：桩号脱离路段，按**路线**取 ──────────────
+    #
+    # ★ 为什么必须新增这两个方法，而不是继续用 stations(section_id)：
+    #   改前桩号挂在路段下，WHERE section_id = ? 就够了。改后桩号锚定**路线**，
+    #   路段只是可空的「引用」—— 于是出现两类桩号**按路段永远查不到**：
+    #     ① 还没归属任何路段的（section_id IS NULL）；
+    #     ② 路段被删过的（ON DELETE SET NULL 之后同样 IS NULL）。
+    #   而这两类恰恰是本工单要支持的场景。
+    #
+    #   更要紧的是**串台**：两条路线的桩号都从 K0+000 起算，
+    #   按路段查时若路段归属错了，两条路的桩号会混在一起而看不出来。
+    #   按路线查是唯一能区分它们的口径（FR-003）。
+    LINE_STATIONS_SQL = """
+    SELECT t.station_seq_no, t.station_local_km, t.station_absolute_km,
+           t.station_text, t.station_type, t.is_integer_station,
+           t.section_id,
+           s.section_name
+    FROM station_sequence t
+    LEFT JOIN road_section s ON s.id = t.section_id
+    WHERE t.line_id = %(lid)s::bigint
+      AND (%(from_km)s::numeric IS NULL OR t.station_local_km >= %(from_km)s::numeric)
+      AND (%(to_km)s::numeric   IS NULL OR t.station_local_km <= %(to_km)s::numeric)
+      AND (NOT %(integer_only)s::boolean OR t.is_integer_station)
+    ORDER BY t.station_local_km
+    LIMIT %(limit)s::integer
+    """
+
+    #: 路线列表（含桩号数）。桩号数是按 line_id 数的 —— 与
+    #: SECTIONS_SQL 里按 section_id 数的那个**不是同一个口径**，
+    #: 两者不相等是**正常的**（路段覆盖不到全线，见 FR-004）。
+    LINES_SQL = """
+    SELECT l.id, l.line_code, l.line_name, l.admin_region, l.road_class,
+           l.design_speed, l.lane_count,
+           (SELECT count(*) FROM station_sequence t WHERE t.line_id = l.id)
+               AS station_count,
+           (SELECT count(*) FROM station_sequence t WHERE t.line_id = l.id
+                                              AND t.section_id IS NULL)
+               AS unassigned_station_count,
+           (SELECT count(*) FROM road_section r WHERE r.line_id = l.id)
+               AS section_count
+    FROM road_line l
+    ORDER BY l.line_code, l.id
+    """
+
+    def lines(self) -> list[dict[str, Any]]:
+        """所有路线（含桩号数 / 未归属路段的桩号数 / 路段数）。
+
+        ★ unassigned_station_count 是 v0.6 才可能非 0 的：
+          改前 section_id 是 NOT NULL，「无路段桩号」这个概念不存在。
+          把它显式查出来，是为了让「桩号 > 路段覆盖」这件事**看得见**（FR-004），
+          而不是让人以为桩号数对不上就是数据坏了。
+        """
+        return self._dao.query(self.LINES_SQL)
+
+    def stations_by_line(self, line_id: int, *, from_km: float | None = None,
+                         to_km: float | None = None, integer_only: bool = False,
+                         limit: int = 5000) -> list[dict[str, Any]]:
+        """某**路线**的桩号序列（FR-003）。可按区间/是否整桩筛。
+
+        与 stations(section_id) 的区别不只是换个 WHERE 列：
+        本方法能取到 section_id IS NULL 的桩号，按路段取则永远取不到。
+        limit 默认给到 5000（一条路线全线可能几千个桩号，不设小默认值）。
+        """
+        return self._dao.query(self.LINE_STATIONS_SQL, {
+            "lid": line_id, "from_km": from_km, "to_km": to_km,
+            "integer_only": integer_only, "limit": limit,
+        })
 
     def alignment(self, section_id: int) -> dict[str, Any]:
         """某路段的平面线形：交点链 + 线形单元链（一次取回，前端不必拼两次）。"""

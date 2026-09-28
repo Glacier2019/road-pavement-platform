@@ -12,7 +12,7 @@
 ### I. 契约先行，且"能跑的东西才是契约"（NON-NEGOTIABLE）
 
 模块之间唯一的沟通方式是**四份契约**：①报文格式（`contracts/messages/*.schema.json`）
-②表结构（`scaffold/sql/10_ddl_v0.5.sql`）③数据访问层（`scaffold/modules/M3-rpdao/`）
+②表结构（`scaffold/sql/10_ddl_v0.6.sql`）③数据访问层（`scaffold/modules/M3-rpdao/`）
 ④服务接口（各服务 `/openapi.json`，`contracts/openapi/*.yaml` 为人工摘要）。
 
 - **文档不是契约。** 任何"我口头跟你说字段改一下"一律不算；能跑、能被测试引用的才是。
@@ -55,7 +55,7 @@
 ### IV. 迁移是不可变历史，DDL 是全新装真相
 
 - `scaffold/sql/*migrate*.sql` **一旦提交就不再修改**。要改就加新迁移。
-- `10_ddl_v0.5.sql` 是"全新安装后应该长什么样"的唯一真相。
+- `10_ddl_v0.6.sql` 是"全新安装后应该长什么样"的唯一真相。
 - **不变量**：`DDL(全新装)` 与 `DDL + 全部 migrations(升级)` 必须得到**同一套 schema**
   —— 表、列、约束、索引，**包括名字**。任何一处单独改动都必须让这条红。
 

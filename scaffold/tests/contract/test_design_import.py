@@ -54,7 +54,7 @@ from adapters.weidi import (ctr, dmx, jd, lj, pm, prj as prj_mod, sta, sup, tf,
 
 PRJ_FIXTURE = ROOT / "tests" / "fixtures" / "design_import" / "weidi_prj_excerpt.PRJ"
 IR_SCHEMA_PATH = ROOT / "contracts" / "design-import" / "road_geometry_ir.v0.3.schema.json"
-DDL_PATH = ROOT / "sql" / "10_ddl_v0.5.sql"
+DDL_PATH = ROOT / "sql" / "10_ddl_v0.6.sql"
 
 
 def ddl_table_body(table: str) -> str:
@@ -1464,7 +1464,7 @@ def main() -> int:
           any("没有的" in w for w in tf.check_against_stations(_tpts + [{"station_m": 999.0}], _sta2)))
 
     # ★★ 适配器列名 ↔ DDL 列名 逐条对账（改了适配器不改 DDL 会红）
-    _ddl_txt = (ROOT / "sql" / "10_ddl_v0.5.sql").read_text(encoding="utf-8")
+    _ddl_txt = (ROOT / "sql" / "10_ddl_v0.6.sql").read_text(encoding="utf-8")
     _m = re.search(r"CREATE TABLE IF NOT EXISTS earthwork_section\s*\((.*?)\n\);", _ddl_txt, re.S)
     _ddl_cols = [x.group(1) for x in
                  re.finditer(r"^\s{4}([a-z_][a-z0-9_]*)\s+(?:bigint|numeric|smallint|text)", _m.group(1), re.M)]
@@ -1590,7 +1590,7 @@ def main() -> int:
           f"实为 {a} / {b}，相距 {round(b - a, 3)} m")
     check("解析器接纳这一对（不因过近而拒绝）", len(ep) == 5, f"实为 {len(ep)} 点")
 
-    ddl_text = (ROOT / "sql" / "10_ddl_v0.5.sql").read_text(encoding="utf-8")
+    ddl_text = (ROOT / "sql" / "10_ddl_v0.6.sql").read_text(encoding="utf-8")
     m = re.search(r"station_local_km\s+numeric\((\d+),\s*(\d+)\)", ddl_text)
     check("DDL 中能取到 station_local_km 的精度声明", bool(m))
     if m:

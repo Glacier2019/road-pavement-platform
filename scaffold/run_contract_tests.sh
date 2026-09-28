@@ -52,6 +52,10 @@ TESTS=(
   "m1-装库一致|契约②补漏：全新装 DDL 与 DDL+migration 升级必须得到同一套 schema|M1/M3|DAO|tests/contract/test_ddl_migration_parity.py"
   "缺口归因|契约④：空表缺口归因（判定短路顺序 / 排序确定性 / 硬线）|M6|PY|tests/contract/test_gap_attribution.py"
   "交付物口径|契约⑤：图件/文档宣称的表数必须等于真源（含元测试）|全组|PY|tests/contract/test_deliverable_truth.py"
+  # ★ v0.6 新增。它**打真库**（删路段、造第二条路线），所以必须排在打库的那些之后，
+  #   且用 DAO 依赖。它不是"再来一组几何断言"，而是钉工单 #3 四项改动的落地 ——
+  #   每一条都配了前置断言，防止「删一个本来就没桩号的路段，然后说桩号还在」。
+  "桩号基线|契约② v0.6：桩号脱离路段重锚路线（FR-002/003/004 + Q1，含元测试）|M1/M3|DAO|tests/contract/test_station_baseline.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

@@ -18,7 +18,7 @@
 ------------
     DDL(全新装)  ==  DDL + migration(升级)
 
-因为：`10_ddl_v0.5.sql` 是**全新装的真相**，migration 是**历史**。
+因为：`10_ddl_v0.6.sql` 是**全新装的真相**，migration 是**历史**。
 migration 是给"已经装了旧版本的库"补课用的；对一个**已经是最新 DDL** 的库，
 每条 migration 都应当是**空操作**。若不然，说明 DDL 与 migration 发散，
 那么"新同事 clone 下来装"和"老库升级上来"会得到两套不同的 schema。
@@ -28,7 +28,7 @@ migration 是给"已经装了旧版本的库"补课用的；对一个**已经是
 在一个**一次性数据库**里做（做完就 drop，绝不碰 road_pavement）：
 
     ① create database rp_parity_<pid>
-    ② 只跑 10_ddl_v0.5.sql            → 快照 A
+    ② 只跑 10_ddl_v0.6.sql            → 快照 A
     ③ 依次跑 85..91 的全部 migration  → 快照 B
     ④ 逐项比对 A 与 B
     ⑤ drop database
@@ -67,7 +67,7 @@ import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]          # scaffold/
 SQL_DIR = ROOT / "sql"
-DDL = SQL_DIR / "10_ddl_v0.5.sql"
+DDL = SQL_DIR / "10_ddl_v0.6.sql"
 PARTITIONS = SQL_DIR / "20_partitions.sql"
 
 FAIL = 0
@@ -220,7 +220,7 @@ def main() -> int:
     try:
         # ── ① 只跑 DDL ────────────────────────────────────────────────────
         rc, txt = _psql_file(DDL, db)
-        ok("① 全新装：只跑 10_ddl_v0.5.sql 成功", rc == 0, txt.strip()[-200:] if rc else "")
+        ok("① 全新装：只跑 10_ddl_v0.6.sql 成功", rc == 0, txt.strip()[-200:] if rc else "")
         if rc != 0:
             return 1
 
