@@ -1946,15 +1946,26 @@ def main() -> int:
               # v0.5 K 节：★这张**表名与段名不同名** —— 段是 cross_section，
               # 表是 cross_section_ground_point。上面那句"表名与段名同名"对 .tf/.lj 成立，
               # 对 .HDM 不成立，所以它单独列在这里并说明。
-              "cross_section_ground_point"}
+              "cross_section_ground_point",
+               # ★ A15：**派生表**，不对应任何"段"，故这里必须**显式列出**。
+               #   它不来自解析，而是由 alignment_element + station_sequence 求值而来
+               #   （见 _plan_geometry_points）。上面那句"已实现段对应的表"对它不成立 ——
+               #   段清单里没有它，而它又确实该被 plan 产出，所以只能单独列。
+               "geometry_point"}
              | {t for t, _ in di.CTR_ON_CONFLICT})
     check("plan 产出的表集合 = 已实现段对应的表 ∪ .CTR 的 9 张（漏一个键会静默少写一张表）",
           set(counts) == _want,
           f"多出 {sorted(set(counts) - _want)}／缺少 {sorted(_want - set(counts))}")
-    check("行数：有数据的 3 张表正确（桩号 30 / 交点 1 / 单元 4），其余全 0",
+    # ★ A15 是**派生表**：它的行数必然等于桩号数（30），不该是 0。
+    #   这正是"逐桩"的含义，也顺带证明了派生确实发生在 plan 里。
+    check("行数：有数据的 4 张表正确（桩号 30 / 交点 1 / 单元 4 / 逐桩线形 30），其余全 0",
           {t: n for t, n in counts.items() if n}
-          == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4},
+          == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4,
+              "geometry_point": 30},
           str(counts))
+    check("★ geometry_point 行数 ≡ 桩号数（派生表的定义性质）",
+          counts["geometry_point"] == counts["station_sequence"],
+          str((counts["geometry_point"], counts["station_sequence"])))
     check("交点来源 = 推导（.JD 作输入被忽略）",
           planned["pi_source"] == "derived" and planned["pi_from_file_ignored"] is True,
           f"{planned['pi_source']} / {planned['pi_from_file_ignored']}")
@@ -2189,9 +2200,11 @@ def main() -> int:
 
             # ① 预检：dry_run 必须一行都不写（这就是 M9 导入页"预检"的语义）
             rep = di.load(ir_ok, dao_e2e, section_id=sec_id, batch_no=batch, dry_run=True)
-            check("dry_run 报告计划行数（有数据的 3 张表精确，其余全 0）",
+            # ★ 现在是 4 张：A15 geometry_point 是**派生表**，行数 = 桩号数（30）。
+            check("dry_run 报告计划行数（有数据的 4 张表精确，其余全 0）",
                   {t: n for t, n in rep["planned"].items() if n}
-                  == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4},
+                  == {"station_sequence": 30, "alignment_pi": 1, "alignment_element": 4,
+                      "geometry_point": 30},
                   str(rep["planned"]))
             check("dry_run 后没有批次行",
                   dao_e2e.scalar("SELECT count(*) FROM data_import_batch WHERE batch_no=%(b)s",
@@ -2291,6 +2304,12 @@ def main() -> int:
                     _cleanup_failed.append(f"{table}: {type(exc).__name__}: {exc}")
 
             if sec_id:
+                # ★ 取**两跳**：直接引 road_section 的表，以及引 station_sequence 的表。
+                #   原先只查一跳，于是 geometry_point（引 station_sequence，不引 road_section）
+                #   被漏掉 —— 它的行会挡住 station_sequence 的删除，报
+                #   `Key (id)=(…) is still referenced from table "geometry_point"`，
+                #   而清理失败会让残留污染下一次跑。
+                #   本仓库的规矩：删父表前先把**所有**子引用找齐，不能只找一层。
                 _refs = dao_e2e.query(
                     "select c.relname as tbl, a.attname as col "
                     "from pg_constraint k "
@@ -2298,7 +2317,8 @@ def main() -> int:
                     "join pg_class f on f.oid = k.confrelid "
                     "join unnest(k.conkey) with ordinality as ck(attnum, ord) on true "
                     "join pg_attribute a on a.attrelid = c.oid and a.attnum = ck.attnum "
-                    "where k.contype = 'f' and f.relname = 'road_section'")
+                    "where k.contype = 'f' "
+                    "  and f.relname in ('road_section', 'station_sequence', 'alignment_pi')")
                 # 只删 M2 名下的表：其余（如 M8 的 maintenance_advice）本组根本写不进去，
                 # 硬删会被写权守卫拒绝 —— 那是守卫在**正确工作**，不是清理失败。
                 _refs = [r for r in _refs if TABLE_OWNER.get(r["tbl"]) == "M2"]
@@ -2326,8 +2346,15 @@ def main() -> int:
                 _del("road_line", "DELETE FROM road_line WHERE id=%(i)s", {"i": line_id})
             dao_e2e.close()
             if _cleanup_failed:
+                # ★ 这里必须**计入失败**，不能只打印。
+                #   清理不掉的残留会污染下一次跑，让"通过"变成偶然。
+                #   原文写的是 `_fail.append(...)` —— 那个名字在模块里根本不存在，
+                #   所以这一支一旦走到就是 NameError 崩掉整个测试文件
+                #   （实测：单跑不触发，进 run_contract_tests.sh 才炸）。
+                #   用与非空断言同一个计数器，口径才一致。
                 print(f"  ✗ 清理失败（残留会污染下一次跑）：{_cleanup_failed}")
-                _fail.append('清理失败：' + str(_cleanup_failed))
+                global FAIL
+                FAIL += 1
             print(f"  （已清理：路段 {sec_id} / 批次 {batch}）")
 
     # ── 第 12a 组：completeness() 的等级必须与 derive_level() 自洽（打真库）──

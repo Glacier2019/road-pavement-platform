@@ -36,6 +36,8 @@ import pathlib
 from typing import Any, Mapping, Sequence
 
 from adapters import base, geom
+
+import geometry_solver as solver
 from adapters.errors import SourceInvalid
 # ★ 列名**从适配器取**，不在这里手抄 —— .tf 有 74 列，手抄一遍就多一个会漂移的真源。
 from adapters.weidi import lj as lj_mod
@@ -52,7 +54,8 @@ from adapters.weidi import tf as tf_mod
 LOADABLE_TABLES = ("station_sequence", "alignment_pi", "alignment_element",
                    "profile_grade_point", "profile_ground_point",
                    "superelev_transition", "roadbed_width",
-                   "earthwork_section", "roadbed_design_point")
+                   "earthwork_section", "roadbed_design_point",
+                   "geometry_point")
 
 # 推导值与 .JD 文件值的允许偏差。实测全部 ≤ 3.6×10⁻⁸，此处留三个数量级余量，
 # 但仍远小于任何有工程意义的差（1 mm = 1×10⁻³）。
@@ -583,6 +586,45 @@ def _plan_pi_from_file(ir: Mapping[str, Any], section_id: int) -> list[dict[str,
     return out
 
 
+def _plan_geometry_points(ir: Mapping[str, Any], section_id: int,
+                          *, tables: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """A15 逐桩线形（**派生缓存**）—— 由要素 + 桩号逐桩算出。
+
+    ★ 为什么它在这里算、而不是在适配器里：**它是派生量，不是解析结果**。
+    `.PM` 早已被解析成 `alignment_element`（33 行在库），
+    `station_sequence` 也早已有了（332 行在库）。本函数只是把两者**求值联结**。
+    所以它读的是**同一批 IR 段**，不是新文件。
+
+    ★ DDL 第 553–556 行给它的两条硬要求，本函数与 load() 合力满足：
+      ① **可重建** —— 同样的要素 + 同样的桩号必得同样的 332 行；
+         `verify` 会把它与既存值对质（见 verify 的 geometry 组）。
+      ② **与 A12 同批次** —— load() 把它放进**同一个** `write_txn`，
+         与 alignment_element 共用同一个 `batch_no`。
+    """
+    elements = tables.get("alignment_element") or []
+    stations = tables.get("station_sequence") or []
+    if not elements or not stations:
+        # 要素或桩号缺任一边，就不产出 geometry_point ——
+        # 而不是产出一张"部分正确"的表。半张表的危险在于它看起来是完整的。
+        return []
+    transitions = tables.get("superelev_transition") or []
+    grounds = tables.get("profile_ground_point") or []
+    grades = tables.get("profile_grade_point") or []
+    # ★ allow_gap=True：**预览**要能把一份坏数据完整展示出来。
+    #   若这里就抛错，`verify` 根本没有机会**报告**"链断了、断在哪" ——
+    #   而"报不出来"等于没有校验（本仓库已有的教训，见 test_design_import 的注释）。
+    #   落库路径（load）用的是默认 False，故"绝不写外推值"没有被放开：
+    #   预览里那些 None 到了 load 会先被 verify 拦下。
+    return solver.solve_all(
+        elements,
+        [s["_station_m"] for s in stations],
+        transitions=transitions,
+        ground_points=grounds,
+        design_points=grades,
+        allow_gap=True,
+    )
+
+
 def plan(ir: Mapping[str, Any], *, section_id: int,
          section_start_km: float | None = None) -> dict[str, Any]:
     """IR → 待写行。**纯函数，不碰数据库**（故可离线测）。
@@ -613,6 +655,11 @@ def plan(ir: Mapping[str, Any], *, section_id: int,
     # .CTR 一个段带 9 张表 —— 展开进同一张 tables 字典，键就是**物理表名**，
     # 故 load / verify / 测试都按表名取，不需要知道它们同源。
     tables.update(_plan_design_control(ir, section_id))
+
+    # ★ A15 geometry_point 放在**最后**：它是派生量，输入是上面那些表，
+    #   所以必须等它们都 plan 完。顺序在这里是有语义的，不是排版。
+    tables["geometry_point"] = _plan_geometry_points(
+        ir, section_id, tables=tables)
     return {"tables": tables, "pi_source": pi_source,
             "pi_from_file_ignored": bool(pi_derived) and bool(pi_file)}
 
@@ -930,6 +977,28 @@ def load(ir: Mapping[str, Any], dao: Any, *,
                               "station_id": sid_of_station})
             report["written"][_t] = tx.insert(
                 _t, _rows, on_conflict=("section_id", "station_id"))
+
+        # ⑨b 逐桩线形（A15）—— **派生缓存**，与 A12 同事务、同批次。
+        #     DDL 第 553–556 行两条硬要求都在这里兑现：
+        #       ① 可重建 —— 行内容全部由上面的要素/桩号/高程算出，无外部输入；
+        #       ② 同批次 —— 与 alignment_element 共用本 `write_txn` 与同一个 batch_no，
+        #          "只改 A12 不改本表"在结构上做不到。
+        #     ★ 它读的是**本事务刚写进去的** alignment_element（tables 里的那批），
+        #       不是重新解析 .PM —— 保证要素行与线形行**必然出自同一份输入**。
+        if tables.get("geometry_point"):
+            #    半张表比没有表更危险（看起来完整），故桩号对不上直接拒收。
+            _g_rows = []
+            for row in tables["geometry_point"]:
+                sid_of_station = station_id_by_m.get(row["_station_m"])
+                if sid_of_station is None:
+                    raise LoadError(
+                        f"geometry_point 桩号 {row['_station_m']} m 在桩号序列里"
+                        f"找不到对应（section_id={section_id}）—— 本表锚 station_id，"
+                        f"错位不报错，故此处直接拒收")
+                _g_rows.append({**{k: v for k, v in row.items() if k != "_station_m"},
+                                "station_id": sid_of_station})
+            report["written"]["geometry_point"] = tx.insert(
+                "geometry_point", _g_rows, on_conflict=("station_id",))
 
         # ⑩ 批次登记
         tx.insert("data_import_batch", [batch], on_conflict=("batch_no",))
