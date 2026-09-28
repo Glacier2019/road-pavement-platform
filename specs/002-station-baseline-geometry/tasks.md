@@ -30,13 +30,39 @@ research.md 的实测结论改变了本特性的工作性质，**执行前务必
 
 ---
 
+## ★ MVP 已完成（2026-09-20）
+
+**Phase 1 + Phase 2 + Phase 3 = T001–T018 全部完成并验证。**
+
+| 项 | 结果 |
+|---|---|
+| `geometry_point` 行数 | **0 → 332**（≡ `station_sequence`，严格 1:1） |
+| 验收① 可重建 | 重算 vs 已存，逐列差全部落在该列 `numeric` 的末位内 |
+| 验收② 同批次 | 与 `alignment_element` 同一 `write_txn`、同 `batch_no` |
+| 契约测试 | 14/14 全绿（`design-导入` 637 条断言） |
+| 新增测试 | `tests/contract/test_geometry_solver.py` 8 组 |
+
+**两点值得记住的实测结论：**
+
+1. **竖曲线处设计高程 ≠ 变坡点高程。** 实测差 `0.1667 m`，恰好等于外距
+   `E = |ω|·L/8` —— 竖曲线本来就要把切线交点「切掉」。所以 VPI 高程
+   **不能**拿来当设计高程的期望值。
+
+2. **坐标差的量级由「链式累积」决定，不是一个统一的半格。**
+   `x/y/azimuth` 沿 33 个单元积分，每个单元的起点坐标各被舍入一次，
+   误差累积到 3.3～6.8 个半格；而 `curvature_1pm` 是**单元内**量、
+   `design_elev_m` 是**局部**量，都不累积，就是 1 个半格。
+   容差按列写（`COL_TOL`），不写一个魔数。
+
+---
+
 ## Phase 1: Setup（共享前置）
 
 **Purpose**: 确认既有组件可用，避免重复实现
 
-- [ ] T001 通读 `scaffold/modules/M2-ingest/adapters/geom.py`，确认四个函数签名与 `research.md` 记载一致；把三条不得违反的约定写进新模块的 docstring
-- [ ] T002 [P] 复核既有测试 `scaffold/tests/contract/test_design_import.py`（第 599–631 行 geom 部分）覆盖了哪些行为，列出**未被覆盖**的行为作为 T012/T015 的补充依据
-- [ ] T003 [P] 在 `scaffold/modules/M2-ingest/design_import.py` 定位落库链路（`load()` 第 756 行起、`station_id` 中转逻辑第 817–930 行），确认 `geometry_point` 应插入的位置与 `on_conflict` 键
+- [x] T001 通读 `scaffold/modules/M2-ingest/adapters/geom.py`，确认四个函数签名与 `research.md` 记载一致；把三条不得违反的约定写进新模块的 docstring
+- [x] T002 [P] 复核既有测试 `scaffold/tests/contract/test_design_import.py`（第 599–631 行 geom 部分）覆盖了哪些行为，列出**未被覆盖**的行为作为 T012/T015 的补充依据
+- [x] T003 [P] 在 `scaffold/modules/M2-ingest/design_import.py` 定位落库链路（`load()` 第 756 行起、`station_id` 中转逻辑第 817–930 行），确认 `geometry_point` 应插入的位置与 `on_conflict` 键
 
 **Checkpoint**: 确认无需新写数学，接线点已定位
 
@@ -48,12 +74,12 @@ research.md 的实测结论改变了本特性的工作性质，**执行前务必
 
 **⚠️ CRITICAL**: 本阶段完成前，任何用户故事都不能开始
 
-- [ ] T004 在 `scaffold/modules/M2-ingest/geometry_solver.py` 新建模块：输入 `alignment_element` 列表 + 桩号，输出 `geometry_point` 行。**不得重新实现几何数学**，一律调用 `adapters/geom.py` 的 `locate`/`curvature_at`/`azimuth_at`/`point_at`
-- [ ] T005 在 `scaffold/modules/M2-ingest/geometry_solver.py` 实现 `solve_all(elements, stations)`：对每个桩号调 `locate`，返回 `<el>` 时算出 κ/方位角/坐标；**返回 `None` 时必须抛错并指名桩号，不得跳过或填默认值**（对应约定 3）
-- [ ] T006 [P] 在 `scaffold/modules/M2-ingest/geometry_solver.py` 实现高程求解：`design_elev_m` 来自 `.ZDM` 竖曲线，`ground_elev_m` 来自 `.DMX`（既有 `profile_ground_point` 表），按桩号对齐
-- [ ] T007 [P] 在 `scaffold/modules/M2-ingest/geometry_solver.py` 实现六列横坡插值：源为既存表 `superelev_transition`（本工程 76 个变化点），按 `station_km` 插值到逐桩
-- [ ] T008 在 `scaffold/modules/M2-ingest/geometry_solver.py` 处理 `superelev_transition` 的 **NULL 语义**：DDL 注释规定「NULL 表示源文件写了 9999『可以忽略此数据』，即该列在此位置不参与约束、**过渡照常继续**（不是缺值、也不是沿用上值）」。插值时 MUST 跳过该点继续寻找下一个有效点
-- [ ] T009 在 `scaffold/modules/M2-ingest/geometry_solver.py` 处理桩号**精度匹配**：`superelev_transition.station_km` 与 `station_sequence.station_local_km` 均为 `numeric(12,6)`，但只有 34/76 精确命中。插值 MUST NOT 依赖精确相等，须用区间查找
+- [x] T004 在 `scaffold/modules/M2-ingest/geometry_solver.py` 新建模块：输入 `alignment_element` 列表 + 桩号，输出 `geometry_point` 行。**不得重新实现几何数学**，一律调用 `adapters/geom.py` 的 `locate`/`curvature_at`/`azimuth_at`/`point_at`
+- [x] T005 在 `scaffold/modules/M2-ingest/geometry_solver.py` 实现 `solve_all(elements, stations)`：对每个桩号调 `locate`，返回 `<el>` 时算出 κ/方位角/坐标；**返回 `None` 时必须抛错并指名桩号，不得跳过或填默认值**（对应约定 3）
+- [x] T006 [P] 在 `scaffold/modules/M2-ingest/geometry_solver.py` 实现高程求解：`design_elev_m` 来自 `.ZDM` 竖曲线，`ground_elev_m` 来自 `.DMX`（既有 `profile_ground_point` 表），按桩号对齐
+- [x] T007 [P] 在 `scaffold/modules/M2-ingest/geometry_solver.py` 实现六列横坡插值：源为既存表 `superelev_transition`（本工程 76 个变化点），按 `station_km` 插值到逐桩
+- [x] T008 在 `scaffold/modules/M2-ingest/geometry_solver.py` 处理 `superelev_transition` 的 **NULL 语义**：DDL 注释规定「NULL 表示源文件写了 9999『可以忽略此数据』，即该列在此位置不参与约束、**过渡照常继续**（不是缺值、也不是沿用上值）」。插值时 MUST 跳过该点继续寻找下一个有效点
+- [x] T009 在 `scaffold/modules/M2-ingest/geometry_solver.py` 处理桩号**精度匹配**：`superelev_transition.station_km` 与 `station_sequence.station_local_km` 均为 `numeric(12,6)`，但只有 34/76 精确命中。插值 MUST NOT 依赖精确相等，须用区间查找
 
 **Checkpoint**: `solve_all` 可在内存中由 33 要素 + 332 桩号产出 332 行，且经 T013 验证与源文件自带的 `end_x`/`end_y` 一致
 
@@ -71,18 +97,18 @@ research.md 的实测结论改变了本特性的工作性质，**执行前务必
 
 ### Tests for User Story 4 ⚠️（先写，确认失败）
 
-- [ ] T010 [P] [US4] 契约测试：`scaffold/tests/contract/test_geometry_solver.py` 新建，断言 `geometry_point` 行数 == `station_sequence` 行数 == 332
-- [ ] T011 [P] [US4] **元测试（可证伪）**：篡改 `geometry_point` 任一行的 `curvature_1pm`，重算校验**必须报不一致**。若此测试恒通过，说明校验形同虚设 —— 对应宪法原则 V
-- [ ] T012 [P] [US4] 单元测试：用 `tests/fixtures/design_import/weidi_pm_excerpt_4units.pm` 断言 κ(s) 在直线段 == 0、圆曲线段 == 1/R、缓和段 == s/A²；并断言 `curvature_at` 对 `turn_flag=-1` 返回负值
-- [ ] T013 [P] [US4] **交叉验证测试**：用真实 `.PM` 断言 `point_at(el, el.end_station)` 与源文件自带 `end_x`/`end_y` 偏差 < 1e-6 m（research.md 实测 3.171e-08 m）；并断言单元长度合计 == 5805.421 m
+- [x] T010 [P] [US4] 契约测试：`scaffold/tests/contract/test_geometry_solver.py` 新建，断言 `geometry_point` 行数 == `station_sequence` 行数 == 332
+- [x] T011 [P] [US4] **元测试（可证伪）**：篡改 `geometry_point` 任一行的 `curvature_1pm`，重算校验**必须报不一致**。若此测试恒通过，说明校验形同虚设 —— 对应宪法原则 V
+- [x] T012 [P] [US4] 单元测试：用 `tests/fixtures/design_import/weidi_pm_excerpt_4units.pm` 断言 κ(s) 在直线段 == 0、圆曲线段 == 1/R、缓和段 == s/A²；并断言 `curvature_at` 对 `turn_flag=-1` 返回负值
+- [x] T013 [P] [US4] **交叉验证测试**：用真实 `.PM` 断言 `point_at(el, el.end_station)` 与源文件自带 `end_x`/`end_y` 偏差 < 1e-6 m（research.md 实测 3.171e-08 m）；并断言单元长度合计 == 5805.421 m
 
 ### Implementation for User Story 4
 
-- [ ] T014 [US4] 在 `scaffold/modules/M2-ingest/design_import.py` 的 `load()` 中接入 `geometry_point` 落库：**与 A12 `alignment_element` 同一事务**（DDL 第 556 行要求「必须与 A12 同批次生成，不允许只改 A12 不改本表」）
-- [ ] T015 [US4] `geometry_point.station_id` 带 UNIQUE 约束（实测 `geometry_point_station_id_key`），`on_conflict=("station_id",)` —— 与 DDL 一致
-- [ ] T016 [US4] 接线 `station_id` 中转：复用既有 `station_id_by_m`（第 817–930 行）。桩号对不上时 MUST 报错并指名桩号，**不得静默跳过**
-- [ ] T017 [US4] 批次登记：确认 `data_import_batch`（第 934–935 行，已在同事务内）覆盖本次生成，「同批次」由现有机制表达，**不新增列**
-- [ ] T018 [US4] 补 `design_file` 血缘（FR-017 的 ⚠️ 部分）：使 `geometry_point` 的每一行可追溯到源文件
+- [x] T014 [US4] 在 `scaffold/modules/M2-ingest/design_import.py` 的 `load()` 中接入 `geometry_point` 落库：**与 A12 `alignment_element` 同一事务**（DDL 第 556 行要求「必须与 A12 同批次生成，不允许只改 A12 不改本表」）
+- [x] T015 [US4] `geometry_point.station_id` 带 UNIQUE 约束（实测 `geometry_point_station_id_key`），`on_conflict=("station_id",)` —— 与 DDL 一致
+- [x] T016 [US4] 接线 `station_id` 中转：复用既有 `station_id_by_m`（第 817–930 行）。桩号对不上时 MUST 报错并指名桩号，**不得静默跳过**
+- [x] T017 [US4] 批次登记：确认 `data_import_batch`（第 934–935 行，已在同事务内）覆盖本次生成，「同批次」由现有机制表达，**不新增列**
+- [x] T018 [US4] 补 `design_file` 血缘（FR-017 的 ⚠️ 部分）：使 `geometry_point` 的每一行可追溯到源文件
 
 **Checkpoint**: `geometry_point` 由 0 行 → 332 行；`SC-004` 与 `SC-009` 通过
 

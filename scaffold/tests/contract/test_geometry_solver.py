@@ -210,6 +210,35 @@ def main() -> int:
                        "实为 %s" % rv)
 
     print("")
+    print("第 3b 组  真实 .PM 交叉验证（T013 的核心断言）")
+    # ★ 这一组回答的是"公式写对了吗"。
+    #   做法：拿**源文件自己带的** end_x/end_y 与 point_at 在**同一个桩号**
+    #   （单元自己的终点桩号，8 位小数原始值）上算出来的坐标对质。
+    #   两边同源同桩号，所以差**只**反映积分精度，不掺桩号舍入 ——
+    #   实测 3.1711e-08 m，与 research.md 记载的 3.171e-08 一致。
+    #
+    #   ★ 断言必须用**文件自己的桩号**。若换成库里的桩号（6 位小数），
+    #     同一个量会变成 4.6e-4 m —— 大四个数量级。混用会让这条断言
+    #     要么恒假、要么形同虚设（research.md 问题 5 记的就是这件事）。
+    _pm = _real_pm()
+    if _pm is None:
+        print("  [SKIP] 未找到真实 .PM 样例，跳过交叉验证")
+    else:
+        import math as _math
+        from adapters import geom as _geom
+        from adapters.weidi import pm as _pmmod
+        _els = _pmmod.parse(_pm.read_bytes().decode("utf-8"), file=_pm.name)["elements"]
+        _worst = 0.0
+        for _e in _els:
+            _x, _y = _geom.point_at(_e, _e["end_station_m"])
+            _worst = max(_worst, _math.dist((_x, _y), (_e["end_x"], _e["end_y"])))
+        fails += not check("真实 .PM：单元终点坐标偏差 < 1e-6 m（实测 3.17e-08）",
+                           _worst < 1e-6, "实测 %.4e m" % _worst)
+        _tot = sum(_e["length_m"] for _e in _els)
+        fails += not check("真实 .PM：单元长度合计 == 5805.421 m（与 .STA 末桩号一致）",
+                           abs(_tot - 5805.421) < 1e-3, "实测 %.6f" % _tot)
+
+    print("")
     print("第 4 组  精度分层的元测试：证明容差选错了真的会红")
     observed_x = 1.628e-6
     fails += not check("实测坐标差 1.6e-6 超出 1e-9（故不能用 1e-9 作容差）",
@@ -350,6 +379,24 @@ def _tamper_probe(dao):
 def _dsn():
     import os
     return os.environ.get("PG_DSN") or os.environ.get("RPP_PG_DSN")
+
+
+def _real_pm():
+    """找一份**真实**的 .PM（不是夹具）。找不到返回 None。
+
+    为什么非要真的：夹具是 4 个单元的小样本，
+    而链式累积误差要 33 个单元才显形（见 COL_TOL 的说明）。
+    """
+    for _base in (_HERE.parents[3] if len(_HERE.parents) > 3 else _HERE,
+                  pathlib.Path("/tmp/weidi")):
+        _d = _base / "docpipe" / "materials" / "纬地工程项目文件"
+        if not _d.is_dir():
+            _d = _base
+        if _d.is_dir():
+            _hit = sorted(_d.rglob("*.pm"))
+            if _hit:
+                return _hit[0]
+    return None
 
 
 if __name__ == "__main__":
