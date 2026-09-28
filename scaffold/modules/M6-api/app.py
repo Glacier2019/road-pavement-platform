@@ -406,6 +406,63 @@ def get_superelevation(section_id: int) -> dict[str, Any]:
     return {"section_id": section_id, "count": len(rows), "items": rows}
 
 
+@app.get("/v1/geometry/sections/{section_id}/elements", tags=["几何查询"],
+         summary="按桩号区间取线形单元（与区间**相交**的，供 TruckSim / FEM）")
+def get_elements_by_station(
+    section_id: int,
+    from_km: float = Query(..., ge=0, description="区间起点（km），含"),
+    to_km: float = Query(..., ge=0, description="区间终点（km），含"),
+) -> dict[str, Any]:
+    """FR-018：把线形单元按里程切片给出去。
+
+    ★ 返回的是**与区间相交**的单元，不是「完全落在区间内」的。
+      一个 200 m 长的单元跨过 50 m 的查询窗时**必须**被返回 —— 否则采样会
+      整段丢失长单元，而返回的行数看着还挺正常。判断口径写在每一行的
+      `span_m` 上：它是**落在本区间内**的长度，被截断时与 `length_m` 不等。
+      调用方拿 `span_m` 做积分才对；拿 `length_m` 会把里程轴算错。
+
+    ⚠ `from_km > to_km` 返回 422（不是 500，也不是空列表）：那是**请求写错了**，
+      不是「这个区间没有数据」。两者返一样的响应，调用方就分不出来。
+    """
+    if from_km > to_km:
+        raise HTTPException(
+            422, detail=f"区间反了：from_km={from_km} > to_km={to_km}")
+    try:
+        rows = dao.ge.elements_by_station(section_id, from_km, to_km)
+    except DaoError as exc:
+        raise _http(exc) from exc
+    return {"section_id": section_id, "from_km": from_km, "to_km": to_km,
+            "count": len(rows), "items": rows}
+
+
+@app.get("/v1/geometry/sections/{section_id}/samples", tags=["几何查询"],
+         summary="按桩号区间取某个逐桩段的行（供 TruckSim / FEM）")
+def get_samples_by_station(
+    section_id: int,
+    segment: str = Query(..., description="段名，取值见 /v1/catalog 的段清单"),
+    from_km: float = Query(..., ge=0),
+    to_km: float = Query(..., ge=0),
+) -> dict[str, Any]:
+    """逐桩采样（`.STA`/`.DMX`/`.WID`/`.SUP`/`.HDM` 等）。
+
+    ⚠ 未知 `segment` 返回 **422 并列出可用值**，不返回空列表 ——
+      空列表会被读成「这段在区间内没有数据」（数据缺口），
+      而实际是「段名写错了」（调用错误）。这两件事在下游的处置完全不同：
+      前者要去找源文件，后者要改代码。
+    """
+    if from_km > to_km:
+        raise HTTPException(
+            422, detail=f"区间反了：from_km={from_km} > to_km={to_km}")
+    try:
+        rows = dao.ge.samples_by_station(section_id, segment, from_km, to_km)
+    except ValueError as exc:
+        # 段名非法 —— 是入参问题，不是服务端问题
+        raise HTTPException(422, detail=str(exc)) from exc
+    except DaoError as exc:
+        raise _http(exc) from exc
+    return {"section_id": section_id, "segment": segment,
+            "from_km": from_km, "to_km": to_km, "count": len(rows), "items": rows}
+
 # ----------------------------------------------------------------- 指标查询
 @app.get("/v1/metrics/wim_hourly", tags=["指标查询"],
          summary="小时级过车量/超载数/ESAL/均速")

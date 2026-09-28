@@ -105,8 +105,140 @@ def station_type(station_m: float, *, first: float, last: float) -> str:
 
 
 # ----------------------------------------------------------------- IR → 待写行
-def _plan_stations(ir: Mapping[str, Any], section_id: int, *,
-                   section_start_km: float | None = None) -> list[dict[str, Any]]:
+#: 段名 → 该段记录的桩号字段（用于算**实际覆盖区间**，FR-005）。
+#
+#  ★ 为什么每个段要单独列，不能统一取 `station_m`：
+#    各段的桩号字段名**不统一**，这不是疏忽，是源文件本身就不统一 ——
+#    `.DMX` 地面线点写 `station_m`，`.WID` 变化点写 `station_km`（且单位是 km），
+#    `.SUP` 超高过渡写 `start_station_m` / `end_station_m`。
+#    用同一个字段名去取，会在取不到时**静默得到 None** —— 于是覆盖区间是空的，
+#    而空的覆盖区间「没有超出声明区间」，校验就永远通过。
+#    所以这里逐个写清楚，写完再用测试钉住「每个段都能算出非空区间」。
+#
+#  值 = (起点字段, 终点字段, 单位换算到米的系数)
+_STATION_RANGE_FIELDS: dict[str, tuple[str, str, float]] = {
+    "station_sequence":        ("station_m",         "station_m",          1.0),
+    "alignment_pi":            ("station_m",         "station_m",          1.0),
+    "alignment_element":       ("start_station_m",   "end_station_m",      1.0),
+    "profile_grade_point":     ("station_m",         "station_m",          1.0),
+    "profile_ground_point":    ("station_m",         "station_m",          1.0),
+    "superelev_transition":    ("start_station_m",   "end_station_m",      1.0),
+    "roadbed_width":           ("station_km",        "station_km",      1000.0),
+    "roadbed_design_point":    ("station_m",         "station_m",          1.0),
+    "earthwork_section":       ("station_m",         "station_m",          1.0),
+    "earthwork_factor":        ("station_m",         "station_m",          1.0),
+    "earthwork_transfer":      ("station_m",         "station_m",          1.0),
+    "borrow_pit":              ("station_m",         "station_m",          1.0),
+    "spoil_pit":               ("station_m",         "station_m",          1.0),
+    "earthwork_haul_stat":     ("start_station_m",   "end_station_m",      1.0),
+    "earthwork_fill_stat":     ("start_station_m",   "end_station_m",      1.0),
+    "cross_section":           ("station_m",         "station_m",          1.0),
+}
+
+
+def station_range_of_segment(ir: Mapping[str, Any], seg: str) -> tuple[float, float] | None:
+    """某段记录的桩号区间（米）。段为空、或字段取不到，返回 None。
+
+    ★ 返回 None 与返回 (0, 0) 是**两回事**，调用方必须分开处理：
+      None  = 这个文件里没有这个段（或该段没有桩号）—— 「没有」
+      (0,0) = 真的有 zeroth 桩号 —— 「有，且是 0」
+      把前者当后者就是给缺失区间补了默认值，正是 FR-008 禁止的。
+    """
+    rows = ir.get("segments", {}).get(seg)
+    if isinstance(rows, Mapping):
+        # `.ctr` 那种「段 = 一个字典」的形态，里面再分子列表
+        rows = [v for v in rows.values() if isinstance(v, list)]
+        rows = [x for sub in rows for x in sub]
+    if not rows:
+        return None
+    f0, f1, scale = _STATION_RANGE_FIELDS.get(seg, ("station_m", "station_m", 1.0))
+    lo: float | None = None
+    hi: float | None = None
+    for r in rows:
+        if not isinstance(r, Mapping):
+            continue
+        for fld, take_min in ((f0, True), (f1, False)):
+            v = r.get(fld)
+            if v is None:
+                continue
+            try:
+                x = float(v) * scale
+            except (TypeError, ValueError):
+                continue
+            lo = x if lo is None or (x < lo if take_min else False) else lo
+            hi = x if hi is None or x > hi else hi
+    if lo is None or hi is None:
+        return None
+    return (lo, hi)
+
+
+def coverage_of_files(ir: Mapping[str, Any]) -> dict[str, tuple[float, float]]:
+    """后缀 → 实际桩号区间（米）。**只算真解析出来的，不猜**（FR-005）。
+
+    ★ 为什么按**后缀**汇总而不是按文件名：
+      `.PRJ` 声明的文件名与磁盘上的并不一样（声明 `\\毕设.pm`，磁盘是
+      `052201341刘其立道路毕设平面线形文件.pm`）—— 按文件名对会全部对不上。
+      后缀是这两个世界之间唯一稳定的桥。一个后缀在 IR 里通常只对应一个文件。
+
+    ★ 一个后缀落在**多个段**上时（`.tsftxt` 出 6 个段），取**并集**：
+      它本来就是同一个文件的 6 个视图，取交集会把区间缩到不真实的窄。
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for seg in _STATION_RANGE_FIELDS:
+        rng = station_range_of_segment(ir, seg)
+        if rng is None:
+            continue
+        for suffix, segs in _IMPLEMENTED_SUFFIX.items():
+            if seg not in segs:
+                continue
+            cur = out.get(suffix)
+            out[suffix] = rng if cur is None else (min(cur[0], rng[0]),
+                                                   max(cur[1], rng[1]))
+    return out
+
+
+def check_declared_coverage(ir: Mapping[str, Any],
+                            declared: Mapping[str, float] | None = None,
+                            *, tol_m: float = 1.0) -> list[str]:
+    """实际覆盖区间 vs 声明区间，不符则返回**人类可读的不符清单**（FR-006）。
+
+    返回空列表 = 全部相符。调用方据此决定是否让导入失败。
+
+    ★ 为什么是返回清单而不是直接抛异常：
+      本函数是**纯函数**（不碰库、不碰文件），这样它能在离线测试里
+      喂构造数据直接验证；抛异常会让「不符」这件事**只能**靠真实文件触发，
+      于是 FR-010 要求的那条元测试就没法写。
+
+    ★ 报出四样东西（FR-006 明文要求）：文件、声明区间、实际区间、差值（米）。
+      只报「不符」而不报差值，等于让人自己再算一遍 —— 那正是本需求要省的。
+
+    ⚠️ 实测本工程的 `.PM` 只覆盖 0.000–5805.421 m，而 `.WIM`/`.WID` 到
+       5701.461 m —— **短 103.96 m**。缺口是**预期内的**（不同文件覆盖不同），
+       所以默认容差 1 m，且超过时报告**差值**而不是笼统说「不符」。
+    """
+    if not declared:
+        return []
+    actual = coverage_of_files(ir)
+    bad: list[str] = []
+    for suffix, (d_lo, d_hi) in sorted(declared.items()):
+        got = actual.get(suffix)
+        if got is None:
+            # ★ 声明了、却一个桩号都没解析出来 —— 这是**最危险的一种**：
+            #   「没有数据」和「数据不覆盖」会被下游当成同一件事。
+            bad.append(f"{suffix}：声明区间 {d_lo:.3f}~{d_hi:.3f} m，"
+                       f"实际未解析出任何桩号（区间为空）")
+            continue
+        a_lo, a_hi = got
+        d_lo_m, d_hi_m = d_lo * 1000.0, d_hi * 1000.0
+        if abs(a_lo - d_lo_m) > tol_m or abs(a_hi - d_hi_m) > tol_m:
+            bad.append(
+                f"{suffix}：声明 {d_lo_m:.3f}~{d_hi_m:.3f} m，"
+                f"实际 {a_lo:.3f}~{a_hi:.3f} m，"
+                f"起端差 {a_lo - d_lo_m:+.3f} m、终端差 {a_hi - d_hi_m:+.3f} m")
+    return bad
+
+
+def _plan_stations(ir: Mapping[str, Any], section_id: int, *,                   section_start_km: float | None = None) -> list[dict[str, Any]]:
     """桩号序列行。
 
     ``section_start_km`` 是**该路段起点的绝对桩号**（= ``road_section.start_station_km``）。
@@ -767,9 +899,26 @@ def verify(ir: Mapping[str, Any], planned: Mapping[str, Any],
     if seq and seq != list(range(1, len(seq) + 1)):
         errors.append("桩号序列的 seq_no 不是严格的 1..N")
     for a, b in zip(sts, sts[1:]):
-        if b <= a:
+        if a >= b:
             errors.append(f"桩号非严格递增：{a} → {b}")
             break
+
+    # ⑤ 声明区间 vs 实际区间（FR-006）。
+    #
+    # 声明区间从**路段**来（`.PRJ` 的起讫桩号），实际区间从**解析结果**来。
+    # 两者不符时报错，并报出四样东西：文件、声明区间、实际区间、差值（米）。
+    #
+    # ★ 为什么要有容差：实测本工程 `.PM` 覆盖 0.000–5805.421 m，
+    #   而 `.WIM`/`.WID` 到 5701.461 m —— 短 103.96 m。不同文件本来就覆盖不同区间，
+    #   零容差会把正常差异报成错误；而容差放得太宽则等于没检查。
+    #   1 m 是桩号精度（1 mm）的 1000 倍，单位换算误差远小于它、
+    #   而真正的“文件被截断”类差异远大于它。
+    # ★ 声明区间从 IR 取（而不是从 verify 的参数）：verify 是**纯函数**，
+    #   它只看 IR。把声明区间挂到 IR 根上，就不必给 verify 加一个只为这一检查存在的参数，
+    #   也不必让调用方每次都记得传它。缺就是没有声明，于是不检查 —— 而不是报错。
+    _declared = ir.get("declared_coverage") if isinstance(ir, Mapping) else None
+    if _declared:
+        errors.extend(check_declared_coverage(ir, _declared))
 
     return {"errors": errors, "warnings": warnings}
 
@@ -1267,16 +1416,26 @@ def _basename(rel_path: str | None) -> str | None:
     return rel_path.replace("\\", "/").rsplit("/", 1)[-1] or None
 
 
-def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str, Any]:
+def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None,
+                 ir: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """`.PRJ` 解析结果 → 档案五表的待写行。**纯函数，不碰数据库。**
 
     ``project_dir`` 给了就去目录里找同名后缀的实际文件，写进 ``design_file.remark``
     —— 因为实测发现 **`.PRJ` 声明的文件名与磁盘上的并不一样**
     （声明 ``.\\毕设.pm``，磁盘是 ``052201341刘其立道路毕设平面线形文件.pm``）。
     导出时被改过名。这个差异必须记下来，否则以后按台账找文件会找不到。
+
+    ``ir`` 给了就据此回填每个文件的实际桩号覆盖区间（FR-005）—— 台账原先一律写
+    ``None`` 并注明"单文件覆盖范围需逐文件解析，此处不猜"。现在解析结果就在手上，
+    不再是"不猜"而是"能算"，所以补上。**仍然不猜**：算不出就保持 NULL。
+    ★ 只填「实际解析出来的」，解析不出就 NULL —— 这正是 FR-008 禁止的那类补值
+    （给一个看着像真的默认区间，比留空危险得多）。
     """
     pj = prj["project"]
     segs = prj["segments"]
+    # ★ 实际覆盖区间（FR-005）。一个后缀一行；算不出的后缀不在这个字典里，
+    #   于是下面 `cov.get(suffix)` 返回 None → 仍写 NULL，不会被误填成 0。
+    cov = coverage_of_files(ir) if ir else {}
     # 分段数 > 1 时路段名要带序号，否则两个路段同名、没法分辨
     multi = len(segs) > 1
 
@@ -1349,7 +1508,7 @@ def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str
             "source_file": prj.get("source_file"),
         })
 
-    files, skipped = _plan_design_files(prj, project_dir=project_dir)
+    files, skipped = _plan_design_files(prj, project_dir=project_dir, cov=cov)
     return {
         "tables": {"design_project": [proj_row], "road_line": [line_row],
                    "road_section": sections, "section_design_attr": attrs,
@@ -1378,7 +1537,9 @@ def plan_project(prj: Mapping[str, Any], *, project_dir: Any = None) -> dict[str
 
 
 def _plan_design_files(prj: Mapping[str, Any],
-                       *, project_dir: Any = None) -> tuple[list[dict], list[str]]:
+                       *, project_dir: Any = None,
+                       cov: Mapping[str, tuple[float, float]] | None = None
+                       ) -> tuple[list[dict], list[str]]:
     """``[文件名]`` → ``design_file`` 行。返回值第二项是被跳过的（附原因）。"""
     on_disk: dict[str, str] = {}
     scanned = False
@@ -1391,10 +1552,16 @@ def _plan_design_files(prj: Mapping[str, Any],
                     on_disk.setdefault(p.suffix.lower(), p.name)
 
     rows, skipped = [], []
+    _cov = cov or {}
     for f in prj.get("files") or []:
         code, rel = f.get("kind_code"), f.get("rel_path")
         if not rel:
             continue                        # 工程声明了槽位但没用（实测 30 条里有 12 条）
+        # ★ `_sfx` 在**这里**算（而不是循环外）：三处行追加点都用它，
+        #   而其中两处在 `if not code:` 之**外** —— 原先它只在该分支里定义。
+        #   放循环外会抛 UnboundLocalError（`rel` 还没绑），所以必须在 rel 之后。
+        _sfx = ("." + _basename(rel).rsplit(".", 1)[-1].lower()
+                if _basename(rel) and "." in _basename(rel) else "")
         if not code:
             # `design_file.file_kind_code` 是 NOT NULL，而实测 .PRJ 里
             # 「涵洞数据文件(*.hda)」「涵洞系统参数文件(*.cys)」两行**没有键号**。
@@ -1437,8 +1604,10 @@ def _plan_design_files(prj: Mapping[str, Any],
                     "file_kind_name": f["kind_name"],
                     "file_name": _basename(rel) or rel,
                     "rel_path": rel,
-                    "coverage_from_station_km": None,
-                    "coverage_to_station_km": None,
+                    "coverage_from_station_km": (round(_cov[_sfx][0] / 1000.0, 6)
+                                                   if _sfx in _cov else None),
+                    "coverage_to_station_km": (round(_cov[_sfx][1] / 1000.0, 6)
+                                                 if _sfx in _cov else None),
                     "parse_status": _st,
                     "parse_note": _nm,
                     "remark": ("`.PRJ`〔文件名〕段里**声明了**它（有名字有路径），"
@@ -1480,8 +1649,10 @@ def _plan_design_files(prj: Mapping[str, Any],
             "file_kind_name": f["kind_name"],
             "file_name": declared or rel,
             "rel_path": rel,
-            "coverage_from_station_km": None,   # 单文件覆盖范围需逐文件解析，此处不猜
-            "coverage_to_station_km": None,
+            "coverage_from_station_km": (round(_cov[_sfx][0] / 1000.0, 6)
+                                           if _sfx in _cov else None),
+            "coverage_to_station_km": (round(_cov[_sfx][1] / 1000.0, 6)
+                                         if _sfx in _cov else None),
             "parse_status": status,
             "parse_note": note,
             "remark": None,
@@ -1512,8 +1683,10 @@ def _plan_design_files(prj: Mapping[str, Any],
                     "file_kind_name": kind_name,
                     "file_name": name,
                     "rel_path": None,
-                    "coverage_from_station_km": None,
-                    "coverage_to_station_km": None,
+                    "coverage_from_station_km": (round(_cov[_sfx][0] / 1000.0, 6)
+                                                   if _sfx in _cov else None),
+                    "coverage_to_station_km": (round(_cov[_sfx][1] / 1000.0, 6)
+                                                 if _sfx in _cov else None),
                     "parse_status": ("ok" if suffix in _IMPLEMENTED_SUFFIX
                                      else "blocked" if suffix in _BLOCKED_SUFFIX
                                      else "pending"),
@@ -1668,12 +1841,13 @@ def _project_remark(prj: Mapping[str, Any]) -> str:
 
 def ensure_project(prj: Mapping[str, Any], dao: Any, *,
                    project_dir: Any = None, writer: str = "M2",
-                   dry_run: bool = False) -> dict[str, Any]:
+                   dry_run: bool = False,
+                   ir: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """落档案与路段，返回 ids。**幂等**：按 ``project_uid`` / ``line_code`` 复用已有行。
 
     这一步必须在几何之前跑 —— 几何表用 FK 锚在 ``road_section.id`` 上。
     """
-    planned = plan_project(prj, project_dir=project_dir)
+    planned = plan_project(prj, project_dir=project_dir, ir=ir)
     t = planned["tables"]
     report: dict[str, Any] = {
         "planned": {k: len(v) for k, v in t.items()},

@@ -56,6 +56,9 @@ TESTS=(
   #   且用 DAO 依赖。它不是"再来一组几何断言"，而是钉工单 #3 四项改动的落地 ——
   #   每一条都配了前置断言，防止「删一个本来就没桩号的路段，然后说桩号还在」。
   "桩号基线|契约② v0.6：桩号脱离路段重锚路线（FR-002/003/004 + Q1，含元测试）|M1/M3|DAO|tests/contract/test_station_baseline.py"
+  "覆盖区间|契约② FR-005~008：实际覆盖区间回填 + 声明vs实际校验 + 原子性（离线，含元测试）|M2|PY|tests/contract/test_coverage_check.py"
+  "桩号文本|契约② FR-009~011：桩号文本↔数值双向还原（全 332 条）+ 加桩不得规整（含元测试）|M2|PY|tests/contract/test_station_text.py"
+  "桩号区间查询|契约② FR-018：按桩号区间查询（相交≠包含，含前置断言与证伪）|M3/M6|API|tests/contract/test_station_query.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

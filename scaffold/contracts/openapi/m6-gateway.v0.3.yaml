@@ -289,6 +289,85 @@ paths:
         "200":
           description: section_id、count 与 items 数组（每行一个变化点）
 
+  /v1/geometry/sections/{section_id}/elements:
+    get:
+      summary: 按桩号区间取线形单元（与区间**相交**的）
+      description: >-
+        FR-018：给 TruckSim / FEM 按里程切片用。
+        ★ 返回的是**与区间相交**的单元，不是「完全落在区间内」的。
+        一个 200 m 长的单元跨过 50 m 的查询窗时**必须**被返回 —— 否则采样会
+        整段丢失长单元，而返回的行数看着还挺正常。判断口径写在每一行的
+        `span_m` 上：它是**落在本区间内**的长度，被截断时与 `length_m` 不等。
+        调用方拿 `span_m` 做积分才对；拿 `length_m` 会把里程轴算错。
+        ⚠ `from_km > to_km` 返回 **422**（不是 500，也不是空列表）：
+        那是**请求写错了**，不是「这个区间没有数据」—— 返一样的响应就分不出来。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: from_km
+          in: query
+          required: true
+          description: 区间起点（km），含
+          schema:
+            type: number
+            minimum: 0
+        - name: to_km
+          in: query
+          required: true
+          description: 区间终点（km），含
+          schema:
+            type: number
+            minimum: 0
+      responses:
+        "200":
+          description: section_id、区间、count 与 items 数组（每项含 span_m）
+        "422":
+          description: 区间反了（from_km > to_km）
+
+  /v1/geometry/sections/{section_id}/samples:
+    get:
+      summary: 按桩号区间取某个逐桩段的行
+      description: >-
+        FR-018：逐桩采样（`.STA`/`.DMX`/`.WID`/`.SUP`/`.HDM` 等）。
+        ⚠ 未知 `segment` 返回 **422 并列出可用值**，不返回空列表 ——
+        空列表会被读成「这段在区间内没有数据」（数据缺口），
+        而实际是「段名写错了」（调用错误）。这两件事在下游的处置完全不同：
+        前者要去找源文件，后者要改代码。
+        ⚠ 各段的桩号列**不统一**：`station_sequence` 用 `station_local_km`
+        （它是基准本身），其余变化点表用 `station_km`，`superelev_transition`
+        用 `start_station_km`。这一层按段名自动选列，调用方不必知道。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: segment
+          in: query
+          required: true
+          description: 段名（station_sequence / profile_ground_point / profile_grade_point / roadbed_width / superelev_transition / cross_section_ground_point）
+          schema:
+            type: string
+        - name: from_km
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: 0
+        - name: to_km
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: 0
+      responses:
+        "200":
+          description: section_id、segment、区间、count 与 items 数组
+        "422":
+          description: 段名未知，或区间反了
   /v1/geometry/sections/{section_id}/superelevation:
     get:
       summary: 超高过渡（`.SUP` 的逐桩横坡控制点）

@@ -159,11 +159,16 @@ research.md 的实测结论改变了本特性的工作性质，**执行前务必
 
 **Independent Test**: 构造一个声明区间与实际不符的文件，导入必须失败且**零行入库**
 
-- [ ] T024 [P] [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 记录每个文件的实际桩号覆盖区间，写入 `design_file.coverage_from_station_km` / `coverage_to_station_km`（FR-005）
-- [ ] T025 [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 实现声明区间 vs 实际区间校验，不符时报出：文件、声明区间、实际区间、差值（米）（FR-006）
-- [ ] T026 [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 保证原子性：失败时该文件无任何部分数据入库（FR-007）
-- [ ] T027 [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 断言无补值/外推/默认填充（FR-008）
-- [ ] T028 [P] [US2] **元测试**：构造越界文件，断言导入失败**且** `count(*)` 未变 —— 对应 FR-007 的可证伪检查
+- [x] T024 [P] [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 记录每个文件的实际桩号覆盖区间，写入 `design_file.coverage_from_station_km` / `coverage_to_station_km`（FR-005）
+      ✅ 已落实：`station_range_of_segment` / `coverage_of_files`，实测 `.pm` 0~0.718682 km、`.JD` 0~1.531817、`.STA` 0~0.545874；IR 里没有的后缀保持 None。★ 区间按**后缀**而非文件名聚合（`.PRJ` 声明的名字 ≠ 磁盘名）；区间跨段取**并集**（`.tsftxt` 出 6 段，是同一文件的不同视图，交集会把区间缩成失真的值）。
+- [x] T025 [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 实现声明区间 vs 实际区间校验，不符时报出：文件、声明区间、实际区间、差值（米）（FR-006）
+      ✅ 已落实：`check_declared_coverage(ir, declared, tol_m=1.0)` 纯函数，报四样：文件、声明、实际、差值（米）；★ 声明区间从 **IR** 的 `declared_coverage` 取，不新增 `verify` 参数 —— 保持 verify 是 IR 的纯函数。默认容差 1 m —— 实测 `.PM` 比 `.WIM` 短 103.96 m 属**预期内**，零容差会把正常差异当错。
+- [x] T026 [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 保证原子性：失败时该文件无任何部分数据入库（FR-007）
+      ✅ ✅ 无需新代码：`load()` 里 `verify` → `raise LoadError` 已在 `with dao.write_txn` **之前**。测试用**静态顺序断言**钉住（真库测试只能证明「最终一致」，证不了「一行未写」）。
+- [x] T027 [US2] 在 `scaffold/modules/M2-ingest/design_import.py` 断言无补值/外推/默认填充（FR-008）
+      ✅ 已落实：空段/解析不出的段返回 **None 而非 (0,0)**（FR-008 明文禁止补值）；测试同时断言「未解析的后缀不在区间字典里」。
+- [x] T028 [P] [US2] **元测试**：构造越界文件，断言导入失败**且** `count(*)` 未变 —— 对应 FR-007 的可证伪检查
+      ✅ 已落实：`tests/contract/test_coverage_check.py`，6 组 21 断言。四条元测试——差 1.5 m 必须报、差 0.5 m 不报、声明了却未解析必须报。★ 写测试时自己踩了一个单位坑：`declared` 是 **km**，`545.874` 写成 `+0.5` 实为差 500 米，于是「容差内不报」假红。
 
 ---
 
@@ -173,20 +178,28 @@ research.md 的实测结论改变了本特性的工作性质，**执行前务必
 
 **Independent Test**: `tests/fixtures/design_import/weidi_sta_precision_edge.STA` 全部往返一致
 
-- [ ] T029 [P] [US3] 在 `scaffold/modules/M2-ingest/adapters/weidi/sta.py` 实现文本 ↔ 数值双向解析（FR-009）；不一致时报错并**指出具体行**
-- [ ] T030 [US3] 在 `scaffold/modules/M2-ingest/adapters/weidi/sta.py` 校验覆盖**全部**记录，不得只抽样（FR-010）
-- [ ] T031 [P] [US3] 在 `scaffold/modules/M2-ingest/adapters/weidi/sta.py` 保留桩号类型（整桩/加桩/端点），**加桩 MUST NOT 被规整**（FR-011）。实测：332 = 整桩 290 + 加桩 40 + 端点 2，且 40 个加桩全部紧跟一个整桩
-- [ ] T032 [P] [US3] 在 `scaffold/tests/contract/test_station_text.py` 写**元测试**：构造坏数据（文本与数值不符），断言被拒绝 —— 对应 FR-010 明文要求
+- [x] T029 [P] [US3] 在 `scaffold/modules/M2-ingest/adapters/weidi/sta.py` 实现文本 ↔ 数值双向解析（FR-009）；不一致时报错并**指出具体行**
+      ✅ 已落实：`station_to_text` / `text_to_station` / `roundtrip`；`STATION_TEXT_RE` 要求小数部分**至少 3 位**，宽松正则会放 `K0+54` 进来。报错带 `file`/`line_no`（FR-009 明文要求指出具体行）。
+- [x] T030 [US3] 在 `scaffold/modules/M2-ingest/adapters/weidi/sta.py` 校验覆盖**全部**记录，不得只抽样（FR-010）
+      ✅ 已落实：新增全量 fixture `weidi_sta_full_332.STA`（332 条），逐条往返；分母**从数据里数出来**而不写死。★ 没有全量 fixture 就直接失败，不静默改用摘录 —— 那会把「覆盖全部」偷换成「覆盖 30 条」。
+- [x] T031 [P] [US3] 在 `scaffold/modules/M2-ingest/adapters/weidi/sta.py` 保留桩号类型（整桩/加桩/端点），**加桩 MUST NOT 被规整**（FR-011）。实测：332 = 整桩 290 + 加桩 40 + 端点 2，且 40 个加桩全部紧跟一个整桩
+      ✅ 已落实：`station_type_of`。实测分型恰为 **290 + 40 + 2**；且断言「40 个加桩无一是 20 m 整数倍」与「全部紧跟一个整桩」—— 前者证「没被规整」，后者证「分型不是乱分的」。
+- [x] T032 [P] [US3] 在 `scaffold/tests/contract/test_station_text.py` 写**元测试**：构造坏数据（文本与数值不符），断言被拒绝 —— 对应 FR-010 明文要求
+      ✅ 已落实：`tests/contract/test_station_text.py`，5 组 20 测试。六条元测试——文本与数值不符、`K0+54` 缺位、缺 K、用负号、缺字段、报错带行号；另有一条钉住**两处 `station_text` 实现逐值一致**（避免轮状依赖导致重复实现漂移）。
 
 ---
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T033 在 `scaffold/modules/M3-rpdao/rpdao/pool.py` 实现按桩号区间查询（FR-018）：出 DAO 方法，利用既有索引 `idx_alignment_elem_station`
-- [ ] T034 在 `scaffold/modules/M6-api/app.py` 新增 HTTP 端点供 TruckSim / FEM 消费（FR-018）；**必须同时登记 `scaffold/contracts/openapi/m6-gateway.*.yaml`**，否则 `m6-路由` 测试报「实现缺契约」
-- [ ] T035 [P] 更新 `scaffold/contracts/design-import/README.md`：`geometry_point` 从「`source_absent` 缺口」改为已实现，并说明它是派生缓存而非独立源
-- [ ] T036 [P] 复核 `design_file` 中 `横断面绘图.3DR` 的 `absent` 登记仍然正确（`.3DR` 确实未生成，本次工作**不改变**这一事实 —— `geometry_point` 是派生的，不需要 `.3DR`）
-- [ ] T037 运行 `scaffold/run_contract_tests.sh`，确认 14/14 通过（含本特性新增的测试）
+- [x] T033 在 `scaffold/modules/M3-rpdao/rpdao/pool.py` 实现按桩号区间查询（FR-018）：出 DAO 方法，利用既有索引 `idx_alignment_elem_station`
+      ✅ 已落实：写在 `rpdao/repo.py`（而非任务文本写的 `pool.py`）—— DAO 方法全在 repo。`elements_by_station` + `samples_by_station`；★ **相交而非包含**，并多出一列 `span_m`（落在区间内的长度）。
+- [x] T034 在 `scaffold/modules/M6-api/app.py` 新增 HTTP 端点供 TruckSim / FEM 消费（FR-018）；**必须同时登记 `scaffold/contracts/openapi/m6-gateway.*.yaml`**，否则 `m6-路由` 测试报「实现缺契约」
+      ✅ 已落实：`/v1/geometry/sections/{id}/elements` 与 `/samples`，已同步登记 `m6-gateway.v0.3.yaml`（路由 15 → 17）。区间反了 / 段名未知 一律 **422**，不是空列表 —— 两者返一样的响应就分不出「没数据」还是「你写错了」。
+- [x] T035 [P] 更新 `scaffold/contracts/design-import/README.md`：`geometry_point` 从「`source_absent` 缺口」改为已实现，并说明它是派生缓存而非独立源
+      ✅ 已落实：README §「同类问题」改为「✅ 已于 002-US4 落地」；并更正了一个**旧的错误结论**——原文说「正解是 `.3DR`」，其实 `.3DR` 是**横断面**三维数据，而 `geometry_point` 要的是**平面线形逐桩 κ(s)**，由 `.pm`+`.STA`+`.ZDM` 完全可算。
+- [x] T036 [P] 复核 `design_file` 中 `横断面绘图.3DR` 的 `absent` 登记仍然正确（`.3DR` 确实未生成，本次工作**不改变**这一事实 —— `geometry_point` 是派生的，不需要 `.3DR`）
+      ✅ 已复核：实库 `design_file` 中 `横断面绘图.3DR` 仍为 `absent`，且 coverage 两列为 NULL。本次工作**确实不改变**这一事实 —— `geometry_point` 是派生的，不读 `.3DR`。
+- [x] T037 运行 `scaffold/run_contract_tests.sh`，确认 18/18 通过（数字随着新增契约演进：计划时 14，US2 加「覆盖区间」，三十七组加「桩号文本」与「桩号区间查询」）（含本特性新增的测试）
 
 ---
 

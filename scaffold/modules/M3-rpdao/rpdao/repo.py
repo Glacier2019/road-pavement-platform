@@ -598,6 +598,93 @@ class GeRepository(DomainRepository):
         }
 
 
+    # ---------------------------------------------------- FR-018 按桩号区间查询
+    #: 要素查询共用 SELECT。**用 `start_station_km` / `end_station_km` 判相交**：
+    #:
+    #: ★ 「与区间相交」而不是「完全落在区间内」（`BETWEEN` 那种写法）：
+    #:   一个 200 m 长的线形单元，只要它**跨过**查询区间，就必须被返回 ——
+    #:   否则按 50 m 一段采样时会**整段丢失**长单元，而返回的行数看着还挺正常。
+    #:   这是把「相交」写成「包含」时最典型的静默丢数据。
+    #:
+    #: ★ 用 `start_station_km` 排序（而非 `element_seq`）：调用方是按桩号切的，
+    #:   返回顺序必须是桩号序；`element_seq` 只在同一路段内有意义，跨路段会乱。
+    #:   `idx_alignment_elem_station` 正是 `(start_station_km, end_station_km)`，
+    #:   这个 ORDER BY 能直接吃到索引。
+    ELEMENTS_BY_STATION_SQL = """
+        SELECT e.id, e.section_id, e.element_seq, e.element_type,
+               e.start_station_km, e.end_station_km, e.length_m,
+               e.azimuth_deg, e.end_azimuth_deg,
+               e.radius_start_m, e.radius_end_m,
+               -- ★ 截到查询区间的长度。与 length_m 并存：length_m 是单元全长，
+               --   span_m 是「落在本区间里的那一段」。只给 length_m 的话，
+               --   按 50 m 采样的人会把 200 m 的长度当真，里程轴直接错。
+               (LEAST(e.end_station_km, %(to_km)s::numeric)
+                - GREATEST(e.start_station_km, %(from_km)s::numeric)) * 1000 AS span_m
+          FROM alignment_element e
+         WHERE e.section_id = %(sid)s
+           AND e.end_station_km   >= %(from_km)s::numeric
+           AND e.start_station_km <= %(to_km)s::numeric
+         ORDER BY e.start_station_km, e.element_seq
+         LIMIT %(limit)s
+    """
+
+    #: 逐桩表 → 桩号列名。**不是所有表都叫 `station_km`**，见下。
+    #:
+    #: ★ 这几张表里大多数是「变化点表」（`station_km`），而
+    #:   `station_sequence` 用的是**局部桩号** `station_local_km`（它是基准本身，
+    #:   不是“某处的一个变化点”）。混用会得到一个**永远为空**的查询 ——
+    #:   而且不报错，只是没数据。
+    #:
+    #: ⚠ `superelev_transition` 的区间列是 `start_station_km`（它一行覆盖一段），
+    #:   取 `station_km` 会直接 KeyError -> SQL 报列不存在。
+    SAMPLE_ANCHORS: dict[str, str] = {
+        "station_sequence": "station_local_km",
+        "profile_ground_point": "station_km",
+        "profile_grade_point": "station_km",
+        "roadbed_width": "station_km",
+        "superelev_transition": "start_station_km",
+        "cross_section_ground_point": "station_km",
+    }
+
+    def elements_by_station(self, section_id: int, from_km: float, to_km: float,
+                            *, limit: int = 2000) -> list[dict[str, Any]]:
+        """**与**桩号区间 `[from_km, to_km]` **相交**的线形单元（FR-018）。
+
+        给 TruckSim / FEM 按里程切片用。`span_m` = 落在本区间内的长度（米），
+        单元被区间截断时它与 `length_m` 不等 —— 拿它做积分才是对的。
+
+        越界不报错、返回空列表：**查询**不是**校验**。校验在导入侧（FR-006）。
+        """
+        if from_km > to_km:
+            raise ValueError(f"区间反了：from_km={from_km} > to_km={to_km}")
+        return self._dao.query(self.ELEMENTS_BY_STATION_SQL, {
+            "sid": section_id, "from_km": from_km, "to_km": to_km, "limit": limit,
+        })
+
+    def samples_by_station(self, section_id: int, seg: str, from_km: float,
+                           to_km: float, *, limit: int = 5000) -> list[dict[str, Any]]:
+        """某**逐桩段**落在桩号区间内的行（FR-018）。
+
+        `seg` 取 `SAMPLE_ANCHORS` 的键。传未知段名**报错**而不是返回空 ——
+        空列表会被读成「这段在区间内没有数据」，而实际是「段名写错了」。
+        两者在下游是两回事：前者是数据缺口，后者是调用错误。
+        """
+        if seg not in self.SAMPLE_ANCHORS:
+            raise ValueError(
+                f"未知段 {seg!r}；可用：{sorted(self.SAMPLE_ANCHORS)}"
+                "（不接受未知段名 —— 静默返回空会被读成「区间内无数据」）")
+        col = self.SAMPLE_ANCHORS[seg]
+        # 值来自上面的白名单常量，不是外部输入，故 f-string 拼列名是安全的；
+        # 参数（区间、路段）一律走占位符。
+        return self._dao.query(
+            f"SELECT * FROM {seg}"
+            " WHERE section_id = %(sid)s"
+            f"   AND {col} >= %(from_km)s::numeric"
+            f"   AND {col} <= %(to_km)s::numeric"
+            f" ORDER BY {col}"
+            " LIMIT %(limit)s",
+            {"sid": section_id, "from_km": from_km, "to_km": to_km, "limit": limit})
+
 _BUILDERS = {"LO": LoRepository, "GE": GeRepository}
 
 
