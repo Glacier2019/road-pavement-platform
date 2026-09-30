@@ -190,9 +190,11 @@ for i, s in enumerate(ss):
         row.append(fld(road_z(s, v)))             # 通道2..N: 各截面高程
     out.append("".join(row))
 
-with open("/data/cy/shujuku/.crgwork/route_0p1m.crg", "w", encoding="utf-8") as fh:
+import os
+OUT = os.environ.get("CRG_OUT", "route_0p1m.crg")
+with open(OUT, "w", encoding="utf-8") as fh:
     fh.write("\n".join(out) + "\n")
 
-print("已写出 route_0p1m.crg", file=sys.stderr)
+print("已写出 %s" % OUT, file=sys.stderr)
 print("  点数 %d, 横向列数 %d, 总行数 %d" % (len(ss), len(v_list), len(out)), file=sys.stderr)
 print("  末点 x=%.3f y=%.3f az=%.4f°" % (xs[-1], ys[-1], math.degrees(azs[-1])), file=sys.stderr)

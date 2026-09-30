@@ -2,7 +2,8 @@
 这正是 Chrono CRGTerrain 的 "export road mesh" / "export center line" 能力所做的事。"""
 import math
 
-P = "route_0p1m.crg"
+import sys
+P = sys.argv[1] if len(sys.argv) > 1 else "route_0p1m.crg"
 L = open(P, encoding="utf-8").read().splitlines()
 ih  = next(i for i, l in enumerate(L) if l.upper().startswith("$KD_DEFINITION"))
 imk = next(i for i, l in enumerate(L) if l.startswith("$$$$"))

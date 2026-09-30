@@ -2,7 +2,7 @@
 每条规则都注明其在官方源码中的依据。"""
 import re, sys
 
-P = "route_0p1m.crg"
+P = sys.argv[1] if len(sys.argv) > 1 else "route_0p1m.crg"
 L = open(P, encoding="utf-8").read().splitlines()
 
 # 段边界：数据段从 "$$$$" 行之后开始（crgLoader.c: {"$$$$", dFileSectionDataContent}）

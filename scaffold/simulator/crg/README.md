@@ -27,7 +27,7 @@
 ### 沙箱内可跑（纯 CPU，无需 GL）
 
 ```bash
-python3 gen_crg.py                 # 生成 route_0p1m.crg
+python3 gen_crg.py                 # 生成 route_0p1m.crg（可用 CRG_OUT=... 改路径）
 python3 validate_crg.py            # 按官方 loader 源码规则校验（16 条）
 python3 export_mesh.py             # 导出网格 / 中心线 / 边界
 
@@ -36,6 +36,9 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
     $OPENCRG/lib/libOpenCRG.a -lm
 ./crg_read_test route_0p1m.crg
 ```
+
+三个 Python 脚本都接受可选的 `.crg` 路径参数（默认 `route_0p1m.crg`），
+且只依赖 Python 标准库（`export_mesh.py` 亦然），可在任意目录直接运行。
 
 ### 宿主侧（需要 GPU / 显示）
 
