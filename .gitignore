@@ -18,6 +18,10 @@ __pycache__/
 .render/
 *.tmp
 
+# CRG 生成的工作目录：含 50 MB .crg、400 MB .obj、第三方源码与编译产物，
+# 均属可再生中间物，不入库（生成脚本见 scaffold/simulator/crg/）。
+.crgwork/
+
 # ============ 图件流水线的本地依赖与 QA 中间件 ============
 # .pylibs/ 是 PyMuPDF 的本地安装目录（约 26 MB，供技能自带的 PDF 审计脚本使用），
 # .mplcache/ 是 matplotlib 字体缓存，.qarenders/ 是视觉 QA 用的印刷尺寸栅格与
