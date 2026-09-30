@@ -43,11 +43,28 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
 ### 宿主侧（需要 GPU / 显示）
 
 ```bash
-./01_build_opencrg.sh                        # 编 OpenCRG v1.1.2
-./02_build_chrono.sh                         # 编 Chrono（Vehicle + OpenCRG + VSG）
-./04_run_visualize.sh                        # 开窗可视化（mesh 模式）
-./04_run_visualize.sh --boundary             # 边界曲线模式
+./01_build_opencrg.sh        # ①-1 编 OpenCRG v1.1.2（纯 CPU，可在任何机器上跑）
+./01b_build_vsg.sh           # ①-2 编 VSG 全家桶（Vulkan 后端，需 GPU + Vulkan SDK）
+./02_build_chrono.sh         # ①-3 编 Chrono（Vehicle + OpenCRG + VSG）
+./04_run_visualize.sh        # ①-4 开窗可视化（mesh 模式）
+./04_run_visualize.sh --boundary    # 边界曲线模式
 ```
+
+**必须先装 Vulkan SDK 与 `ninja-build`**：Chrono 的 `chrono_vsg` 用裸
+`find_package(vsg 1.1.0 REQUIRED)`，不会自动下载。官方锁定版本为
+VulkanSceneGraph v1.1.15 / vsgXchange v1.1.12 / vsgImGui v0.7.0。
+`01b_build_vsg.sh` 直接复用 Chrono 官方的 `buildVSG.sh` 以避免版本漂移。
+
+CMake 选项名均已对照官方源码核对：
+
+| 选项 | 出处 |
+|---|---|
+| `CH_ENABLE_MODULE_VEHICLE` / `CH_ENABLE_OPENCRG` | `src/chrono_vehicle/CMakeLists.txt` |
+| `CH_ENABLE_MODULE_VSG` | `src/chrono_vsg/CMakeLists.txt` |
+| `BUILD_DEMOS` / `BUILD_TESTING` | `src/CMakeLists.txt` |
+
+链接目标名是 `Chrono::vehicle` / `Chrono::vsg`（下划线，非驼峰），
+见 `add_library(Chrono_vehicle)` + `ALIAS Chrono::vehicle`。
 
 ## ★ 生成 .crg 时必须遵守的 5 条格式规则
 
