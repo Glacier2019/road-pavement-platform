@@ -38,11 +38,19 @@ echo "==> VSG 依赖 -> $VSG_INSTALL_DIR"
 #   故这里改成「有 SDK 就用，没有则回退到系统包」，并**明确打印走的是哪条路**。
 fail=0
 VULKAN_MODE=""
+VULKAN_EVIDENCE=""
 if [ -n "${VULKAN_SDK:-}" ] && [ -d "${VULKAN_SDK}" ]; then
-  VULKAN_MODE="LunarG SDK ($VULKAN_SDK)"
-elif [ -f /usr/include/vulkan/vulkan.h ] && ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
+  VULKAN_MODE="LunarG SDK"
+  VULKAN_EVIDENCE="VULKAN_SDK=$VULKAN_SDK"
+elif [ -f /usr/include/vulkan/vulkan.h ]; then
+  # ★ 2026-10-09 第二次修正：原先这里还要求 `ldconfig -p | grep libvulkan.so`，
+  #   但 ldconfig 装在 /sbin，**普通用户的 PATH 通常不含 /sbin** —— 于是
+  #   "command not found" 被 2>/dev/null 吞掉、&& 链断开，误报"没有 Vulkan 环境"。
+  #   （在 root 下测不出来，所以第一次没发现。）
+  #   现在只认头文件：libvulkan-dev 同时提供 vulkan/vulkan.h 与 libvulkan.so，
+  #   头文件在 = 开发包在，库由 CMake 的 FindVulkan 自己找。
   VULKAN_MODE="系统包 (libvulkan-dev)"
-  echo "   提示: 未设 VULKAN_SDK，回退到发行版 Vulkan 包。"
+  VULKAN_EVIDENCE="/usr/include/vulkan/vulkan.h 存在"
 else
   echo "!! 找不到 Vulkan 开发环境。二选一："
   echo "   (a) 发行版包（更快，推荐先试）:"
@@ -52,9 +60,15 @@ else
   echo "         解压后 source 其 setup-env.sh"
   echo "   ⚠ 注意: LunarG 的 apt 源只覆盖部分 Ubuntu 代号，"
   echo "     新版本（如 resolute）没有；且 wget -q 会静默吞掉 404。"
+  echo
+  echo "   诊断（把这几行贴出来即可定位）："
+  echo "     ls -l /usr/include/vulkan/vulkan.h"
+  echo "     dpkg -l | grep -E 'libvulkan|glslang'"
   fail=1
 fi
-[ -n "$VULKAN_MODE" ] && echo "==> Vulkan 来源: $VULKAN_MODE"
+if [ -n "$VULKAN_MODE" ]; then
+  echo "==> Vulkan 来源: $VULKAN_MODE  [$VULKAN_EVIDENCE]"
+fi
 
 command -v ninja >/dev/null || { echo "!! 缺 ninja：sudo apt install ninja-build"; fail=1; }
 command -v glslangValidator >/dev/null || {
