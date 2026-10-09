@@ -27,8 +27,16 @@ COPY modules/M3-rpdao/rpdao /app/rpdao
 # ⚠ adapters/ 要整目录 COPY：design_import 依赖 adapters.geom 与 adapters.weidi.*，
 #   逐个文件列容易漏（漏了就是启动即 ImportError）。
 COPY modules/M2-ingest/adapters /app/adapters
-COPY modules/M2-ingest/design_import.py ./
-COPY modules/M2-ingest/models.py modules/M2-ingest/violations.py modules/M2-ingest/app.py ./
+
+# ⚠ 顶层 .py 也一律通配 COPY，不再逐个列文件名。
+#   2026-10-09 实测教训：`geometry_solver.py`（09-28 为 design_import 新增）漏在
+#   逐个列名的清单外，而 `design_import.py` 第 40 行 `import geometry_solver` ——
+#   镜像一重建就启动即 ModuleNotFoundError、容器 crash-loop。
+#   之所以长期没暴露，是因为当时跑着的镜像停在 09-25、根本不含 design_import 的新代码：
+#   **陈旧镜像会把"新代码没进镜像"这类错误整个盖住**。
+#   顶层 .py 恰好就是全部运行时模块，通配可杜绝再次漏列；
+#   子目录 tools/ 不受 `*.py` 影响，仍按下方说明刻意不进镜像。
+COPY modules/M2-ingest/*.py ./
 
 # 一次性转换工具 tools/tsf2txt.py **刻意不进镜像**：它是运维在导入前手工跑的
 # （.tsf → .tsftxt），不是运行时的一部分；放进来会诱使别人以为服务能自己转换。
