@@ -196,7 +196,7 @@ crgCalcUtilityData: uMax = 5805.400, uMaxClosed = 8066.053
 要彻底消掉，得在消费侧自建网格（不用 `UseMeshVisualization(true)`），
 那是下一步的事。
 
-## ★ 四个会静默失败的坑（实测，均已修）
+## ★ 五个会静默失败的坑（实测，均已修）
 
 这三个都不是"报错"，而是**看起来成功、实际残缺**。凡在宿主上跑这几个脚本，
 先读这一节，能省一次 30 分钟的无效编译。
@@ -389,6 +389,113 @@ ChTriangleMeshConnected::WriteWavefront(out_dir + "/" + m_mesh_name + ".obj", me
 又一次"报告成功但没成功"。现在改成先 `create_directories`，写完再核实
 文件真的存在、并打印字节数。
 
+### 坑五：Chrono 数据目录 —— 开窗阶段的两次段错误
+
+**症状**：编译、链接、CRG 读取、网格导出、CSV 全部正常，最后开窗那一步
+`段错误（核心已转储）`，退出码 139。`04_run_visualize.sh` 只报"第 67 行段错误"，
+看不出崩在哪。
+
+**根因一：`GetChronoDataPath()` 的默认值是 `"../data/"`。**
+
+`chrono/core/ChDataPath.cpp` 里就这一句：
+
+```cpp
+static std::string chrono_data_path("../data/");
+```
+
+**没有任何东西会自动改它** —— 是**应用程序**的责任。`ChVisualSystemVSG`
+构造时把它塞进 VSG 的搜索路径：
+
+```cpp
+m_options->paths.push_back(GetChronoDataPath());
+```
+
+于是 `Initialize()` 拿它去读 `vsg/fonts/OpenSans-Bold.vsgb`，相对**当前工作
+目录**，读不到，打印
+
+```
+Failed to read font : vsg/fonts/OpenSans-Bold.vsgb
+```
+
+然后**直接 `return`** —— 此时窗口和 viewer 都还没建。而 `Run()` 的实现就是
+
+```cpp
+bool ChVisualSystemVSG::Run() { return m_viewer->active(); }
+```
+
+空指针解引用 → 段错误。
+
+**我原先把 `Failed to read font` 当成"无害且不可避免的警告"写进了本 README。**
+它不无害 —— 它是整条崩溃链的起点。
+
+**根因二：`lexically_normal()` 会吃掉结尾斜杠，而 `GetChronoDataFile` 是字符串拼接。**
+
+第一版修复我写成
+
+```cpp
+SetChronoDataPath(std::filesystem::absolute(CHRONO_DATA_DIR, ec).lexically_normal().string());
+```
+
+`lexically_normal()` 把 `.../share/chrono/data/` 规范成 `.../share/chrono/data`。
+而 `GetChronoDataFile` 是
+
+```cpp
+return chrono_data_path + filename;
+```
+
+拼出来是 `.../chrono/datalogo_chrono_alpha.png`。`ChMainGuiVSG` 构造时读不到 logo：
+
+```cpp
+auto texData = vsg::read_cast<vsg::Data>(m_app->m_logo_filename, options);
+m_app->m_logo_texture = vsgImGui::Texture::create_if(texData, texData);  // texData 空 → 返回空
+```
+
+紧接着 `compile()` 的第一句无条件解引用：
+
+```cpp
+m_app->m_logo_texture->compile(context);   // → 段错误
+```
+
+**崩在哪，靠反汇编确认**（`ChMainGuiVSG::compile` 前 30 字节）：
+
+```
++16:  mov 0x18(%rdi),%rax      ; rax = this->m_app
++20:  mov 0x5c0(%rax),%rdi     ; rdi = m_app->m_logo_texture
++27:  mov (%rdi),%rax          ; rdi = 0 → 段错误
++30:  call *0x88(%rax)         ; Texture::compile
+```
+
+**★ 这里最值得记的是自检本身错了。** 我加的那道"字体就位"检查**通过了**，
+因为它用的是
+
+```cpp
+std::filesystem::path(GetChronoDataPath()) / "vsg/fonts/OpenSans-Bold.vsgb"
+```
+
+`operator/` 会自动补斜杠，而真正出事的那条路径用的是字符串拼接。
+**又一次用另一种方法验证了被测代码。** 现在两道自检都改走真实函数
+（`GetChronoDataFile`），字体和 logo 一起查。
+
+**正确写法**（官方同款见 `chrono/template_project/CMakeLists.txt:107`）：
+
+```cmake
+target_compile_definitions(demo_CRG_visualization PRIVATE
+  "CHRONO_DATA_DIR=\"${CHRONO_DATA_DIR}\"")
+```
+
+```cpp
+std::string data_dir = CHRONO_DATA_DIR;
+if (data_dir.empty() || data_dir.back() != '/') data_dir += '/';   // ★ 斜杠不能丢
+SetChronoDataPath(data_dir);
+```
+
+**判据**：沙箱里 `timeout 25 ./demo_CRG_visualization route_0p1m.crg 0`
+退出码 **124**（窗口开着没崩）即通过；修之前是 **139**。
+
+**顺带一条备用路**：万一将来 Chrono 可视化系统本身出问题，
+`chrono_export/route_0p1m_mesh.obj` 可以直接用官方 `vsgviewer` 打开
+（纯 VSG，绕开 Chrono），实测能开窗。
+
 ### 一条通用教训
 
 > **一个症状看起来像已知问题，不等于它就是那个问题。**
@@ -408,7 +515,12 @@ ChTriangleMeshConnected::WriteWavefront(out_dir + "/" + m_mesh_name + ".obj", me
 凭印象写下一个 `EnableAbsFrameCoords()`，编译器说不存在 → "API 都来自
 官方类参考，非猜测"；`WriteWavefront` 刚失败，下一行照样打印「已导出网格」
 → "导出成功了"；`ExportMeshWavefront` 失败被当成"boundary 模式的问题"，
-其实是目录没建 → 又一个认错方向的症状。
+其实是目录没建 → 又一个认错方向的症状；`Failed to read font` 被我归档成
+"无害且不可避免的警告"，其实它直接终止了 `Initialize()`，是整条段错误链的
+起点 → "那条警告可以忽略"；`lexically_normal()` 悄悄吃掉了结尾斜杠，而我的
+自检用的是会自动补斜杠的 `operator/` → "自检通过"；探针编译失败、我接着跑的
+却是上一次的旧二进制，那句"探针退出码 0"属于新进程 → "探针验证过了"；
+`cmake --build … | head` 之后取到的 `$?` 是 `head` 的 → "编译退出码 0"。
 
 **这条教训的操作化**：检查要**双向**都对，不只是"会失败"。
 

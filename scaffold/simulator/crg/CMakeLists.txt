@@ -38,3 +38,22 @@ target_link_libraries(demo_CRG_visualization PRIVATE
   Chrono::Chrono_vehicle
   Chrono::Chrono_vsg
 )
+
+# ★ 2026-10-09：把 Chrono 数据目录烘进可执行文件。
+#
+#   不加这一条的后果是**段错误**，而且现场离原因很远：
+#   ChDataPath.cpp 的默认值是硬编码的相对路径 "../data/"，
+#   ChVisualSystemVSG 构造时把它 push 进 VSG 的搜索路径，
+#   Initialize() 拿它去读 vsg/fonts/OpenSans-Bold.vsgb → 读不到 →
+#   打印 "Failed to read font" 之后**直接 return**，窗口和 viewer 都没建，
+#   而 Run() 就是 `return m_viewer->active();` → 空指针解引用。
+#
+#   CHRONO_DATA_DIR 是 ChronoConfig.cmake 给消费者准备的变量
+#   （宿主实测值 .../chrono/lib/cmake/Chrono/../../../share/chrono/data/），
+#   find_package(Chrono) 之后即可用。绝对化一下，免得带 .. 看着心里没底。
+#
+#   官方同款写法见 chrono/template_project/CMakeLists.txt:107。
+get_filename_component(CHRONO_DATA_DIR_ABS "${CHRONO_DATA_DIR}" ABSOLUTE)
+target_compile_definitions(demo_CRG_visualization PRIVATE
+  "CHRONO_DATA_DIR=\"${CHRONO_DATA_DIR_ABS}\""
+)

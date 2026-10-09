@@ -32,6 +32,14 @@
 
 #include "chrono/physics/ChSystemNSC.h"
 #include "chrono/core/ChBezierCurve.h"
+// ★ 2026-10-09：为了 SetChronoDataPath()。见下面 main 开头的说明。
+#include "chrono/core/ChDataPath.h"
+
+// CHRONO_DATA_DIR 由 CMakeLists.txt 传进来（官方惯用法）。
+// 宁可编译期报错，也不要运行期静默失败。
+#ifndef CHRONO_DATA_DIR
+#error "CHRONO_DATA_DIR 未定义：CMakeLists.txt 需有 target_compile_definitions(... \"CHRONO_DATA_DIR=\\\"${CHRONO_DATA_DIR}\\\"\")"
+#endif
 #include "chrono_vehicle/terrain/CRGTerrain.h"
 #include "chrono_vsg/ChVisualSystemVSG.h"
 
@@ -58,6 +66,60 @@ static void DumpCurve(const std::shared_ptr<ChBezierCurve>& c, const std::string
 }
 
 int main(int argc, char* argv[]) {
+    // ★★★ 2026-10-09：必须先设 Chrono 数据目录，否则可视化**静默失败并段错误**。
+    //
+    //   症状：跑到开窗那步 SIGSEGV（退出码 139）。
+    //   根因：chrono/core/ChDataPath.cpp 里那句
+    //           static std::string chrono_data_path("../data/");
+    //        是个**硬编码的相对路径**，没有任何东西会自动改它。
+    //        ChVisualSystemVSG 构造时做
+    //           m_options->paths.push_back(GetChronoDataPath());
+    //        于是搜索路径里多出一条 "../data/"；Initialize() 再拿它去读
+    //           vsg/fonts/OpenSans-Bold.vsgb
+    //        那是相对**当前工作目录**的，读不到，于是打印
+    //           Failed to read font : vsg/fonts/OpenSans-Bold.vsgb
+    //        然后**直接 return** —— 此时窗口和 viewer 都还没建，m_viewer 是空指针。
+    //        而 Run() 的实现就是
+    //           bool ChVisualSystemVSG::Run() { return m_viewer->active(); }
+    //        → 空指针解引用 → 段错误。
+    //
+    //   ★ 我原先把 "Failed to read font" 当成"无害且不可避免的警告"写进了 README。
+    //     它不无害 —— 它直接终止了初始化。又一次栽在"被我当噪音的那一行"。
+    //
+    //   官方惯用法（chrono/template_project/CMakeLists.txt:107）：
+    //       target_compile_definitions(my_demo PRIVATE "CHRONO_DATA_DIR=\"${CHRONO_DATA_DIR}\"")
+    //   CMake 侧已照此把 CHRONO_DATA_DIR 传进来（绝对路径）。
+    //   沙箱双向验证：设之前 GetChronoDataPath()="../data/"、字体读失败；
+    //                设之后为绝对路径、字体读成功。
+    {
+        // ★★ 2026-10-09：**结尾斜杠不能丢。**
+        //   GetChronoDataFile(f) 的实现是纯字符串拼接：
+        //       return chrono_data_path + filename;
+        //   所以 chrono_data_path 必须以 '/' 结尾。
+        //
+        //   我第一版写成
+        //       SetChronoDataPath(std::filesystem::absolute(CHRONO_DATA_DIR, ec).lexically_normal().string());
+        //   lexically_normal() 把 ".../share/chrono/data/" 规范成 ".../share/chrono/data"
+        //   —— 末尾斜杠没了。于是 GetChronoDataFile("logo_chrono_alpha.png") 拼出
+        //       .../share/chrono/datalogo_chrono_alpha.png   ← 不存在
+        //   ChMainGuiVSG 构造时读不到 logo → vsgImGui::Texture::create_if 返回空
+        //   → m_logo_texture 为空 → 紧接着 compile() 里
+        //       m_app->m_logo_texture->compile(context);
+        //   解引用空指针 → 又一次段错误（反汇编：mov 0x5c0(%rax),%rdi 得到 0）。
+        //
+        //   ★ 更值得记的是：我当时的"字体就位"自检**通过了**，因为我用的是
+        //     std::filesystem::path(...) / "vsg/fonts/..."  —— operator/ 会自动补斜杠，
+        //     而真正出事的那条路径用的是字符串拼接。
+        //     又一次：**用另一种方法验证了被测代码**。教训是自检必须走真实路径。
+        std::string data_dir = CHRONO_DATA_DIR;
+        if (data_dir.empty() || data_dir.back() != '/')
+            data_dir += '/';
+        SetChronoDataPath(data_dir);
+        std::cout << "==> Chrono 数据目录: " << data_dir << std::endl;
+        std::cout << "    logo 实测路径: " << GetChronoDataFile("logo_chrono_alpha.png")
+                  << std::endl;
+    }
+
     const std::string crg_file = (argc > 1) ? argv[1] : "route_0p1m.crg";
     // ★ 2026-10-09：与 04_run_visualize.sh 的约定对齐 —— 那边写的是
     //     MODE=0   # 0=mesh 1=boundary
@@ -85,9 +147,14 @@ int main(int argc, char* argv[]) {
     // ★ 2026-10-09：IsPathClosed() 不是文件里的标志，是 OpenCRG 的**几何猜测**。
     //   crgStatistics.c:258-350 的规则：起点航向与终点航向夹角 < 60°
     //   （divisor = cos(夹角) > 0.5），且两条延长线交在合适位置，就置 uIsClosed=1。
-    //   我们这条路航向从 158° 到 156°，只差 2° —— 一条近似直线的路，
-    //   两端延长线当然相交，于是被判成"闭合"。OpenCRG 自己的日志写的也是
-    //   "reference line may be closed"（*可能*）。
+    //   实测（读 OpenCRG 自己的 NOTICE）：起点 phi = 2.6087 rad = 149.5°，
+    //   终点 phi = 2.0462 rad = 117.2°，**相差 32.2°**。32.2 < 60，于是
+    //   divisor = cos(32.2°) = 0.845 > 0.5，判成"可能闭合"，并给出
+    //   uCloseMin = -2260.653、uCloseMax = 8066.053 —— 意思是"这条路若
+    //   向前后各延长 2260 m 就会闭合成环"，纯属猜测。任何一条长而缓弯
+    //   （总转角 < 60°）的路都会中这个招。
+    //   ★ 这里原先写的是"158° 到 156°，只差 2°"，那是拿 1000 m 弦长当
+    //     航向代理算出来的，**是错的**。真值来自 OpenCRG 自己的 NOTICE。
     //   文件里**没有**任何选项能关掉它（dCrgRefLineCloseTrack 是"请求闭合"，
     //   而 crgLoader.c:2455 规定已闭合的路不许再请求闭合，直接 FATAL）。
     //   所以这里不把它当结论报，只当"库的看法"，后面再补一个真事实。
@@ -142,6 +209,41 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- 可视化窗口
+    // ★ 2026-10-09：开窗之前先确认字体在。理由见 main 开头 ——
+    //   字体读不到时 Initialize() 会提前 return，留下空 viewer，
+    //   随后 Run() 段错误。现场离原因很远，这里把它变成一句人话。
+    {
+        // ★ 两道自检都必须走**真实代码路径**：
+        //   字体那处 Chrono 用的是 vsg::findFile(相对名, m_options)，options->paths 里
+        //   就有 GetChronoDataPath()；logo 那处用的是 GetChronoDataFile() 字符串拼接。
+        //   我上一版只查了字体，而且用的是 operator/ —— 于是"通过"了，
+        //   可字符串拼接那条路已经断了。这次两条都查。
+        const std::string font_path = GetChronoDataFile("vsg/fonts/OpenSans-Bold.vsgb");
+        const std::string logo_path = GetChronoDataFile("logo_chrono_alpha.png");
+        std::cout << "==> 字体: " << font_path << std::endl;
+        std::cout << "==> logo: " << logo_path << std::endl;
+
+        bool ok = true;
+        if (!std::filesystem::exists(font_path)) {
+            std::cout << "!! 字体不存在。ChVisualSystemVSG::Initialize 会打印\n"
+                      << "   \"Failed to read font\" 并提前 return，留下空 viewer，\n"
+                      << "   随后 Run() 解引用空指针 → 段错误。" << std::endl;
+            ok = false;
+        }
+        if (!std::filesystem::exists(logo_path)) {
+            std::cout << "!! logo 不存在。ChMainGuiVSG 构造时读不到它，\n"
+                      << "   m_logo_texture 会是空指针，compile() 里\n"
+                      << "   m_app->m_logo_texture->compile(context) → 段错误。\n"
+                      << "   ★ 常见原因：SetChronoDataPath 的路径结尾少了 '/'，\n"
+                      << "     GetChronoDataFile 是纯字符串拼接。" << std::endl;
+            ok = false;
+        }
+        if (!ok) {
+            std::cout << "   网格与 CSV 都已写出，本次到此为止。" << std::endl;
+            return 1;
+        }
+    }
+
     ChVisualSystemVSG vis;
     vis.AttachSystem(&sys);
     vis.SetWindowSize(ChVector2i(1600, 900));
