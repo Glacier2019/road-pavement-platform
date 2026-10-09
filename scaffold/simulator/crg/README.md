@@ -42,13 +42,14 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
 
 ### 宿主侧（需要 GPU / 显示）
 
-**先装前置，否则下面四个脚本会依次失败**（实测踩过，见文末「已知限制」）：
+**先装前置，否则下面四个脚本会依次失败**（实测踩过，见文末「两个会静默失败的坑」）：
 
 ```bash
 # 1) 编译工具与 GL 头文件（02 脚本会逐个 dpkg -s 检查，缺一个就退出）
 sudo apt-get install -y ninja-build cmake g++ curl unzip \
   libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxext-dev \
   libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev \
+  libeigen3-dev \
   fonts-noto-cjk
 
 # 2) Vulkan 开发环境 —— 二选一
@@ -61,6 +62,10 @@ sudo apt-get install -y libvulkan-dev vulkan-tools glslang-tools
 # 3) 确认 GPU 驱动真的能跑 Vulkan（VSG 是 Vulkan 后端，不能纯软件）
 vulkaninfo --summary
 ```
+
+> ★ **`libeigen3-dev` 不是可选项，而且缺了以后报错方式极其误导。**
+> 它不是 GL 那套的附庸，是 Chrono 核心的硬依赖——缺了它 configure 会
+> **退出码 0 地**配置出一个不含任何模块的构建。详见文末「坑二」。
 
 > ⚠ **不要用 LunarG 的 apt 源**除非你确认自己的发行版代号在其中。
 > 实测 `packages.lunarg.com/vulkan/lunarg-vulkan-<代号>.list` 只覆盖部分
@@ -147,3 +152,106 @@ $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 本开发沙箱无 `/dev/dri`、无 GPU 设备节点、capabilities 全 0、`sudo` 被
 `no-new-privileges` 禁用，**任何 GL 渲染都不可用**。生成/校验/导出/官方库读取
 均可在沙箱内完成；**可视化窗口必须在宿主侧运行**。
+
+## ★ 两个会静默失败的坑（实测，均已修）
+
+这两个都不是"报错"，而是**看起来成功、实际残缺**。凡在宿主上跑这几个脚本，
+先读这一节，能省一次 30 分钟的无效编译。
+
+### 坑一：vsgImGui 缺子模块 → `致命错误：不是 Git 仓库`
+
+**症状**（埋在几千行输出中间，末尾还会打印"完成"）：
+
+```
+------------------------ Configure vsgImGui
+致命错误：不是 Git 仓库（或者任何父目录）：.git
+CMake Error at CMakeLists.txt:39 (message):
+  git submodule update --init --recursive failed with 128
+ninja: error: loading 'build-Release.ninja': No such file or directory
+```
+
+**根因**：`01b` 用 codeload tarball 取源码（本机 `github.com` 的 git 协议
+完全不通），而 tarball 里**没有 `.git`**。vsgImGui v0.7.0 的 CMakeLists
+第 25-43 行判断"子模块在不在"用的是**纯文件存在性检查**：
+
+```cmake
+if ( (NOT EXISTS src/imgui/imgui.h) OR (NOT EXISTS src/implot/implot.h) )
+    execute_process(COMMAND git submodule update --init --recursive ...)
+    if(NOT GIT_SUBMOD_RESULT EQUAL "0")
+        message(FATAL_ERROR "... please checkout submodules")
+```
+
+tarball 会建出 `src/imgui`、`src/implot` 两个**空目录**（内容不在包内），
+判断成立 → 去调 `git` → 没有 `.git` → FATAL_ERROR。
+
+**修法**：既然判断只看文件，就把两个子模块按 v0.7.0 钉死的 commit 填进去，
+它连 `git` 那一行都不会执行。commit 取自 `api.github.com` 的 `git/trees`
+端点（本机 git 协议不通，这是唯一可靠来源）：
+
+| 子模块 | commit |
+|---|---|
+| `ocornut/imgui` | `993fa347495860ed44b83574254ef2a317d0c14f` |
+| `epezent/implot` | `f156599faefe316f7dd20fe6c783bf87c8bb6fd9` |
+
+**这一步不能并进 `fetch_src`**：`fetch_src` 见到 `CMakeLists.txt` 就跳过，
+而 vsgImGui 目录在上一轮已经下好了——"复用旧目录"恰恰就是出问题的场景。
+
+这不是可选项：Chrono 的 `src/chrono_vsg/CMakeLists.txt` 第 31 行是
+`find_package(vsgImGui REQUIRED)`，缺了它 `02_build_chrono.sh` 必定失败。
+
+### 坑二：缺 Eigen3 → configure 退出码 0，但一个模块都不编
+
+**症状**——本项目见过最会骗人的一种：
+
+```
+ERROREigen3 cannot be found.
+  Provide Eigen3_DIR (location of Eigen3Config.cmake) or else ...
+-- Configuring done (1.4s)          ← 看着一切正常
+-- Generating done
+CMake Warning:
+  Manually-specified variables were not used by the project:
+    CH_ENABLE_MODULE_VEHICLE  CH_ENABLE_MODULE_VSG  CH_ENABLE_OPENCRG ...
+configure 退出码: 0                 ← 成功退出
+```
+
+**根因**：Chrono 的 `src/CMakeLists.txt` L126-149：
+
+```cmake
+find_package(Eigen3 5.0 QUIET)
+if(NOT Eigen3_FOUND)
+   find_package(Eigen3 3.3 QUIET)
+endif()
+if(Eigen3_FOUND) ...
+else()
+  message(ERROR "Eigen3 cannot be found.\n" ...)   # ← 不是 FATAL_ERROR
+  return()                                          # ← 顶层 return()
+endif()
+```
+
+`message(ERROR ...)` 在 CMake 里**不是致命错误**，只打印一行带 `ERROR`
+前缀的字样；紧接着的 `return()` 在顶层 CMakeLists 里会**终止该文件后续
+所有内容** —— 包括 L535-561 那一串 `add_subdirectory(chrono_vehicle /
+chrono_vsg / ...)`。
+
+**后果**：没有 Eigen3 时 Chrono 会"成功地"配置出一个**不含任何模块**的
+构建，编译 30 分钟只得到 core，然后 `04_run_visualize.sh` 在完全无关的
+地方报错。`set -e` 拦不住它——退出码是 0。
+
+**修法**：`02_build_chrono.sh` 加了三道防线——依赖门查 `libeigen3-dev`；
+configure 输出落盘并断言 `Eigen3 found` 且无 "not used" 警告；收尾断言
+`Chrono_vehicle` / `Chrono_vsg` / `CRGTerrain.h` **真的装出来了**。
+
+> 为什么收尾要查"装出来没有"：原来那句 `ls 源码里的 CRGTerrain.h` 是
+> **恒真**的——那个文件在 tarball 里必然存在，无论模块有没有被编。等于没查。
+
+### 一条通用教训
+
+> **一个症状看起来像已知问题，不等于它就是那个问题。**
+
+本项目反复踩到的形态都是同一个：**失败是静默的，所以症状出现在离根因很远
+的地方**。已归档的实例：`wget -q` 吞掉 LunarG 的 404 → "装好了"；
+`ldconfig` 不在普通用户 PATH 且 `2>/dev/null` → "没环境"；`grep` 无匹配 +
+`set -e` → "跑完了"；`~/.gitconfig` 把 github.com 改写到了失效镜像 →
+"脚本地址写错了"；官方脚本硬编码 `$HOME/Sources` → "重定向生效了"；
+一次打印 `Configuring done` 且 0 错误的 CMake 运行其实**一个模块都没处理**
+→ "configure 通过了"。
