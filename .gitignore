@@ -22,6 +22,16 @@ __pycache__/
 # 均属可再生中间物，不入库（生成脚本见 scaffold/simulator/crg/）。
 .crgwork/
 
+# CRG / 网格**产物**本身：脚本默认写到当前目录，在 scaffold/simulator/crg/ 下
+# 跑一次就会留下约 97 MB 的 .crg 与数百 MB 的 .obj。全部可由
+# gen_crg.py / export_mesh.py 从库中数据再生，故不入库。
+# 注意区分：**脚本**要入库（它们是方法），**产物**不入库（它们是结果）。
+scaffold/simulator/crg/*.crg
+scaffold/simulator/crg/*.obj
+scaffold/simulator/crg/*.csv
+scaffold/simulator/crg/build/
+scaffold/simulator/crg/chrono_export/
+
 # ============ 图件流水线的本地依赖与 QA 中间件 ============
 # .pylibs/ 是 PyMuPDF 的本地安装目录（约 26 MB，供技能自带的 PDF 审计脚本使用），
 # .mplcache/ 是 matplotlib 字体缓存，.qarenders/ 是视觉 QA 用的印刷尺寸栅格与
