@@ -94,33 +94,116 @@ grep -E "^# +- *(VulkanSceneGraph|vsgXchange|vsgImGui|glslang|assimp|draco|ktx)"
   "$WORK/buildVSG.sh" | sed 's/^# *//' \
   || echo "   (未能从官方脚本注释抓到版本号——仅影响这行显示，继续编译)"
 
-# --- ★ 2026-10-09 第四次修正：绕过 git 全局的 GitHub 镜像改写
+# ============================================================================
+# ★ 2026-10-09 第五次修正：改走 codeload tarball，彻底绕开 git 协议
+# ============================================================================
+# 下载这一步连续栽了三次，且每次症状都离根因很远：
 #
-# 很多国内机器在 ~/.gitconfig 里配了：
-#     [url "https://<镜像>/https://github.com/"]
-#         insteadOf = https://github.com/
-# 而官方 buildVSG.sh 用的是**干净的** https://github.com/...（实测 "ghfast" 出现 0 次），
-# 于是 8 个 git clone 全被改写到镜像站。镜像站一旦挂掉，症状是
-# 8 个仓库依次超时 / "连接被对方重置"，紧接着几十行 CMake 报错 —— 全是连锁反应，
-# 根因（一条 git 配置）离症状极远，极易误判成"脚本地址写错了"。
+#   ① 8 个 git clone 全被 ~/.gitconfig 里的镜像改写劫持到已挂掉的 ghfast.top
+#      （官方脚本里 "ghfast" 出现 0 次，是用户机器上的 url.*.insteadOf 干的）
+#   ② 绕开镜像走直连后拿到 6/8，剩 draco / glslang / ktx 失败
+#      （超时 134s、"Error in the HTTP2 framing layer"）
+#   ③ 实测确认：**本机 github.com 的 git 协议整体不可用**
+#        git ls-remote github.com/vsg-dev/vsgImGui   → 超时
+#        git ls-remote github.com/google/googletest  → 超时
+#      而 **codeload.github.com 的 tarball 路线又快又稳**：
+#        draco    60 MB / 4.3 s
+#        glslang   4 MB / 1.2 s
+#        KTX     212 MB / 13 s   （连测 3 次全成功）
 #
-# 处理：检测到改写时**实测** github.com 直连是否可用；
-#   可用 → 本次编译忽略该改写（GIT_CONFIG_GLOBAL 指向空配置，只影响本进程及子进程，
-#          **不改用户配置**，可逆）；
-#   不可用 → 沿用用户配置（说明那个镜像确实是他需要的）。
-if git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null | grep -q 'https://github\.com/'; then
-  echo "==> 检测到 git 全局配置把 github.com 改写到了镜像："
-  git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null | sed 's/^/     /' || true
-  if GIT_CONFIG_GLOBAL=/dev/null timeout 25 git ls-remote --exit-code \
-       https://github.com/vsg-dev/VulkanSceneGraph HEAD >/dev/null 2>&1; then
-    echo "    实测 github.com 直连可用 → 本次编译忽略该改写"
-    echo "    （仅本进程及其子进程生效，不动你的 ~/.gitconfig）"
-    export GIT_CONFIG_GLOBAL=/dev/null
-  else
-    echo "    ⚠ github.com 直连不可用 → 沿用你的镜像配置"
-    echo "      若镜像本身也连不上，需先修好网络再重跑"
+# ⚠ 一个反直觉的点：`http.version = HTTP/1.1` **三个月前就配好了**
+#   （~/.gitconfig 修改时间 2026-07-22，早于所有失败）。所以"HTTP/1.1 治 framing
+#   错误"这条常见经验在这里**无效** —— 不是 HTTP 版本问题，是这条链路本身不通。
+#   不要因为"看起来像已知问题"就跳过实测。
+#
+# 做法：不再 git clone。从 codeload 取 tar.gz 解压到 $HOME/Sources/，
+# 再把官方脚本第 29 行的 `DOWNLOAD=ON` 改成 `OFF` —— 它就改为从这些目录读源码。
+# **官方脚本的逻辑一个字都不改**，只翻它自己的开关。
+#
+# 附带好处：DOWNLOAD=OFF 会跳过 update_glslang_sources.py（拉 SPIRV-Tools），
+# 而官方脚本对 glslang 固定传 -DENABLE_OPT=0（见其自身注释），本就不需要那些源码，
+# 所以跳过零副作用 —— 反倒是之前 DOWNLOAD=ON 时这一步失败刷了两行报错。
+#
+# 曾担心的事（已实测否定，留此备查）：KTX-Software 4.x 带 external/ 子模块，
+# tarball 里不含子模块，一度以为会编不过。**实测编过了** ——
+# 沙箱完整跑通，产出 libktx.so.0 / libglslang.so.16.1.0 / libvsg.so.1.1.15 等，
+# 8 个组件配置段报错数均为 0。故无需为 KTX 做任何额外处理。
+# ============================================================================
+
+SRC_ROOT="${VSG_SRC_ROOT:-$HOME/Sources}"
+mkdir -p "$SRC_ROOT"
+
+# 从 codeload 取一个仓库的源码。$1=owner/repo  $2=tag  $3=目录名
+# 目录名必须与官方脚本 DOWNLOAD=OFF 分支里写死的名字**逐字一致**。
+fetch_src() {
+  local repo="$1" tag="$2" name="$3" dest="$SRC_ROOT/$3" i
+  if [ -f "$dest/CMakeLists.txt" ]; then
+    echo "   ✓ $name 已存在，跳过"
+    return 0
   fi
+  for i in 1 2 3 4 5; do
+    rm -rf "$dest" "$dest.tmp" "$WORK/$name.tar.gz"
+    printf "   ↓ %-16s %-26s @%-8s 第 %d 次\n" "$name" "$repo" "$tag" "$i"
+    if curl -fL --connect-timeout 30 --retry 3 --retry-delay 5 \
+         -o "$WORK/$name.tar.gz" \
+         "https://codeload.github.com/$repo/tar.gz/refs/tags/$tag" \
+       && mkdir -p "$dest.tmp" \
+       && tar -xzf "$WORK/$name.tar.gz" -C "$dest.tmp" --strip-components=1; then
+      mv "$dest.tmp" "$dest"
+      echo "   ✓ $name"
+      return 0
+    fi
+    echo "   ⚠ $name 第 $i 次失败，$((i*5))s 后重试…" >&2
+    sleep $((i * 5))
+  done
+  rm -rf "$dest.tmp"
+  echo "   ✗ $name 连续 5 次失败" >&2
+  return 1
+}
+
+echo "==> 取 VSG 源码（codeload tarball -> $SRC_ROOT）"
+SRC_FAIL=""
+#        owner/repo                      tag       目录名（官方脚本要求逐字一致）
+fetch_src vsg-dev/VulkanSceneGraph      v1.1.15  VulkanSceneGraph || SRC_FAIL=1
+fetch_src vsg-dev/vsgXchange            v1.1.12  vsgXchange        || SRC_FAIL=1
+fetch_src vsg-dev/vsgImGui              v0.7.0   vsgImGui          || SRC_FAIL=1
+fetch_src vsg-dev/vsgExamples           v1.1.13  vsgExamples       || SRC_FAIL=1
+fetch_src assimp/assimp                 v6.0.5   assimp            || SRC_FAIL=1
+fetch_src google/draco                  1.5.7    draco             || SRC_FAIL=1
+fetch_src KhronosGroup/glslang          16.1.0   glslang           || SRC_FAIL=1
+fetch_src KhronosGroup/KTX-Software     v4.4.2   ktx               || SRC_FAIL=1
+
+if [ -n "$SRC_FAIL" ]; then
+  echo
+  echo "!! 有源码没取到，编译无法进行。"
+  echo "   可重跑本脚本（已成功的会自动跳过），或手动把源码放到："
+  echo "     $SRC_ROOT/<目录名>"
+  exit 1
 fi
+
+# 翻官方脚本自己的开关：DOWNLOAD=ON -> OFF（此后它只读源码目录，不再联网）
+#
+# 同时要把官方脚本里**写死的** $HOME/Sources 改成 $SRC_ROOT：
+#   官方 DOWNLOAD=OFF 分支里是  VSG_SOURCE_DIR="$HOME/Sources/VulkanSceneGraph"
+#   若不改，一旦用 VSG_SRC_ROOT 重定向，脚本仍去 $HOME/Sources 找 → 全线
+#   "source directory does not exist"。默认情况下两者恰好相同，所以这个不一致
+#   **不会报错、只会静默错位** —— 正是这种"碰巧一致"最该消灭。
+#   （这是实测踩出来的：第一次跑通了 8/8 下载，却在编译段全线找不到源码。）
+sed -i -e 's/^DOWNLOAD=ON$/DOWNLOAD=OFF/' \
+       -e "s|\\\${HOME}/Sources|$SRC_ROOT|g" \
+       -e "s|\\\$HOME/Sources|$SRC_ROOT|g" "$WORK/buildVSG.sh"
+
+grep -q '^DOWNLOAD=OFF$' "$WORK/buildVSG.sh" \
+  || { echo "!! 未能把官方脚本的 DOWNLOAD 改成 OFF（其格式可能已变）"; exit 1; }
+grep -q "$SRC_ROOT/" "$WORK/buildVSG.sh" \
+  || { echo "!! 未能把官方脚本的源码路径改到 $SRC_ROOT（其格式可能已变）"; exit 1; }
+echo "   ✓ 官方脚本已切到 DOWNLOAD=OFF，源码路径 -> $SRC_ROOT"
+
+# （原"git 网络加固（HTTP/1.1 + clone 重试）"整块已删除：
+#   既然不再 git clone，那些加固全部失效为死代码。
+#   保留其结论供后来者参考：官方 buildVSG.sh 第 62 行有 `rm -rf download_vsg`
+#   每次清空重来，且 8 个 clone 各跑一次、**不重试、不检查失败**，
+#   挂一个就少一个源，后面几十行 CMake 报错全是连锁反应。）
 
 echo
 echo "==> 执行（下载+编译，耗时较长）"
