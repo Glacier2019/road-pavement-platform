@@ -28,6 +28,21 @@ endif()
 
 find_package(Chrono REQUIRED COMPONENTS vehicle vsg)
 
+# ★ 2026-10-09：不要给 find_package 加 models 组件。
+#   我一度写了 COMPONENTS vehicle vsg models，查了装出来的 config 才发现
+#   **Chrono_MODELS_AVAILABLE 根本不存在** —— 可用组件只有这 20 个：
+#     CASCADE CSHARP DEM FMI FSI FSI_SPH FSI_TDPF IRRLICHT MODAL MULTICORE
+#     MUMPS PARDISOMKL PARSERS POSTPROCESS ROS SENSOR SYNCHRONO VEHICLE
+#     VEHICLECOSIM VSG
+#   加了会直接 "missing components: models" 配置失败。
+#   但目标 Chrono::ChronoModels_vehicle **确实是导出的**
+#   （ChronoTargets.cmake 里有 add_library(Chrono::ChronoModels_vehicle …)，
+#     libChronoModels_vehicle.so 6.6 MB 在位）—— 所以直接链就行，无需声明组件。
+#   教训又一次：**能链的目标 ≠ 可声明的组件**，两套名字各查一遍。
+
+# ---------------------------------------------------------------------------
+# 目标一：路面可视化（只有路面，没有车）
+# ---------------------------------------------------------------------------
 add_executable(demo_CRG_visualization 03_visualize.cpp)
 
 # 不再手动 find_package(OpenCRG) 与链 ${OpenCRG_LIBRARY}：
@@ -36,6 +51,31 @@ add_executable(demo_CRG_visualization 03_visualize.cpp)
 # 没传进来时直接 REQUIRED 失败 —— 而那正是 04 原来的毛病。
 target_link_libraries(demo_CRG_visualization PRIVATE
   Chrono::Chrono_vehicle
+  Chrono::Chrono_vsg
+)
+
+# ---------------------------------------------------------------------------
+# 目标二：CRG 路面上的整车仿真（第 1 步后半段 —— 让车真的在路上跑）
+#
+# ★ ChronoModels_vehicle 是 HMMWV/sedan/gclass 等 20 个车型所在的库。
+#   03 不需要它，05 必须链 —— 少了会在链接期报 undefined reference，
+#   那还是好的；真正难查的是**编过了但运行时读不到车型 JSON**，
+#   那属于数据路径问题（见 05 文件头「坑 B」）。
+# ---------------------------------------------------------------------------
+add_executable(demo_vehicle_on_crg 05_vehicle_on_crg.cpp)
+
+# ★ 2026-10-09 实测补链：Chrono_vehicle_vsg 是**必须的第三个**。
+#   漏了它的症状是链接期一堆
+#       undefined reference to `vtable for ChWheeledVehicleVisualSystemVSG'
+#       undefined reference to `ChVehicleVisualSystemVSG::~ChVehicleVisualSystemVSG()'
+#   —— 因为 ChWheeledVehicleVisualSystemVSG / ChVehicleVisualSystemVSG
+#   这一对「车 + VSG」的胶水类住在 libChrono_vehicle_vsg.so 里，
+#   既不在 Chrono_vehicle，也不在 Chrono_vsg。
+#   头文件在 chrono_vehicle/wheeled_vehicle/ 下，很容易误以为链 vehicle 就够。
+target_link_libraries(demo_vehicle_on_crg PRIVATE
+  Chrono::Chrono_vehicle
+  Chrono::Chrono_vehicle_vsg
+  Chrono::ChronoModels_vehicle
   Chrono::Chrono_vsg
 )
 
@@ -53,7 +93,25 @@ target_link_libraries(demo_CRG_visualization PRIVATE
 #   find_package(Chrono) 之后即可用。绝对化一下，免得带 .. 看着心里没底。
 #
 #   官方同款写法见 chrono/template_project/CMakeLists.txt:107。
+#
+# ★ 两个目标都要这一个宏 —— 05 还用它推导车辆数据目录
+#   （<CHRONO_DATA_DIR>/vehicle/），所以不能只给 03 加。
+#
+# ★ 2026-10-09：Chrono 其实**还导出了 CHRONO_VEHICLE_DATA_DIR**
+#   （配置输出实测 = .../share/chrono/data/vehicle/，带尾斜杠）。
+#   05 优先用它，只有在它缺失时才退回「CHRONO_DATA_DIR + vehicle/」的推导。
+#   两个都烘进去，源码里用 #ifdef 选。
 get_filename_component(CHRONO_DATA_DIR_ABS "${CHRONO_DATA_DIR}" ABSOLUTE)
-target_compile_definitions(demo_CRG_visualization PRIVATE
-  "CHRONO_DATA_DIR=\"${CHRONO_DATA_DIR_ABS}\""
+get_filename_component(CHRONO_VEHICLE_DATA_DIR_ABS "${CHRONO_VEHICLE_DATA_DIR}" ABSOLUTE)
+foreach(tgt demo_CRG_visualization demo_vehicle_on_crg)
+  target_compile_definitions(${tgt} PRIVATE
+    "CHRONO_DATA_DIR=\"${CHRONO_DATA_DIR_ABS}\""
+  )
+endforeach()
+target_compile_definitions(demo_vehicle_on_crg PRIVATE
+  # ★ 用**自己的宏名**，不覆盖上游的 CHRONO_VEHICLE_DATA_DIR。
+  #   ChronoTargets.cmake:83 把 CHRONO_VEHICLE_DATA_DIR 定成 <前缀>/data/vehicle/，
+  #   而本机数据在 <前缀>/share/chrono/data/vehicle/ —— 上游那条是错的。
+  #   直接覆盖只会得到一句 `warning: redefined`，警告是唯一提示、路径错却是致命的。
+  "WIM_CHRONO_VEHICLE_DATA_DIR=\"${CHRONO_VEHICLE_DATA_DIR_ABS}\""
 )
