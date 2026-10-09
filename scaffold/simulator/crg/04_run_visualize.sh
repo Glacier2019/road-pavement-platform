@@ -29,8 +29,32 @@ done
 
 [ -f "$CRG" ] || { echo "找不到 CRG 文件: $CRG"; exit 1; }
 [ -d "$CHRONO_INSTALL" ] || { echo "找不到 Chrono 安装: $CHRONO_INSTALL"; exit 1; }
+# ★ 2026-10-09：这里**不需要**传 OpenCRG_INCLUDE_DIR / OpenCRG_LIBRARY。
+#   我一度以为要 —— 因为 configure 打出过
+#     "-- The provided OpenCRG library file does not exist"。
+#   但那句话是**我自己**在旧 CMakeLists.txt 里调 find_package(OpenCRG)
+#   触发的，不是 Chrono 要的。实测宿主产物：
+#     libChrono_vehicle.so 里 crg 符号 已定义 138 个 / 未定义 0 个
+#   OpenCRG 是静态库，编 Chrono 时就链进去了，用的人不必再找它。
+#   硬传反而换来 CMake 的 "Manually-specified variables were not used" 警告，
+#   白白吓人一跳。
+#
+#   但"Chrono 究竟带没带 CRG 支持"值得查 —— 这才是真会失败的那种检查：
+#   没带的话路面会退化成平地，窗口照样能开，问题要到最后才看得见。
+CRG_SYMS="$(nm -D --defined-only "$CHRONO_INSTALL/lib/libChrono_vehicle.so" 2>/dev/null | grep -ci crg || true)"
+if [ "${CRG_SYMS:-0}" -eq 0 ]; then
+  echo "!! $CHRONO_INSTALL/lib/libChrono_vehicle.so 里没有 CRG 符号。"
+  echo "   说明当初编 Chrono 时没开 -DCH_ENABLE_OPENCRG=ON，路面会退化成平地。"
+  echo "   请重跑 ./02_build_chrono.sh。"
+  exit 1
+fi
+echo "==> libChrono_vehicle.so 带 CRG 支持（$CRG_SYMS 个 crg 符号）"
 
 echo "==> 配置并编译（用 CMake，让 Chrono 自己解析依赖）"
+# 清掉上一次 configure 的缓存：失败留下的 CMakeCache 里可能有空变量，
+# 带着它重配会继续出错。这个 demo 只有一个源文件，重配的代价可忽略，
+# 不值得为省这点时间去和 cache 较劲。
+rm -rf "$BUILD"
 cmake -S "$HERE" -B "$BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$CHRONO_INSTALL;$VSG_DIR;$OPENCRG_DIR"

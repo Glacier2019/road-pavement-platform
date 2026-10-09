@@ -153,7 +153,50 @@ $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 `no-new-privileges` 禁用，**任何 GL 渲染都不可用**。生成/校验/导出/官方库读取
 均可在沙箱内完成；**可视化窗口必须在宿主侧运行**。
 
-## ★ 三个会静默失败的坑（实测，均已修）
+### 这条长缓弯路会被 OpenCRG 判成"可闭合"（上游启发式，关不掉）
+
+`CRGTerrain::IsPathClosed()` 不是读文件里的标志，而是取 OpenCRG 的
+`crgDataSetGetUtilityDataClosedTrack()`。那个值由 `crgStatistics.c:258-350`
+的**几何猜测**算出，规则是：
+
+> 起点航向与终点航向夹角 **< 60°**（`divisor = cos(Δφ) > 0.5`），
+> 且两条延长线的交点落在合适位置 → `uIsClosed = 1`。
+
+我们这条路 5.8 km 转 **32.2°**，于是中招。探针实测（`.crg` 直接读）：
+
+```
+start at x/y:      0.0000 / 0.0000      with phi [rad]: 2.6087   (149.5°)
+end   at x/y:  -4521.3053 / 3120.2292   with phi [rad]: 2.0462   (117.2°)
+crgCalcUtilityData: lines are (almost) parallel
+crgCalcUtilityData: reference line may be closed:
+crgCalcUtilityData: uMin = 0.000,  uMinClosed = -2260.653
+crgCalcUtilityData: uMax = 5805.400, uMaxClosed = 8066.053
+```
+
+注意日志原文是 **"may be closed"**，而 `uCloseMin/Max` 落在路面范围**之外**
+——它的意思是"这条路往前接 2260 m、往后接 2260 m 就能闭合成环"，是个纯粹的
+猜测。**任何长而缓弯的路都会触发。**
+
+**文件层面关不掉**：`dCrgRefLineCloseTrack` 是"请求闭合"选项，而
+`crgLoader.c:2455` 规定已判闭合的路不许再请求闭合，直接 `FATAL`。
+没有反向开关。
+
+**后果**（Chrono 直接采信 `m_isClosed`，两处都会动）：
+
+- `GenerateMesh`（`CRGTerrain.cpp:486` / `520`）：整排 `i == nu-1` 的顶点被
+  换成第 0 排 → 路末端多出一片跨 **5495 m** 的假面。实测导出的 `.obj`：
+  464,432 个面里**只有 8 个**面边长 > 100 m（中位边长 4.19 m），正是它。
+  `8 = 2 × (nv-1)`，`nv = 5`（`SimplifyMesh(true)` 把 `m_v` 压成 5 个值）。
+- `GenerateCurves`（`CRGTerrain.cpp:409-411`）：`pl.back() = pl[0]` →
+  边界曲线也多一段跨 5.5 km 的收尾。**所以 `--boundary` 并不能躲开**，
+  只是把"8 个面"换成"2 条线"。
+
+**当前处置**：`03_visualize.cpp` 把这件事**打印出来**而不是当事实报，
+并给出一个真事实（中心线首尾控制点跨度 4521 m）供对照。
+要彻底消掉，得在消费侧自建网格（不用 `UseMeshVisualization(true)`），
+那是下一步的事。
+
+## ★ 四个会静默失败的坑（实测，均已修）
 
 这三个都不是"报错"，而是**看起来成功、实际残缺**。凡在宿主上跑这几个脚本，
 先读这一节，能省一次 30 分钟的无效编译。
@@ -294,6 +337,58 @@ gcc -shared -o /dev/null \
 
 `02` 里那道是给"跳过了 `01`、用的还是上次留下的旧 `.a`"兜底的。
 
+### 坑四：核对"生产者"不等于核对"消费者"（目标名 / 命名空间 / 方法名）
+
+前三个坑都在**构建侧**（`01`/`01b`/`02`），这第四个在**消费侧**——
+`04_run_visualize.sh` 的 CMake 与 C++。共同点是：拿官方源码或文档当依据，
+而**源码里的名字和装出来的名字不是一回事**。
+
+**(1) 目标名。** 源码 `src/chrono_vehicle/CMakeLists.txt:985` 确实写着
+
+```cmake
+add_library(Chrono::vehicle ALIAS Chrono_vehicle)
+```
+
+但 **ALIAS 目标永远不会被 `install(EXPORT ...)` 导出**。装出来的
+`lib/cmake/Chrono/ChronoTargets.cmake` 里，导出的真名是这八个：
+
+```
+Chrono::Chrono_core            Chrono::Chrono_vsg
+Chrono::Chrono_vehicle         Chrono::Chrono_vehicle_vsg
+Chrono::Chrono_vehicle_cosim   Chrono::ChronoModels_vehicle
+Chrono::ChronoModels_robot     Chrono::yaml
+```
+
+实测 `grep -c 'Chrono::vehicle\b' ChronoTargets.cmake` → **0**。
+所以消费侧必须写 `Chrono::Chrono_vehicle` / `Chrono::Chrono_vsg`。
+原注释写的是"目标名已核对官方源码"——**对生产者核对过了，对消费者没核对**。
+
+**(2) 命名空间。** `ChVisualSystemVSG` 在 **`chrono::vsg3d`**，不在 `chrono`
+（`include/chrono_vsg/ChVisualSystemVSG.h:47`）。而 `CameraVerticalDir`
+在 `chrono`（`include/chrono/assets/ChVisualSystem.h:42`）。
+
+**(3) 方法名。** `EnableAbsFrameCoords()` **根本不存在**——是照着"应该有"
+编出来的。真名是 `SetAbsFrameScale(double)` 与 `ToggleAbsFrameVisibility()`
+（`ChVisualSystemVSG.h:166-167`），而且后者**只有切换形式、没有显式 bool
+重载**（默认 `m_show_abs_frame(false)`，`ChVisualSystemVSG.cpp:322`，
+所以 `Toggle` 一次即打开）。
+
+**修法**：`CMakeLists.txt` 与 `03_visualize.cpp` 里，每个用到的成员都标上
+**头文件行号**；方法名一律以**装出来的头文件**为准，文档链接只能当索引、
+不能当签名。写"非猜测"三个字之前，先真的 `grep` 一遍。
+
+**(4) 附带一个。** `CRGTerrain::ExportMeshWavefront` **不建目录**。
+`CRGTerrain.cpp:572-575` 就是
+
+```cpp
+ChTriangleMeshConnected::WriteWavefront(out_dir + "/" + m_mesh_name + ".obj", meshes);
+```
+
+目录不存在时 `WriteWavefront` 只打印一句 `Unable to create output .OBJ file`
+就返回，而原来的 `03_visualize.cpp` **紧接着照样打印「已导出网格」**——
+又一次"报告成功但没成功"。现在改成先 `create_directories`，写完再核实
+文件真的存在、并打印字节数。
+
 ### 一条通用教训
 
 > **一个症状看起来像已知问题，不等于它就是那个问题。**
@@ -307,7 +402,13 @@ gcc -shared -o /dev/null \
 → "configure 通过了"；`libOpenCRG.a` 编得出、装得上、检查全过，直到 67%
 链接共享库时才报 `mCrgBigEndian` → "OpenCRG 装好了"；一个变量名猜错的
 `grep`（查 `OpenCRG_FOUND`，而 Chrono 用的是 `CH_ENABLE_OPENCRG`）恒假，
-模块明明编成功却报"未见 OpenCRG 条目" → "OpenCRG 没链上"。
+模块明明编成功却报"未见 OpenCRG 条目" → "OpenCRG 没链上"；
+在**生产者**的源码里核对 `add_library(Chrono::vehicle ALIAS ...)` 成功，
+却从没看**消费者**拿到的 `ChronoTargets.cmake` → "目标名已核对官方源码"；
+凭印象写下一个 `EnableAbsFrameCoords()`，编译器说不存在 → "API 都来自
+官方类参考，非猜测"；`WriteWavefront` 刚失败，下一行照样打印「已导出网格」
+→ "导出成功了"；`ExportMeshWavefront` 失败被当成"boundary 模式的问题"，
+其实是目录没建 → 又一个认错方向的症状。
 
 **这条教训的操作化**：检查要**双向**都对，不只是"会失败"。
 
