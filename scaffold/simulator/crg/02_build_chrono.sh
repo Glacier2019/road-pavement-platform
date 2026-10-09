@@ -81,7 +81,11 @@ cmake --install .
 echo
 echo "==> 完成。校验 OpenCRG 支持是否真的编进去了："
 if grep -qi "OpenCRG_FOUND\|CH_USE_OPENCRG" "$BUILD_DIR/CMakeCache.txt"; then
-  grep -i "opencrg" "$BUILD_DIR/CMakeCache.txt" | head -5
+  # ★ 2026-10-09：`| head -5` 会在匹配行超过 5 条时提前关闭管道，给 grep 发
+  #   SIGPIPE → grep 非零退出 → 配合本脚本的 `set -euo pipefail` 会**杀掉脚本**，
+  #   而且死在"编译已成功、只差打印几行"的位置，极难察觉。
+  #   CMakeCache 里的 opencrg 条目完全可能超过 5 行，故用 || true 兜住。
+  grep -i "opencrg" "$BUILD_DIR/CMakeCache.txt" | head -5 || true
 else
   echo "   (CMakeCache 中未见 OpenCRG 条目，请检查上方 configure 输出)"
 fi

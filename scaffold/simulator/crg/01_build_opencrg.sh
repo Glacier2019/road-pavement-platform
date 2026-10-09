@@ -28,6 +28,16 @@ cd opencrg-1.1.2
 
 echo "==> 修正 C90 兼容问题（-ansi -> -std=gnu99）"
 sed -i 's/^CFLGS = -Wall -O3 -ansi/CFLGS = -Wall -O3 -std=gnu99/' makefile
+# ★ 2026-10-09：原先这里是裸的 `grep -n '^CFLGS' makefile`。
+#   本脚本有 `set -e`，grep 匹配不到就返回 1 → **静默杀掉脚本**，无任何提示。
+#   这里的检查是**有意义的断言**（sed 没改成功 = 后面必然以难懂的 C90 报错失败），
+#   所以不该简单地 || true 掉，而要**把它变成一条能看懂的报错**。
+if ! grep -q '^CFLGS.*std=gnu99' makefile; then
+  echo "!! 未能把 makefile 的 CFLGS 改成 -std=gnu99。"
+  echo "   官方 makefile 的格式可能已变（本脚本按 v1.1.2 写的）。"
+  echo "   请手动检查 makefile 里的 CFLGS 行，确认不含 -ansi 后重跑。"
+  exit 1
+fi
 grep -n '^CFLGS' makefile
 
 echo "==> 预建目录并编译"

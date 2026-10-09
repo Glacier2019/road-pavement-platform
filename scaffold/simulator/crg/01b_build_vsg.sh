@@ -84,8 +84,15 @@ curl -fL --retry 5 --retry-delay 3 -o "$WORK/buildVSG.sh" \
 chmod +x "$WORK/buildVSG.sh"
 
 echo "==> 官方锁定版本："
+# ★ 2026-10-09 第三次修正：这里原先是裸的 `grep ... | sed ...`。
+#   本脚本开头有 `set -euo pipefail`，而官方 buildVSG.sh 的**注释格式会变** ——
+#   grep 匹配不到就返回 1，配合 pipefail 整条管道失败，**set -e 当场杀掉脚本**。
+#   症状极具迷惑性：只打印到"官方锁定版本："就静默回到提示符，无任何报错，
+#   于是"下载+编译"那段从未执行，~/Packages/vsg/lib 从未生成。
+#   这段输出纯属**显示版本号**，它的失败绝不该是致命的 —— 故用 || 兜住。
 grep -E "^# +- *(VulkanSceneGraph|vsgXchange|vsgImGui|glslang|assimp|draco|ktx)" \
-  "$WORK/buildVSG.sh" | sed 's/^# *//'
+  "$WORK/buildVSG.sh" | sed 's/^# *//' \
+  || echo "   (未能从官方脚本注释抓到版本号——仅影响这行显示，继续编译)"
 
 echo
 echo "==> 执行（下载+编译，耗时较长）"
