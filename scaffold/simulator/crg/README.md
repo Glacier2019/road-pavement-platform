@@ -305,9 +305,15 @@ gcc -shared -o /dev/null \
 "脚本地址写错了"；官方脚本硬编码 `$HOME/Sources` → "重定向生效了"；
 一次打印 `Configuring done` 且 0 错误的 CMake 运行其实**一个模块都没处理**
 → "configure 通过了"；`libOpenCRG.a` 编得出、装得上、检查全过，直到 67%
-链接共享库时才报 `mCrgBigEndian` → "OpenCRG 装好了"。
+链接共享库时才报 `mCrgBigEndian` → "OpenCRG 装好了"；一个变量名猜错的
+`grep`（查 `OpenCRG_FOUND`，而 Chrono 用的是 `CH_ENABLE_OPENCRG`）恒假，
+模块明明编成功却报"未见 OpenCRG 条目" → "OpenCRG 没链上"。
 
-**这条教训的操作化**：凡"检查通过"的结论，都要问一句**这个检查真的会失败吗**。
-`ls 源码里的 CRGTerrain.h` 恒真；`ls lib/libOpenCRG.a` 恒真；而
-`gcc -shared --whole-archive libOpenCRG.a` 会失败——所以要选后者。
-能失败的检查才是检查。
+**这条教训的操作化**：检查要**双向**都对，不只是"会失败"。
+
+- 恒真的检查等于没查：`ls 源码里的 CRGTerrain.h` 在 tarball 里必然存在，
+  与模块有没有编无关；`ls lib/libOpenCRG.a` 在文件装上了但非 PIC 时也通过。
+- 恒假的检查会**凭空制造假警报**，比不查更坏——它会让人去修一个不存在的问题。
+  变量名、字段名这类"猜出来的标识符"，必须拿真实产物对一遍再用。
+- 所以要选 `gcc -shared --whole-archive libOpenCRG.a`：该失败时失败，
+  该通过时通过，两个方向都在沙箱里验过。

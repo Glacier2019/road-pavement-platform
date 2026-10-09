@@ -229,15 +229,25 @@ echo "==> 安装"
 cmake --install .
 
 echo
-echo "==> 完成。校验产物是否真的编进去了："
-if grep -qi "OpenCRG_FOUND\|CH_USE_OPENCRG" "$BUILD_DIR/CMakeCache.txt"; then
-  # ★ 2026-10-09：`| head -5` 会在匹配行超过 5 条时提前关闭管道，给 grep 发
-  #   SIGPIPE → grep 非零退出 → 配合本脚本的 `set -euo pipefail` 会**杀掉脚本**，
-  #   而且死在"编译已成功、只差打印几行"的位置，极难察觉。
-  #   CMakeCache 里的 opencrg 条目完全可能超过 5 行，故用 || true 兜住。
-  grep -i "opencrg" "$BUILD_DIR/CMakeCache.txt" | head -5 || true
+echo "==> 完成。OpenCRG 解析结果（来自 CMakeCache）："
+# ★ 2026-10-09 第二次修正 —— 这里原来是：
+#     if grep -qi "OpenCRG_FOUND\|CH_USE_OPENCRG" CMakeCache.txt; then ...
+#   宿主实测：CMakeCache 里**没有这两个名字**。Chrono 实际用的是
+#   CH_ENABLE_OPENCRG / OpenCRG_INCLUDE_DIR / OpenCRG_LIBRARY，于是条件恒假，
+#   模块**已经编成功**却打印「未见 OpenCRG 条目，请检查上方 configure 输出」。
+#   又是「检查本身是错的」——和上一版 `ls 源码里的 CRGTerrain.h` 恒真同类，
+#   只是这次错在恒假，会凭空制造一次假警报。
+#   故：按真实存在的名字匹配，并且这只是一条**信息**，不再扮演门；
+#   真正的门是下面那段"装出来了吗"的产物断言。
+# 2>/dev/null 只吞掉 grep 自己那句"没有那个文件"：文件不在的情况由下面的
+# else 分支正式报告，再冒一行原始报错只是噪音，会让人以为出错了。
+OPENCRG_CACHE="$(grep -i 'opencrg' "$BUILD_DIR/CMakeCache.txt" 2>/dev/null | head -5 || true)"
+if [ -n "$OPENCRG_CACHE" ]; then
+  # `| head -5` 会提前关闭管道给 grep 发 SIGPIPE，配合 set -o pipefail 会杀掉脚本，
+  # 而它死在「编译已成功、只差打印几行」的位置，极难察觉。故必须 || true 兜住。
+  printf '%s\n' "$OPENCRG_CACHE" | sed 's/^/   /'
 else
-  echo "   (CMakeCache 中未见 OpenCRG 条目，请检查上方 configure 输出)"
+  echo "   (CMakeCache 里没有 OpenCRG 条目)"
 fi
 
 # ★ 2026-10-09：改成断言**安装出来的东西**。
