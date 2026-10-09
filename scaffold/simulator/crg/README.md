@@ -42,7 +42,7 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
 
 ### 宿主侧（需要 GPU / 显示）
 
-**先装前置，否则下面四个脚本会依次失败**（实测踩过，见文末「两个会静默失败的坑」）：
+**先装前置，否则下面四个脚本会依次失败**（实测踩过，见文末「三个会静默失败的坑」）：
 
 ```bash
 # 1) 编译工具与 GL 头文件（02 脚本会逐个 dpkg -s 检查，缺一个就退出）
@@ -153,9 +153,9 @@ $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 `no-new-privileges` 禁用，**任何 GL 渲染都不可用**。生成/校验/导出/官方库读取
 均可在沙箱内完成；**可视化窗口必须在宿主侧运行**。
 
-## ★ 两个会静默失败的坑（实测，均已修）
+## ★ 三个会静默失败的坑（实测，均已修）
 
-这两个都不是"报错"，而是**看起来成功、实际残缺**。凡在宿主上跑这几个脚本，
+这三个都不是"报错"，而是**看起来成功、实际残缺**。凡在宿主上跑这几个脚本，
 先读这一节，能省一次 30 分钟的无效编译。
 
 ### 坑一：vsgImGui 缺子模块 → `致命错误：不是 Git 仓库`
@@ -244,6 +244,56 @@ configure 输出落盘并断言 `Eigen3 found` 且无 "not used" 警告；收尾
 > 为什么收尾要查"装出来没有"：原来那句 `ls 源码里的 CRGTerrain.h` 是
 > **恒真**的——那个文件在 tarball 里必然存在，无论模块有没有被编。等于没查。
 
+### 坑三：OpenCRG 少了 `-fPIC` → 编到 67% 才在链接共享库时炸
+
+**症状**（Chrono 已经编了 20 多分钟，一路绿灯）：
+
+```
+[ 67%] Linking CXX shared library ../../lib/libChrono_vehicle.so
+/usr/bin/x86_64-linux-gnu-ld.bfd: libOpenCRG.a(crgLoader.o):
+    relocation R_X86_64_PC32 against symbol `mCrgBigEndian'
+    can not be used when making a shared object; recompile with -fPIC
+/usr/bin/x86_64-linux-gnu-ld.bfd: final link failed: bad value
+collect2: error: ld returned 1 exit status
+```
+
+**根因**：Chrono 默认把模块编成**共享库**（`libChrono_vehicle.so`），而
+`libOpenCRG.a` 里的目标文件**不是位置无关代码**。报错里出现的是
+`crgLoader.o` 和 `mCrgBigEndian`——跟"少了个编译选项"看起来毫无关系，
+这是这个坑最难认的地方。
+
+`01_build_opencrg.sh` 原先走的是 OpenCRG **自带的 makefile**，而那个
+makefile 的 `CFLGS` 里**没有 `-fPIC`**。更糟的是：这个 `.a` 编得出来、
+装得上、`ls` 一切正常，**要等到几十分钟后链接共享库时才暴露**。
+
+**修法**：改成官方 `buildOpenCRG.sh` 的**直接 gcc** 路线——它根本不碰那个
+makefile：
+
+```bash
+gcc -Wall -O3 -fPIC -I$SRC/inc -c $SRC/src/*.c
+ar -r $INSTALL_DIR/lib/libOpenCRG.a *.o
+```
+
+顺带说明一件事：原先 `01` 里那句 `-ansi` → `-std=gnu99` 的 `sed`
+**整条都不要了**。`-ansi`（=C90）与源码里的 `//` 注释冲突，是 **makefile
+路线独有的问题**；官方直编从来不需要 `-std`。沙箱实测：官方旗标在
+gcc 15.2 上 11/11 全部编过，加不加 `-std=gnu99` 都能过。
+
+**并且加了探测**（`01` 与 `02` 各一道）。因为"编得出来"不代表"能链"，
+所以不做静态检查，而是**真的去链一次**——用 `--whole-archive` 把 `.a` 的
+每个成员都强行拉进一个共享库：
+
+```bash
+gcc -shared -o /dev/null \
+  -Wl,--whole-archive libOpenCRG.a -Wl,--no-whole-archive -lm
+```
+
+只要有一个 `.o` 不是 PIC，ld 就会报出**与上面逐字相同**的错误。这个探测
+经过双向验证：带 `-fPIC` 的包放行，不带 `-fPIC` 的包报出同一句
+`recompile with -fPIC`。**一两秒**换掉一次 30 分钟的无效编译。
+
+`02` 里那道是给"跳过了 `01`、用的还是上次留下的旧 `.a`"兜底的。
+
 ### 一条通用教训
 
 > **一个症状看起来像已知问题，不等于它就是那个问题。**
@@ -254,4 +304,10 @@ configure 输出落盘并断言 `Eigen3 found` 且无 "not used" 警告；收尾
 `set -e` → "跑完了"；`~/.gitconfig` 把 github.com 改写到了失效镜像 →
 "脚本地址写错了"；官方脚本硬编码 `$HOME/Sources` → "重定向生效了"；
 一次打印 `Configuring done` 且 0 错误的 CMake 运行其实**一个模块都没处理**
-→ "configure 通过了"。
+→ "configure 通过了"；`libOpenCRG.a` 编得出、装得上、检查全过，直到 67%
+链接共享库时才报 `mCrgBigEndian` → "OpenCRG 装好了"。
+
+**这条教训的操作化**：凡"检查通过"的结论，都要问一句**这个检查真的会失败吗**。
+`ls 源码里的 CRGTerrain.h` 恒真；`ls lib/libOpenCRG.a` 恒真；而
+`gcc -shared --whole-archive libOpenCRG.a` 会失败——所以要选后者。
+能失败的检查才是检查。

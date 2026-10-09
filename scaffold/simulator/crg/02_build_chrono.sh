@@ -44,6 +44,30 @@ fi
 [ -f "$OPENCRG_DIR/lib/libOpenCRG.a" ] || {
   echo "!! 找不到 $OPENCRG_DIR/lib/libOpenCRG.a"
   echo "   请先运行 ./01_build_opencrg.sh"; exit 1; }
+
+# --- ★ OpenCRG 必须是 PIC 的
+#
+# ★ 2026-10-09：宿主实测过一次失败 —— Chrono 编到 67%、要产出
+#   libChrono_vehicle.so 时炸在
+#     libOpenCRG.a(crgLoader.o): relocation R_X86_64_PC32 against symbol
+#       `mCrgBigEndian' can not be used when making a shared object;
+#       recompile with -fPIC
+#   根因：那个 .a 是 OpenCRG 自带 makefile 编的，而它的 CFLGS 里没有 -fPIC
+#   （Chrono 默认把模块编成 SHARED，于是必须 PIC）。
+#
+#   01_build_opencrg.sh 已改为官方路线（直接 gcc -fPIC）并自带同样的探测。
+#   这里再放一道，是为了兜住"有人跳过了 01、用的是上一次留下的旧 .a"——
+#   那种情况下代价是白编 30 分钟才发现。探测本身只要一两秒。
+if ! gcc -shared -o /dev/null \
+       -Wl,--whole-archive "$OPENCRG_DIR/lib/libOpenCRG.a" -Wl,--no-whole-archive \
+       -lm 2>/dev/null; then
+  echo
+  echo "!! $OPENCRG_DIR/lib/libOpenCRG.a 不是 PIC 的（不带 -fPIC 编出来的）。"
+  echo "   继续下去会在编到 67% 链接 libChrono_vehicle.so 时失败。"
+  echo "   请重跑 ./01_build_opencrg.sh 重新编译并安装 OpenCRG。"
+  echo "   ★ 不要改用 OpenCRG 自带的 makefile —— 它的 CFLGS 里没有 -fPIC。"
+  exit 1
+fi
 [ -d "$VSG_DIR/lib" ] || {
   echo "!! 找不到 $VSG_DIR/lib"
   echo "   请先运行 ./01b_build_vsg.sh（需要 GPU + Vulkan SDK）"; exit 1; }
