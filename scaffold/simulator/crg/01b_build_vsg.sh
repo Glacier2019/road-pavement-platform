@@ -94,6 +94,34 @@ grep -E "^# +- *(VulkanSceneGraph|vsgXchange|vsgImGui|glslang|assimp|draco|ktx)"
   "$WORK/buildVSG.sh" | sed 's/^# *//' \
   || echo "   (未能从官方脚本注释抓到版本号——仅影响这行显示，继续编译)"
 
+# --- ★ 2026-10-09 第四次修正：绕过 git 全局的 GitHub 镜像改写
+#
+# 很多国内机器在 ~/.gitconfig 里配了：
+#     [url "https://<镜像>/https://github.com/"]
+#         insteadOf = https://github.com/
+# 而官方 buildVSG.sh 用的是**干净的** https://github.com/...（实测 "ghfast" 出现 0 次），
+# 于是 8 个 git clone 全被改写到镜像站。镜像站一旦挂掉，症状是
+# 8 个仓库依次超时 / "连接被对方重置"，紧接着几十行 CMake 报错 —— 全是连锁反应，
+# 根因（一条 git 配置）离症状极远，极易误判成"脚本地址写错了"。
+#
+# 处理：检测到改写时**实测** github.com 直连是否可用；
+#   可用 → 本次编译忽略该改写（GIT_CONFIG_GLOBAL 指向空配置，只影响本进程及子进程，
+#          **不改用户配置**，可逆）；
+#   不可用 → 沿用用户配置（说明那个镜像确实是他需要的）。
+if git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null | grep -q 'https://github\.com/'; then
+  echo "==> 检测到 git 全局配置把 github.com 改写到了镜像："
+  git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null | sed 's/^/     /' || true
+  if GIT_CONFIG_GLOBAL=/dev/null timeout 25 git ls-remote --exit-code \
+       https://github.com/vsg-dev/VulkanSceneGraph HEAD >/dev/null 2>&1; then
+    echo "    实测 github.com 直连可用 → 本次编译忽略该改写"
+    echo "    （仅本进程及其子进程生效，不动你的 ~/.gitconfig）"
+    export GIT_CONFIG_GLOBAL=/dev/null
+  else
+    echo "    ⚠ github.com 直连不可用 → 沿用你的镜像配置"
+    echo "      若镜像本身也连不上，需先修好网络再重跑"
+  fi
+fi
+
 echo
 echo "==> 执行（下载+编译，耗时较长）"
 cd "$WORK"
