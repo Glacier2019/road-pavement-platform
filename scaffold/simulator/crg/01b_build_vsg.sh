@@ -181,6 +181,101 @@ if [ -n "$SRC_FAIL" ]; then
   exit 1
 fi
 
+# ----------------------------------------------------------------------------
+# ★ 2026-10-09 第六次修正：补 vsgImGui 的两个子模块
+#
+# 症状（宿主机实测，藏在几千行输出里，末尾看似"全部成功"）：
+#     ------------------------ Configure vsgImGui
+#     致命错误：不是 Git 仓库（或者任何父目录）：.git
+#     CMake Error at CMakeLists.txt:39 (message):
+#       git submodule update --init --recursive failed with 128, please checkout submodules
+#     -- Configuring incomplete, errors occurred!
+#     ninja: error: loading 'build-Release.ninja': No such file or directory
+#
+# 根因：codeload tarball 里**没有 .git**，而 vsgImGui v0.7.0 的 CMakeLists 写着
+#     if ( (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/imgui/imgui.h) OR
+#          (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/implot/implot.h) )
+#         execute_process(COMMAND git submodule update --init --recursive ...)
+#         if(NOT GIT_SUBMOD_RESULT EQUAL "0")
+#             message(FATAL_ERROR "git submodule update ... failed with ...")
+#         endif()
+#     endif()
+#   tarball 会建出 src/imgui、src/implot 两个**空目录**（内容不在包内），
+#   于是那个判断成立 → 去调 git → 没有 .git → FATAL_ERROR。
+#
+# 修法：该判断**纯看文件在不在**，与 .git 无关。把两个子模块按 vsgImGui
+#   钉死的 commit 填进去，它连 git 那一行都不会执行 —— 既不碰 git 协议
+#   （本机 git 协议全通不了），也不需要 .git 目录。
+#   commit 取自 GitHub API（git 协议不可用时的唯一可靠来源）：
+#     api.github.com/repos/vsg-dev/vsgImGui/git/trees/<v0.7.0 的 src 子树>
+#       imgui  993fa347495860ed44b83574254ef2a317d0c14f
+#       implot f156599faefe316f7dd20fe6c783bf87c8bb6fd9
+#
+# ★ 这一步**不能**并进 fetch_src：fetch_src 见到 CMakeLists.txt 就跳过，
+#   而 vsgImGui 目录在你上一轮已经下好了 —— 「复用旧目录」恰恰就是出问题的
+#   场景（空壳子模块留在里面）。所以子模块必须独立判断、独立补。
+#
+# ★ 这不是可选项：Chrono 的 src/chrono_vsg/CMakeLists.txt 第 31 行是
+#     find_package(vsgImGui REQUIRED)
+#   缺了它，02_build_chrono.sh 必定失败。所以下面失败即 exit，不往下走。
+# ----------------------------------------------------------------------------
+echo "==> 补 vsgImGui 子模块（imgui / implot，按 v0.7.0 钉死的 commit）"
+
+fetch_submodule() {
+  local repo="$1" sha="$2" dest="$3" probe="$4" i
+  if [ -f "$dest/$probe" ]; then
+    echo "   ✓ $(basename "$dest") 已就位，跳过"
+    return 0
+  fi
+  for i in 1 2 3 4 5; do
+    printf "   ↓ %-18s @%-12s 第 %d 次\n" "$repo" "${sha:0:12}" "$i"
+    if curl -fL --connect-timeout 30 --retry 3 --retry-delay 5 \
+         -o "$WORK/sub.tar.gz" \
+         "https://codeload.github.com/$repo/tar.gz/$sha"; then
+      # 直接解进目标目录（tarball 里该目录是空壳，解包即填满）。
+      # 刻意不用 rm -rf：$dest 是拼出来的路径，误删代价太大；
+      # tar 覆盖写就够，而且对"已有部分内容"也更安全。
+      mkdir -p "$dest"
+      if tar -xzf "$WORK/sub.tar.gz" -C "$dest" --strip-components=1 \
+         && [ -f "$dest/$probe" ]; then
+        echo "   ✓ $(basename "$dest")"
+        return 0
+      fi
+    fi
+    echo "   ⚠ 第 $i 次失败，$((i*5))s 后重试…" >&2
+    sleep $((i * 5))
+  done
+  echo "   ✗ $repo 连续 5 次失败" >&2
+  return 1
+}
+
+SUB_FAIL=""
+fetch_submodule ocornut/imgui  993fa347495860ed44b83574254ef2a317d0c14f \
+                "$SRC_ROOT/vsgImGui/src/imgui"  imgui.h   || SUB_FAIL=1
+fetch_submodule epezent/implot f156599faefe316f7dd20fe6c783bf87c8bb6fd9 \
+                "$SRC_ROOT/vsgImGui/src/implot" implot.h  || SUB_FAIL=1
+
+if [ -n "$SUB_FAIL" ]; then
+  echo
+  echo "!! vsgImGui 子模块没补齐，编译无法进行（见上面原因）。"
+  echo "   重跑本脚本即可（已就位的会自动跳过）。"
+  exit 1
+fi
+
+# 硬校验：vsgImGui 的 CMakeLists 要 copy 这几个头，缺任何一个都是白编一场。
+# 宁可在这里停，也不要让它在几千行输出里再炸一次。
+for f in src/imgui/imgui.h \
+         src/imgui/imconfig.h \
+         src/imgui/imgui_internal.h \
+         src/imgui/imstb_textedit.h \
+         src/imgui/misc/cpp/imgui_stdlib.h \
+         src/implot/implot.h \
+         src/implot/implot_internal.h; do
+  [ -f "$SRC_ROOT/vsgImGui/$f" ] || {
+    echo "!! vsgImGui 缺少 $f —— 编不过，先别往下走"; exit 1; }
+done
+echo "   ✓ 7 个必需头文件齐备，vsgImGui 不会再碰 git"
+
 # 翻官方脚本自己的开关：DOWNLOAD=ON -> OFF（此后它只读源码目录，不再联网）
 #
 # 同时要把官方脚本里**写死的** $HOME/Sources 改成 $SRC_ROOT：
