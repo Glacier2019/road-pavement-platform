@@ -650,7 +650,7 @@ class GeRepository(DomainRepository):
                             *, limit: int = 2000) -> list[dict[str, Any]]:
         """**与**桩号区间 `[from_km, to_km]` **相交**的线形单元（FR-018）。
 
-        给 TruckSim / FEM 按里程切片用。`span_m` = 落在本区间内的长度（米），
+        给 Chrono / FEM 按里程切片用。`span_m` = 落在本区间内的长度（米），
         单元被区间截断时它与 `length_m` 不等 —— 拿它做积分才是对的。
 
         越界不报错、返回空列表：**查询**不是**校验**。校验在导入侧（FR-006）。

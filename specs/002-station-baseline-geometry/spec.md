@@ -302,7 +302,10 @@ road_section.line_id         ->  road_line
   验收锚点：第 1 交点曲线总长 **674.493 m**。
 - **FR-017**: 要素的每一行 MUST 可追溯到其源文件；
   源数据缺失时 MUST 为 NULL 并附原因，MUST NOT 填 0 或外推。
-- **FR-018**: 要素与采样 MUST 可按桩号区间查询，供 TruckSim / FEM 消费。
+- **FR-018**: 要素与采样 MUST 可按桩号区间查询，供 Chrono / FEM 消费。
+  （2026-10-09 口径更新：原写「TruckSim / FEM」。经
+  `评估-Chrono替代TruckSim.md` 裁定**只用 Chrono** —— TruckSim 把路面当边界条件，
+  与「车路耦合」的目标先天不合。见该文档 Q4。）
 
 #### FR-012~018 的既有实现状态（规划前必读，**实库实测**）
 
@@ -327,6 +330,28 @@ road_section.line_id         ->  road_line
 | FR-017 可追溯 / NULL 不填 0 | ⚠️ **部分** | `_radius()` 9999→None ✅；`design_file` 血缘待补 |
 | **FR-014 重采样可配置** | ❌ **缺口** | 无「由要素求值」代码路径；`design_project.station_interval_m = 20.00` |
 | **FR-018 按区间查询** | ❌ **缺口** | 索引 `idx_alignment_elem_station` 已建，但查询接口未落地 |
+
+#### ★ 上表刷新（2026-10-09 实测）—— 两条「缺口」均已不成立
+
+上表是 **2026-09-27 的快照**，此后 T033/T034 落地、`geometry_solver.py`（09-28）进仓，
+故其中两行已过期。**保留原行不改**（它是当时的真实记录），刷新如下：
+
+| FR | 09-27 快照 | **10-09 实际** | 依据 |
+|---|---|---|---|
+| FR-014 由要素求值 | ❌ 缺口 | ⚠️ **部分** | `design_import.py:750` 已调 `solver.solve_all(elements, 桩号列, …)`；`geometry_point` 是**派生缓存**，值全部由要素算出 |
+| FR-018 按区间查询 | ❌ 缺口 | ✅ **已完成** | `rpdao/repo.py` 的 `elements_by_station`/`samples_by_station` + M6 两个端点；已实测 |
+| `geometry_point` 行数 | 0（产出目标） | **332** | 与 `station_sequence` 逐桩一一对应 |
+
+**FR-014 仍差的一半（不要误读成已完成）**：`solve_all` 的采样点来自**导入的**
+`station_sequence`，密度由源文件决定；**按 `design_project.station_interval_m` 任意重采样
+仍未实现**。故「由要素求值」✅ 而「采样密度可配置」❌ —— 原缺口条目的**理由**
+（「无由要素求值代码路径」）已不成立，但 FR-014 整体**未闭合**。
+
+FR-018 端点实测（`section_id=6`，区间 `0~0.2 km`）：
+
+- `/v1/geometry/sections/6/elements` → `length_m=485.874` 而 `span_m=200.000`，
+  即**与区间相交**的单元被截断后返回 —— 与端点文档承诺一致；
+- `from_km > to_km` → **422**（非 500、非空列表）；未知 `segment` → **422 并列出可用值**。
 
 #### ★ `geometry_point` 的两条硬性验收（来自既有契约，非本 spec 新立）
 

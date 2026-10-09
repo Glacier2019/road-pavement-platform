@@ -11,6 +11,28 @@ fem:
   remark: >-
     待设计院输入。骨架期留 null——凭空生成结构参数只会得到「看起来合理但无依据」的结果。
 
+vehicle_road:
+  # 车路耦合：Project Chrono 读 CRG 路面，车与路面同为仿真对象。
+  # 口径见 specs/002-station-baseline-geometry/评估-Chrono替代TruckSim.md
+  # （该文档裁定「只用 Chrono」：TruckSim 把路面当边界条件，与本目标先天不合）。
+  engine: chrono
+  # 路面文件由 scaffold/simulator/crg/gen_crg.py 从库内线形要素生成；
+  # 产物不入库（见 .gitignore），此处只登记约定路径。
+  crg_file: null
+  # 摩擦系数：Q3 定为「分路段常数」起步，按 pavement_type 取值。
+  # ★ 骨架期全部 null —— 摩擦系数必须实测/标定得来，
+  #   照抄一个「常见值」会得到看着合理却无依据的仿真结果。
+  friction:
+    mode: per_section_constant     # 备选：per_section_constant | crg_texture
+    by_pavement_type: null         # 形如 {asphalt: null, concrete: null}
+    calibrated: false
+  # CRG 路面**无碰撞体**，故只能用半经验轮胎模型（见评估文档 §2.1）。
+  tire_model: semi_empirical
+  calibrated: false
+  remark: >-
+    第 1 步「打通」只需库内既有数据：线形要素 → CRG → Chrono 读入即可，
+    零新数据、可独立验证。摩擦系数与轮胎参数属标定项，留 null。
+
 capacity:
   model: null               # 待定：承载力评估模型需真实检测数据训练/标定
   calibrated: false

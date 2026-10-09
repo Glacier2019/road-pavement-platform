@@ -407,7 +407,7 @@ def get_superelevation(section_id: int) -> dict[str, Any]:
 
 
 @app.get("/v1/geometry/sections/{section_id}/elements", tags=["几何查询"],
-         summary="按桩号区间取线形单元（与区间**相交**的，供 TruckSim / FEM）")
+         summary="按桩号区间取线形单元（与区间**相交**的，供 Chrono / FEM）")
 def get_elements_by_station(
     section_id: int,
     from_km: float = Query(..., ge=0, description="区间起点（km），含"),
@@ -436,7 +436,7 @@ def get_elements_by_station(
 
 
 @app.get("/v1/geometry/sections/{section_id}/samples", tags=["几何查询"],
-         summary="按桩号区间取某个逐桩段的行（供 TruckSim / FEM）")
+         summary="按桩号区间取某个逐桩段的行（供 Chrono / FEM）")
 def get_samples_by_station(
     section_id: int,
     segment: str = Query(..., description="段名，取值见 /v1/catalog 的段清单"),
