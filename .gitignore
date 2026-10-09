@@ -32,6 +32,14 @@ scaffold/simulator/crg/*.csv
 scaffold/simulator/crg/build/
 scaffold/simulator/crg/chrono_export/
 
+# 编译 VSG / Chrono 时的**本机试跑目录**：里面是第三方源码（数百 MB）加编译
+# 产物（数 GB），全部可由 01b_build_vsg.sh / 02_build_chrono.sh 重新下载再生。
+# 宿主机上这两个脚本默认写到 $HOME/Sources 与 $HOME/Builds；本目录只是在开发
+# 沙箱里用 VSG_SRC_ROOT / CHRONO_SRC / CHRONO_BUILD 重定向出来的替身。
+.chronotest/
+.subtest/
+.vsgtest/
+
 # ============ 图件流水线的本地依赖与 QA 中间件 ============
 # .pylibs/ 是 PyMuPDF 的本地安装目录（约 26 MB，供技能自带的 PDF 审计脚本使用），
 # .mplcache/ 是 matplotlib 字体缓存，.qarenders/ 是视觉 QA 用的印刷尺寸栅格与
