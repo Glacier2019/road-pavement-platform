@@ -94,3 +94,7 @@ scaffold/work/*
 !scaffold/work/*/
 !scaffold/work/*/README.md
 .dsh/
+
+# answer-me-with-html 的页面缓存。默认落在 ~/.answer-me-with-html，
+# 但本开发沙箱的 $HOME 只读，故用 AM_HOME 指到仓库内。
+.amhome/
