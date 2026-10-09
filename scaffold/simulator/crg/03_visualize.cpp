@@ -43,6 +43,15 @@
 #include "chrono_vehicle/terrain/CRGTerrain.h"
 #include "chrono_vsg/ChVisualSystemVSG.h"
 
+// ★ 2026-10-09：为了在 Initialize() 之后把远裁剪面改掉。
+//   ChVisualSystemVSG 没有 GetCamera()，但 GetRenderCommandGraph() 是公开的，
+//   顺着它就能摸到 vsg::View，进而拿到相机。理由见 main 里「远裁剪面」那段。
+#include <algorithm>
+#include <vsg/app/CommandGraph.h>
+#include <vsg/app/View.h>
+#include <vsg/app/ProjectionMatrix.h>
+#include <vsg/nodes/Group.h>
+
 using namespace chrono;
 using namespace chrono::vehicle;
 // ★ 2026-10-09：ChVisualSystemVSG 在 chrono::vsg3d 里，不在 chrono 里。
@@ -244,12 +253,38 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ---- 相机取景：按路的实际范围算，不写死坐标
+    // ★ 2026-10-09：原来写的是 AddCamera((-120,-260,120), (0,0,0)) ——
+    //   那是瞄着路的**起点**、距离只有 306 m。5.8 km 的路在窗口里只剩开头一小截。
+    ChVector3d lo(1e30, 1e30, 1e30), hi(-1e30, -1e30, -1e30);
+    if (auto cl = terrain.GetRoadCenterLine()) {
+        for (const auto& p : cl->GetPoints()) {
+            lo.x() = std::min(lo.x(), p.x());  hi.x() = std::max(hi.x(), p.x());
+            lo.y() = std::min(lo.y(), p.y());  hi.y() = std::max(hi.y(), p.y());
+            lo.z() = std::min(lo.z(), p.z());  hi.z() = std::max(hi.z(), p.z());
+        }
+    }
+    const ChVector3d center(0.5 * (lo.x() + hi.x()),
+                            0.5 * (lo.y() + hi.y()),
+                            0.5 * (lo.z() + hi.z()));
+    const double span = std::max(std::max(hi.x() - lo.x(), hi.y() - lo.y()), 1.0);
+    // 60° 垂直视场下，装下 span 需要约 0.87*span 的距离；留约 1.7 倍余量。
+    const double dist = 1.5 * span;
+    const ChVector3d eye(center.x() - 0.55 * dist,
+                         center.y() - 0.70 * dist,
+                         center.z() + 0.45 * dist);
+    std::cout << "\n==> 路面范围 X[" << lo.x() << ", " << hi.x() << "]  Y["
+              << lo.y() << ", " << hi.y() << "]  跨度 " << span << " m" << std::endl;
+    std::cout << "==> 相机 眼(" << eye.x() << ", " << eye.y() << ", " << eye.z()
+              << ") -> 目标(" << center.x() << ", " << center.y() << ", " << center.z()
+              << ")  距离 " << (eye - center).Length() << " m" << std::endl;
+
     ChVisualSystemVSG vis;
     vis.AttachSystem(&sys);
     vis.SetWindowSize(ChVector2i(1600, 900));
     vis.SetWindowTitle("2025Y095 - CRG road (Chrono::Vehicle)");
     vis.SetCameraVertical(CameraVerticalDir::Z);
-    vis.AddCamera(ChVector3d(-120, -260, 120), ChVector3d(0, 0, 0));
+    vis.AddCamera(eye, center);
     // 显示世界原点坐标系，便于判断路面的绝对方位。
     // 默认是关的（ChVisualSystemVSG.cpp:322  m_show_abs_frame(false)），
     // 所以 Toggle 一次即打开。它只有切换形式，没有显式 bool 重载。
@@ -257,6 +292,64 @@ int main(int argc, char* argv[]) {
     vis.ToggleAbsFrameVisibility();
     vis.Initialize();
 
+    // ---- 远裁剪面
+    // ★★ 2026-10-09：**这才是"怎么感觉只有一小段圆曲线"的真正原因。**
+    //   Chrono 把远裁剪面写死成 500 m，而且没有任何接口能改：
+    //     chrono_vsg/ChVisualSystemVSG.cpp:709
+    //         double radius = 50.0;
+    //     chrono_vsg/ChVisualSystemVSG.cpp:843-845
+    //         vsg::Perspective::create(m_camera_angle_deg, aspect,
+    //                                  nearFarRatio * radius,  // 0.001*50 = 0.05 m
+    //                                  radius * 10.0);         // 50*10    = 500 m
+    //   紧挨着的 L710 `vsg::dbox bound;` 声明了却**一次都没被用过** ——
+    //   本该由场景包围盒去算 radius 的代码没写。上游硬伤，不是我们的 bug。
+    //   后果：5.8 km 的路在 500 m 处被整段裁掉，视野里只剩起点附近一小片。
+    //   官方 demo_VEH_CRGTerrain_VSG 不受影响 —— 它是跟车视角，只看前方百米。
+    //
+    //   绕法：ChVisualSystemVSG 没有 GetCamera()，但 GetRenderCommandGraph()
+    //   是公开的；vsg::createRenderGraphForView()（VSG 源码 RenderGraph.cpp:221）
+    //   会挂一个 View::create(camera)，而 vsg::View::camera 指的正是 Chrono
+    //   自己持有的那个 Camera 对象。投影矩阵在 RecordTraversal.cpp:613
+    //   每次录制命令图时重新读取，所以只改 vsg::Perspective 的两个 public
+    //   字段就生效，lookAt / 轨迹球完全不受影响。
+    {
+        int hits = 0;
+        // ★ vsg::ref_ptr 不是 std::shared_ptr，VSG 也没有提供自己的
+        //   dynamic_pointer_cast，所以只能在裸指针上 dynamic_cast。
+        //   （std::dynamic_pointer_cast<vsg::View>(ref_ptr) 会报
+        //    "no matching function"，因为 ref_ptr 不继承 std::__shared_ptr。）
+        auto walk = [&](auto&& self, vsg::ref_ptr<vsg::Node> n) -> void {
+            if (!n) return;
+            if (auto* v = dynamic_cast<vsg::View*>(n.get())) {
+                if (v->camera && v->camera->projectionMatrix) {
+                    if (auto* p = dynamic_cast<vsg::Perspective*>(
+                            v->camera->projectionMatrix.get())) {
+                        std::cout << "    原裁剪面 near=" << p->nearDistance
+                                  << " far=" << p->farDistance << std::endl;
+                        p->nearDistance = 1.0;
+                        p->farDistance = 100000.0;   // 100 km，装得下任何一条路
+                        ++hits;
+                    }
+                }
+            }
+            if (auto* g = dynamic_cast<vsg::Group*>(n.get()))
+                for (auto& c : g->children) self(self, c);
+        };
+        walk(walk, vis.GetRenderCommandGraph());
+        if (hits > 0)
+            std::cout << "==> 远裁剪面已改 near=1 far=100000 m（命中 " << hits
+                      << " 个相机）" << std::endl;
+        else
+            std::cout << "!! 没在命令图里找到相机，远处仍会被裁掉 —— "
+                         "VSG 的命令图结构可能变了。" << std::endl;
+    }
+
+    // ★ 这句原来是无条件打印的：段错误时它照样打，于是"窗口已开"成了一句假话。
+    //   现在真的去问一次 viewer。Run() 就是 while 循环里那个调用，不多担风险。
+    if (!vis.Run()) {
+        std::cout << "\n!! viewer 未进入活动状态 —— 窗口没起来。" << std::endl;
+        return 1;
+    }
     std::cout << "\n==> 窗口已开。鼠标左键=旋转 右键=平移 滚轮=缩放 Q/ESC=退出\n" << std::endl;
 
     while (vis.Run()) {

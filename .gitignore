@@ -29,6 +29,7 @@ __pycache__/
 scaffold/simulator/crg/*.crg
 scaffold/simulator/crg/*.obj
 scaffold/simulator/crg/*.csv
+scaffold/simulator/crg/*.png
 scaffold/simulator/crg/build/
 scaffold/simulator/crg/chrono_export/
 

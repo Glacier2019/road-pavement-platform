@@ -40,6 +40,28 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
 三个 Python 脚本都接受可选的 `.crg` 路径参数（默认 `route_0p1m.crg`），
 且只依赖 Python 标准库（`export_mesh.py` 亦然），可在任意目录直接运行。
 
+### 线形核对图（需要 numpy + matplotlib）
+
+```bash
+# 先把设计线形表导出到本目录（*.csv 被 gitignore，不随仓库分发）
+docker exec rp-pg psql -U rp -d road_pavement -t -A -F',' -c "
+SELECT element_seq, element_type, start_station_km, end_station_km,
+       start_x, start_y, end_x, end_y, azimuth_deg, end_azimuth_deg,
+       coalesce(radius_start_m,-1), coalesce(radius_end_m,-1)
+FROM alignment_element WHERE section_id=6 ORDER BY element_seq;" > alignment_element.csv
+
+PYTHONPATH=/data/cy/shujuku/.pylibs python3 plot_alignment.py
+```
+
+`plot_alignment.py` 把 `alignment_element` 表按方位角积分还原成平面几何，
+画成 `route_0p1m_plan.png`（平面线形 + 圆曲线半径 + 线形组成），并做**两项自校验**：
+
+1. 33 个单元的积分终点 vs 数据库 `end_x/end_y` → 实测最大偏差 **0.0007 m**；
+2. 设计坐标 → `.crg` 局部坐标的换算 vs 官方 OpenCRG 库读出的末点 → 相差 **0.414 m**。
+
+图上还标了旧相机位置及其 **500 m 远裁剪面**（见坑六），一眼能看出改前只看得见
+多大一片。
+
 ### 宿主侧（需要 GPU / 显示）
 
 **先装前置，否则下面四个脚本会依次失败**（实测踩过，见文末「三个会静默失败的坑」）：
@@ -162,7 +184,18 @@ $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 > 起点航向与终点航向夹角 **< 60°**（`divisor = cos(Δφ) > 0.5`），
 > 且两条延长线的交点落在合适位置 → `uIsClosed = 1`。
 
-我们这条路 5.8 km 转 **32.2°**，于是中招。探针实测（`.crg` 直接读）：
+我们这条路首尾航向只差 **32.2°**（149.465° → 117.239°），于是中招。
+注意它**不是**一段圆弧：按 0.5 m 等距积分 5805.4 m 实测——
+
+| 指标 | 值 | 说明 |
+| --- | --- | --- |
+| 净转角 | 32.2° | 首尾航向差，**闭合误判的直接触发条件** |
+| 累计转角 Σ\|Δaz\| | 264.0° | 全程弯的量 |
+| 转向翻转次数 | **15** | 左右来回摆 15 次 = 盘山路 |
+| 路线长 / 弦长 | 1.0568 | 弯道附加系数 5.7% |
+
+（`plot_alignment.py` 会把这四项连同平面图一起算出来。）
+探针实测（`.crg` 直接读）：
 
 ```
 start at x/y:      0.0000 / 0.0000      with phi [rad]: 2.6087   (149.5°)
@@ -196,7 +229,7 @@ crgCalcUtilityData: uMax = 5805.400, uMaxClosed = 8066.053
 要彻底消掉，得在消费侧自建网格（不用 `UseMeshVisualization(true)`），
 那是下一步的事。
 
-## ★ 五个会静默失败的坑（实测，均已修）
+## ★ 六个会静默失败的坑（实测，均已修）
 
 这三个都不是"报错"，而是**看起来成功、实际残缺**。凡在宿主上跑这几个脚本，
 先读这一节，能省一次 30 分钟的无效编译。
@@ -496,6 +529,82 @@ SetChronoDataPath(data_dir);
 `chrono_export/route_0p1m_mesh.obj` 可以直接用官方 `vsgviewer` 打开
 （纯 VSG，绕开 Chrono），实测能开窗。
 
+### 坑六：Chrono 把远裁剪面写死 500 m —— 5.8 km 的路只看得见开头一小截
+
+**症状**：窗口能开、不崩、路面也在，但**怎么感觉只有一小段圆曲线**。
+第一反应会怀疑"是不是路只生成了这么点"——不是。`GetLength()` 报 5805.4 m，
+导出的 `.obj` 也是满的。**是渲染时被裁掉了。**
+
+**根因**（`chrono_vsg/ChVisualSystemVSG.cpp`，实测非推测）：
+
+```cpp
+:709    double radius = 50.0;          // ← 全文件再无第二次赋值
+:710    vsg::dbox bound;               // ← 声明了，一次都没用过（死代码）
+...
+:843    double nearFarRatio = 0.001;
+:844    auto perspective = vsg::Perspective::create(m_camera_angle_deg, width/height,
+:845                                    nearFarRatio * radius,   // near = 0.05 m
+:846                                    radius * 10.0);          // far  = 500 m
+```
+
+本该由场景包围盒算出 `radius` 的那段代码**没写**，于是 `radius` 永远是 50，
+远裁剪面永远是 **500 m**。程序自己会把这两个数打出来，可以当场核对：
+
+```
+    原裁剪面 near=0.05 far=500
+```
+
+**为什么官方 demo 不炸**：`demo_VEH_CRGTerrain_VSG.cpp` 用的是
+`ChWheeledVehicleVisualSystemVSG`，跟着车走、只看前方百米，500 m 绰绰有余。
+
+**为什么没有接口**：`ChVisualSystemVSG.h` 里跟相机有关的公开 setter 只有
+`SetCameraAngleDeg(double)`，**没有** `SetNearFarClip` 之类，也没有 `GetCamera()`。
+
+**绕法**（`03_visualize.cpp` 里已实现，实测有效）：相机挂在命令图里，
+顺着公开的 `GetRenderCommandGraph()` 就能摸到，改 `vsg::Perspective` 的两个
+**public 字段**即可，`lookAt` / 轨迹球完全不受影响：
+
+```cpp
+// vsg::createRenderGraphForView() 会挂一个 View::create(camera)
+//   —— VSG 源码 src/vsg/app/RenderGraph.cpp:221
+// View::camera -> Camera::projectionMatrix
+//   —— include/vsg/app/View.h:67 / Camera.h:34
+// vsg::Perspective 在 include/vsg/app/ProjectionMatrix.h（没有单独的 Perspective.h）
+//   —— nearDistance / farDistance 都是 public 可写
+auto* p = dynamic_cast<vsg::Perspective*>(v->camera->projectionMatrix.get());
+p->nearDistance = 1.0;
+p->farDistance  = 100000.0;
+```
+
+**为什么改了立刻生效、不用重建对象**：投影矩阵在**每次录制命令图时**重新读取
+—— `src/vsg/app/RecordTraversal.cpp:613`：
+
+```cpp
+state->setProjectionAndViewMatrix(view.camera->projectionMatrix->transform(), ...);
+```
+
+**两个实现细节（都会编译失败，别踩）**：
+
+- `vsg::ref_ptr` **不是** `std::shared_ptr`，VSG 也没提供 `dynamic_pointer_cast`。
+  写 `std::dynamic_pointer_cast<vsg::View>(ref_ptr)` 会报
+  `no matching function for call to 'dynamic_pointer_cast<vsg::View>(const vsg::ref_ptr<vsg::Node>&)'`。
+  **正确做法是在裸指针上 `dynamic_cast`**：`dynamic_cast<vsg::View*>(n.get())`。
+- 相机顺带要一起改的还有**取景**：原来写死 `AddCamera((-120,-260,120), (0,0,0))`，
+  眼位离路起点只有 306 m。现在按中心线包围盒自动算：取 `lo/hi` 中心为目标，
+  `dist = 1.5 × 跨度`，眼位放在 `(-0.55, -0.70, +0.45) × dist` 方向。
+
+**判据**：运行输出里出现
+
+```
+==> 路面范围 X[...] Y[...]  跨度 4519.93 m
+==> 相机 眼(...) -> 目标(...)  距离 6762.93 m
+    原裁剪面 near=0.05 far=500
+==> 远裁剪面已改 near=1 far=100000 m（命中 1 个相机）
+```
+
+若出现 `!! 没在命令图里找到相机`，说明 VSG 的命令图结构变了，这段绕法要重写。
+
+
 ### 一条通用教训
 
 > **一个症状看起来像已知问题，不等于它就是那个问题。**
@@ -520,7 +629,14 @@ SetChronoDataPath(data_dir);
 起点 → "那条警告可以忽略"；`lexically_normal()` 悄悄吃掉了结尾斜杠，而我的
 自检用的是会自动补斜杠的 `operator/` → "自检通过"；探针编译失败、我接着跑的
 却是上一次的旧二进制，那句"探针退出码 0"属于新进程 → "探针验证过了"；
-`cmake --build … | head` 之后取到的 `$?` 是 `head` 的 → "编译退出码 0"。
+`cmake --build … | head` 之后取到的 `$?` 是 `head` 的 → "编译退出码 0"；
+按测量学课本把方位角写成 `(sin az, cos az)`（即默认 +Y 为北），而设计表用的是
+**X=北、Y=东**的投影坐标，方向向量应是 `(cos az, sin az)` —— 33 个线形单元
+**全部**算错，单元 1 偏 941 m，而我先只看了输出尾部，误判成"前 10 个是好的"
+→ "积分器写好了"；用 `alpha=0.16` 画出的圆圈混色后早已不是那个 RGB，我却拿
+原始 RGB 去数像素，得到 0 就以为没画上 → "圆圈没渲染"；反过来，一个真正画坏
+的图（视锥虚线画到 13.5 km，把坐标轴撑到 ±2 万米）光看"文件存在、尺寸正常"
+是发现不了的 → "图出来了"。
 
 **这条教训的操作化**：检查要**双向**都对，不只是"会失败"。
 
