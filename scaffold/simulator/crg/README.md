@@ -42,13 +42,44 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
 
 ### 宿主侧（需要 GPU / 显示）
 
+**先装前置，否则下面四个脚本会依次失败**（实测踩过，见文末「已知限制」）：
+
+```bash
+# 1) 编译工具与 GL 头文件（02 脚本会逐个 dpkg -s 检查，缺一个就退出）
+sudo apt-get install -y ninja-build cmake g++ curl unzip \
+  libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxext-dev \
+  libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev \
+  fonts-noto-cjk
+
+# 2) Vulkan 开发环境 —— 二选一
+#    (a) 发行版包（快，推荐先试）
+sudo apt-get install -y libvulkan-dev vulkan-tools glslang-tools
+#    (b) LunarG SDK（官方推荐，任何发行版都可用）
+#        从 https://vulkan.lunarg.com/sdk/home#linux 下 tarball，
+#        解压后 source 其 setup-env.sh（VULKAN_SDK 即生效）
+
+# 3) 确认 GPU 驱动真的能跑 Vulkan（VSG 是 Vulkan 后端，不能纯软件）
+vulkaninfo --summary
+```
+
+> ⚠ **不要用 LunarG 的 apt 源**除非你确认自己的发行版代号在其中。
+> 实测 `packages.lunarg.com/vulkan/lunarg-vulkan-<代号>.list` 只覆盖部分
+> Ubuntu 代号（jammy / noble 有，26.04 的 **resolute 没有**），
+> 且官方给的命令带 `wget -q`——**404 会被静默吞掉**，
+> 造成"装好了"的假象，一路带到 configure 阶段才炸。
+
+然后：
+
 ```bash
 ./01_build_opencrg.sh        # ①-1 编 OpenCRG v1.1.2（纯 CPU，可在任何机器上跑）
-./01b_build_vsg.sh           # ①-2 编 VSG 全家桶（Vulkan 后端，需 GPU + Vulkan SDK）
+./01b_build_vsg.sh           # ①-2 编 VSG 全家桶（Vulkan 后端，需 GPU + Vulkan 开发环境）
 ./02_build_chrono.sh         # ①-3 编 Chrono（Vehicle + OpenCRG + VSG）
 ./04_run_visualize.sh        # ①-4 开窗可视化（mesh 模式）
 ./04_run_visualize.sh --boundary    # 边界曲线模式
 ```
+
+`01b_build_vsg.sh` 会打印它选中的 Vulkan 来源（`LunarG SDK` 或 `系统包`），
+两条路 VSG 的 `find_package(Vulkan REQUIRED)` 都认。
 
 **必须先装 Vulkan SDK 与 `ninja-build`**：Chrono 的 `chrono_vsg` 用裸
 `find_package(vsg 1.1.0 REQUIRED)`，不会自动下载。官方锁定版本为

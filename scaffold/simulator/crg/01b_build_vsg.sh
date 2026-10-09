@@ -25,15 +25,42 @@ trap 'rm -rf "$WORK"' EXIT
 echo "==> VSG 依赖 -> $VSG_INSTALL_DIR"
 
 # --- 前置检查
+#
+# ★ 2026-10-09 放宽：原先硬性要求 VULKAN_SDK 环境变量，实测这**过严**了。
+#   VSG 的 CMake 用 find_package(Vulkan REQUIRED)，而 CMake 自带的 FindVulkan
+#   模块**同时认**发行版包（libvulkan-dev 提供 vulkan/vulkan.h + libvulkan.so）
+#   与 LunarG SDK（提供 VULKAN_SDK 环境变量）。两者都能编过。
+#
+#   触发这次放宽的具体情况：用户在 Ubuntu 26.04 (resolute) 上，
+#   LunarG 的 apt 源**没有** resolute 这个代号
+#   （packages.lunarg.com/vulkan/lunarg-vulkan-resolute.list 返回 404），
+#   而 `wget -q` 会把 404 也静默吞掉 —— 于是"装好了"的假象一路带到 configure 失败。
+#   故这里改成「有 SDK 就用，没有则回退到系统包」，并**明确打印走的是哪条路**。
 fail=0
-if [ -z "${VULKAN_SDK:-}" ]; then
-  echo "!! 未检测到 VULKAN_SDK 环境变量。"
-  echo "   请先安装 Vulkan SDK 并 source 其 setup-env.sh："
-  echo "     https://vulkan.lunarg.com/sdk/home"
+VULKAN_MODE=""
+if [ -n "${VULKAN_SDK:-}" ] && [ -d "${VULKAN_SDK}" ]; then
+  VULKAN_MODE="LunarG SDK ($VULKAN_SDK)"
+elif [ -f /usr/include/vulkan/vulkan.h ] && ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
+  VULKAN_MODE="系统包 (libvulkan-dev)"
+  echo "   提示: 未设 VULKAN_SDK，回退到发行版 Vulkan 包。"
+else
+  echo "!! 找不到 Vulkan 开发环境。二选一："
+  echo "   (a) 发行版包（更快，推荐先试）:"
+  echo "         sudo apt install -y libvulkan-dev vulkan-tools glslang-tools"
+  echo "   (b) LunarG SDK（官方推荐，任何发行版都可用）:"
+  echo "         从 https://vulkan.lunarg.com/sdk/home#linux 下 tarball，"
+  echo "         解压后 source 其 setup-env.sh"
+  echo "   ⚠ 注意: LunarG 的 apt 源只覆盖部分 Ubuntu 代号，"
+  echo "     新版本（如 resolute）没有；且 wget -q 会静默吞掉 404。"
   fail=1
 fi
+[ -n "$VULKAN_MODE" ] && echo "==> Vulkan 来源: $VULKAN_MODE"
+
 command -v ninja >/dev/null || { echo "!! 缺 ninja：sudo apt install ninja-build"; fail=1; }
-command -v glslangValidator >/dev/null || echo "   (提示: 未找到 glslangValidator，若 Vulkan SDK 装好通常会有)"
+command -v glslangValidator >/dev/null || {
+  echo "!! 缺 glslangValidator（VSG 编译着色器要用）："
+  echo "     sudo apt install -y glslang-tools"
+  fail=1; }
 [ "$fail" = 0 ] || exit 1
 
 # --- 取官方脚本
