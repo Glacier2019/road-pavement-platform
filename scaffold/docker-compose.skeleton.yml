@@ -332,8 +332,21 @@ services:
       # 而 /gw 的契约是只读转发（POST /gw/... → 405），两者不能共用一个地址。
       INGEST_BASE: http://ingest:8000
       INGEST_TIMEOUT_S: "120"
+      # 仿真产物的交付目录（M9 自己读，不经 /gw —— 它是 M9 的资产）。
+      # 只读挂载让容器**在结构上无法写**交付目录，可复现性因此不靠纪律。
+      SIM_ARTIFACTS_DIR: /data/sim
+      CRS_CONFIG: config/crs.yaml
       LOG_LEVEL: INFO
       TZ: Asia/Shanghai
+    # ★ 这是 console 服务的**第一个 volumes** —— 它改变了 M9 的暴露面：
+    #   在此之前 M9 只经 HTTP 读别人，从不碰宿主机文件系统。
+    #   `:ro` 不是可选项：宪法原则 II 的口径是"结构上做不到"优于"约定不这么做"。
+    # ⚠ 路径必须是 `../artifacts/sim`：compose 的**相对路径相对 compose 文件
+    #   所在目录**解析，写成 `./artifacts/sim` 会指向 scaffold/artifacts/sim ——
+    #   一个 docker 顺手建出来的**空目录**。表现是页面 503「清单不存在」，
+    #   而宿主机上产物明明都在。实测踩过一次。
+    volumes:
+      - ../artifacts/sim:/data/sim:ro
     ports:
       - "${CONSOLE_PORT:-8024}:8000"
     healthcheck:

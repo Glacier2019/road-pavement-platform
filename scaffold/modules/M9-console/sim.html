@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>三维起伏 · 路面局部帧查看器</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --fg: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+    background: var(--panel); display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header a { color: var(--accent); text-decoration: none; font-size: 12px; }
+  header a:hover { text-decoration: underline; }
+  #status { color: var(--dim); font-size: 12px; margin-left: auto; }
+  main { flex: 1; position: relative; min-height: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  .panel {
+    position: absolute; background: rgba(22,27,34,.94); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px 12px;
+  }
+  #controls { top: 12px; left: 12px; width: 268px; }
+  #readout { bottom: 12px; left: 12px; width: 268px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .row:last-child { margin-bottom: 0; }
+  label { color: var(--dim); font-size: 12px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .big { font-size: 15px; font-weight: 600; color: var(--accent); }
+  .hint { color: var(--warn); font-size: 11px; margin-top: 6px; line-height: 1.4; }
+  .kv { display: flex; justify-content: space-between; font-size: 11px; color: var(--dim); }
+  .kv b { color: var(--fg); font-weight: 500; }
+  .tag { padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+  .tag.assumed { background: #3d2f0a; color: var(--warn); border: 1px solid #6b5320; }
+  .tag.ready { background: #12261a; color: #3fb950; border: 1px solid #1f6f3a; }
+  #fatal { display: none; position: absolute; inset: 0; padding: 24px; background: var(--bg); }
+  #fatal h2 { color: var(--warn); font-size: 14px; }
+  #fatal pre { white-space: pre-wrap; color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>三维起伏 · 路面局部帧</h1>
+  <a href="/">← 回管理台</a>
+  <span id="status">正在载入…</span>
+</header>
+
+<main>
+  <canvas id="gl"></canvas>
+
+  <div class="panel" id="controls">
+    <div class="row">
+      <label for="zscale">垂直放大</label>
+      <span class="big" id="zval">1.0×</span>
+    </div>
+    <input type="range" id="zscale" min="1" max="30" step="0.5" value="1">
+    <div class="hint" id="zhint"></div>
+  </div>
+
+  <div class="panel" id="readout">
+    <div class="kv"><span>网格</span><b id="ro-mesh">—</b></div>
+    <div class="kv"><span>顶点 / 三角面</span><b id="ro-count">—</b></div>
+    <div class="kv"><span>纵向范围</span><b id="ro-ulen">—</b></div>
+    <div class="kv"><span>高程范围</span><b id="ro-zlen">—</b></div>
+    <div class="kv"><span>真尺度纵向比</span><b id="ro-ratio">—</b></div>
+    <div class="kv" style="margin-top:6px"><span>坐标基准</span><b id="ro-crs">—</b></div>
+  </div>
+
+  <div id="fatal">
+    <h2>取不到交付目录的产物</h2>
+    <pre id="fatal-msg"></pre>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+// ★ 取数入口声明。M9 的契约测试会核对这一行 —— 页面改走别的入口时，
+//   测试跟着红，避免"页面悄悄换了数据源而没人知道"。
+const ENTRY = "/v1/sim/manifest";
+
+// ---------------------------------------------------------------- 状态
+const S = {
+  zscale: 1.0,          // ★ 默认 1.0 = 真尺度。不自动放大（FR-004）。
+  az: -0.6, el: 0.85, dist: 0,   // 轨道相机
+  target: [0, 0, 0],
+  gl: null, prog: null, buf: null,
+  nIndex: 0, mesh: null, meta: null,
+  aspect: 1,
+};
+
+// ---------------------------------------------------------------- 矩阵（列主序，与 WebGL 一致）
+function mat4() { return new Float32Array(16); }
+function perspective(out, fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  out[0]=f/aspect; out[1]=0; out[2]=0;  out[3]=0;
+  out[4]=0; out[5]=f; out[6]=0; out[7]=0;
+  out[8]=0; out[9]=0; out[10]=(far+near)*nf; out[11]=-1;
+  out[12]=0; out[13]=0; out[14]=2*far*near*nf; out[15]=0;
+  return out;
+}
+function lookAt(out, eye, ctr, up) {
+  const z = norm(sub(eye, ctr)), x = norm(cross(up, z)), y = cross(z, x);
+  out[0]=x[0]; out[1]=y[0]; out[2]=z[0]; out[3]=0;
+  out[4]=x[1]; out[5]=y[1]; out[6]=z[1]; out[7]=0;
+  out[8]=x[2]; out[9]=y[2]; out[10]=z[2]; out[11]=0;
+  out[12]=-dot(x,eye); out[13]=-dot(y,eye); out[14]=-dot(z,eye); out[15]=1;
+  return out;
+}
+function mul(out, a, b) {
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+    let s = 0; for (let k = 0; k < 4; k++) s += a[k*4+j] * b[i*4+k];
+    out[i*4+j] = s;
+  }
+  return out;
+}
+const sub = (a,b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const dot = (a,b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross = (a,b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+function norm(a) { const L = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/L, a[1]/L, a[2]/L]; }
+
+// ---------------------------------------------------------------- 着色器
+// ★ 法线按非均匀缩放的逆转置修正：S = diag(1,1,k) ⇒ n' = (n.x, n.y, n.z/k)。
+//   不修正的话，放大后光照仍按真实表面走，视觉上会和几何对不上。
+const VS = `
+attribute vec3 aPos;
+attribute vec3 aNrm;
+uniform mat4 uMVP;
+uniform float uZ;
+varying vec3 vN;
+varying float vZraw;
+void main() {
+  vec3 p = vec3(aPos.x, aPos.y, aPos.z * uZ);
+  vN = normalize(vec3(aNrm.x, aNrm.y, aNrm.z / uZ));
+  vZraw = aPos.z;
+  gl_Position = uMVP * vec4(p, 1.0);
+}`;
+
+const FS = `
+precision mediump float;
+varying vec3 vN;
+varying float vZraw;
+uniform vec3 uLight;
+uniform float uZmin;
+uniform float uZspan;
+void main() {
+  float lam = max(dot(normalize(vN), uLight), 0.0);
+  // 高程着色：**显示刻度**，不是判定阈值。低处偏青，高处偏暖。
+  float t = clamp((vZraw - uZmin) / max(uZspan, 1e-6), 0.0, 1.0);
+  vec3 lo = vec3(0.16, 0.36, 0.52);
+  vec3 hi = vec3(0.85, 0.63, 0.30);
+  vec3 base = mix(lo, hi, t);
+  gl_FragColor = vec4(base * (0.42 + 0.58 * lam), 1.0);
+}`;
+
+function compile(gl, type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    throw new Error("着色器编译失败：" + gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------- 网格解码
+// ★ 二进制里没有自描述头 —— nu/nv/位宽全在清单里。
+//   这是有意的：清单是契约，几何是载荷，两者分开。
+function decodeMesh(buf, meshMeta) {
+  const { nu, nv, position_dtype, index_dtype } = meshMeta;
+  if (position_dtype !== "float32") throw new Error("位置位宽不支持：" + position_dtype);
+  const nVtx = nu * nv, nTri = (nu - 1) * (nv - 1) * 2;
+  const posBytes = nVtx * 12;
+  const pos = new Float32Array(buf, 0, nVtx * 3);
+  let idx;
+  if (index_dtype === "uint16") idx = new Uint16Array(buf, posBytes, nTri * 3);
+  else if (index_dtype === "uint32") idx = new Uint32Array(buf, posBytes, nTri * 3);
+  else throw new Error("索引位宽不支持：" + index_dtype);
+  if (buf.byteLength !== posBytes + nTri * 3 * (index_dtype === "uint16" ? 2 : 4)) {
+    throw new Error("二进制长度与清单不符：实得 " + buf.byteLength + " 字节");
+  }
+  return { pos, idx, nu, nv, nVtx, nTri };
+}
+
+// 由规则网格差分求顶点法线。★ 规则网格的好处：法线是纯算术，不必遍历三角面。
+function computeNormals(pos, nu, nv) {
+  const n = new Float32Array(nu * nv * 3);
+  for (let iu = 0; iu < nu; iu++) {
+    for (let iv = 0; iv < nv; iv++) {
+      const a = (iu * nv + iv) * 3;
+      const iuP = Math.min(iu + 1, nu - 1), iuM = Math.max(iu - 1, 0);
+      const ivP = Math.min(iv + 1, nv - 1), ivM = Math.max(iv - 1, 0);
+      const su = (iuP - iuM) || 1, sv = (ivP - ivM) || 1;
+      const b = (iuP * nv + iv) * 3, c = (iuM * nv + iv) * 3;
+      const d = (iu * nv + ivP) * 3, e = (iu * nv + ivM) * 3;
+      const t1 = [(pos[b]-pos[c])/su, (pos[b+1]-pos[c+1])/su, (pos[b+2]-pos[c+2])/su];
+      const t2 = [(pos[d]-pos[e])/sv, (pos[d+1]-pos[e+1])/sv, (pos[d+2]-pos[e+2])/sv];
+      const nn = norm(cross(t1, t2));
+      n[a] = nn[0]; n[a+1] = nn[1]; n[a+2] = nn[2];
+    }
+  }
+  return n;
+}
+
+// ---------------------------------------------------------------- 渲染
+function resize() {
+  const cv = document.getElementById("gl");
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.floor(cv.clientWidth * dpr));
+  const h = Math.max(1, Math.floor(cv.clientHeight * dpr));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  S.aspect = w / h;
+}
+
+function draw() {
+  const gl = S.gl;
+  if (!gl || !S.mesh) return;
+  resize();
+  gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  gl.clearColor(0.05, 0.067, 0.09, 1.0);
+  gl.enable(gl.DEPTH_TEST);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  const [tx, ty, tz] = S.target;
+  const eye = [
+    tx + S.dist * Math.cos(S.el) * Math.cos(S.az),
+    ty + S.dist * Math.cos(S.el) * Math.sin(S.az),
+    tz + S.dist * Math.sin(S.el),
+  ];
+  const proj = perspective(mat4(), 0.9, S.aspect, S.dist / 500, S.dist * 8);
+  const view = lookAt(mat4(), eye, S.target, [0, 0, 1]);
+  const mvp = mul(mat4(), proj, view);
+
+  gl.useProgram(S.prog);
+  gl.uniformMatrix4fv(S.prog.uMVP, false, mvp);
+  gl.uniform1f(S.prog.uZ, S.zscale);
+  gl.uniform3f(S.prog.uLight, 0.42, 0.34, 0.84);
+  gl.uniform1f(S.prog.uZmin, S.meta.zmin);
+  gl.uniform1f(S.prog.uZspan, S.meta.zmax - S.meta.zmin);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufPos);
+  gl.enableVertexAttribArray(S.prog.aPos);
+  gl.vertexAttribPointer(S.prog.aPos, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufNrm);
+  gl.enableVertexAttribArray(S.prog.aNrm);
+  gl.vertexAttribPointer(S.prog.aNrm, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, S.bufIdx);
+  gl.drawElements(gl.TRIANGLES, S.nIndex, S.idxType, 0);
+}
+
+// ---------------------------------------------------------------- 交互
+function bindInteraction() {
+  const cv = document.getElementById("gl");
+  let dragging = false, lx = 0, ly = 0;
+  cv.addEventListener("pointerdown", e => {
+    dragging = true; lx = e.clientX; ly = e.clientY;
+    cv.classList.add("dragging"); cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    S.az -= (e.clientX - lx) * 0.006;
+    S.el = Math.max(-1.45, Math.min(1.45, S.el + (e.clientY - ly) * 0.006));
+    lx = e.clientX; ly = e.clientY;
+    draw();
+  });
+  cv.addEventListener("pointerup", e => {
+    dragging = false; cv.classList.remove("dragging");
+    try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+  });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    S.dist *= Math.exp(e.deltaY * 0.0012);
+    draw();
+  }, { passive: false });
+}
+
+function bindZScale() {
+  const sl = document.getElementById("zscale");
+  const out = document.getElementById("zval");
+  const hint = document.getElementById("zhint");
+  const apply = () => {
+    S.zscale = parseFloat(sl.value);
+    out.textContent = S.zscale.toFixed(1) + "×" + (S.zscale === 1 ? "（真尺度）" : "");
+    // ★ 真尺度下画面几乎是平的，这不是 bug，是尺度本身。说清楚，别让人以为坏了。
+    // ★ 倍数与跨度**都从同一处算出来的 S.meta 取**，不写死数字：
+    //   写死的数一定会漂 —— 本页第一版这里写 152，而右边面板算的是 185，
+    //   两个数在同一个屏幕上，用的是两种口径。
+    hint.textContent = (S.zscale === 1)
+      ? "真尺度：平面跨度约 " + (S.meta.planar / 1000).toFixed(1) + " km，高差仅 "
+        + S.meta.dz.toFixed(2) + " m，纵向被压缩约 " + S.meta.ratio + " 倍。"
+        + "把倍数调大才能看出起伏 —— 这是尺度的性质，不是数据的问题。"
+      : "当前纵向已放大 " + S.zscale.toFixed(1) + " 倍。这是显示倍数，不是真实纵坡。";
+    draw();
+  };
+  sl.addEventListener("input", apply);
+  apply();
+}
+
+// ---------------------------------------------------------------- 启动
+function fatal(msg) {
+  document.getElementById("fatal-msg").textContent = msg;
+  document.getElementById("fatal").style.display = "block";
+  document.getElementById("status").textContent = "载入失败";
+}
+
+async function boot() {
+  const st = document.getElementById("status");
+  st.textContent = "读清单…";
+  const resp = await fetch(ENTRY);
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error("GET " + ENTRY + " → " + resp.status + "\n" + body.slice(0, 600));
+  }
+  const { manifest, crs } = await resp.json();
+
+  // 优先总览档（体积小、首屏快）；没有就退到任意一档地形网格。
+  const meshes = manifest.artifacts.filter(a => a.kind === "terrain_mesh" && a.present);
+  if (!meshes.length) throw new Error("清单里没有 present 的地形网格。");
+  const pick = meshes.find(m => m.name.indexOf("overview") >= 0) || meshes[0];
+  S.meta = pick.mesh;
+
+  st.textContent = "下载网格 " + pick.name + "…";
+  const mresp = await fetch("/artifacts/" + encodeURIComponent(pick.name));
+  if (!mresp.ok) throw new Error("GET /artifacts/" + pick.name + " → " + mresp.status);
+  const buf = await mresp.arrayBuffer();
+
+  const { pos, idx, nu, nv, nVtx, nTri } = decodeMesh(buf, S.meta);
+  const nrm = computeNormals(pos, nu, nv);
+
+  let zmin = Infinity, zmax = -Infinity;
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  for (let i = 0; i < nVtx; i++) {
+    const x = pos[i*3], y = pos[i*3+1], z = pos[i*3+2];
+    if (z < zmin) zmin = z; if (z > zmax) zmax = z;
+    if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+    if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+  }
+  S.meta.zmin = zmin; S.meta.zmax = zmax;
+  S.target = [(xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2];
+  const span = Math.max(xmax-xmin, ymax-ymin);
+  S.dist = span * 0.95;
+
+  const cv = document.getElementById("gl");
+  const gl = cv.getContext("webgl", { antialias: true, depth: true });
+  if (!gl) throw new Error("浏览器不支持 WebGL。");
+  S.gl = gl;
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error("着色器链接失败：" + gl.getProgramInfoLog(prog));
+  }
+  prog.aPos = gl.getAttribLocation(prog, "aPos");
+  prog.aNrm = gl.getAttribLocation(prog, "aNrm");
+  prog.uMVP = gl.getUniformLocation(prog, "uMVP");
+  prog.uZ   = gl.getUniformLocation(prog, "uZ");
+  prog.uLight = gl.getUniformLocation(prog, "uLight");
+  prog.uZmin = gl.getUniformLocation(prog, "uZmin");
+  prog.uZspan = gl.getUniformLocation(prog, "uZspan");
+  S.prog = prog;
+
+  S.bufPos = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufPos);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+  S.bufNrm = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufNrm);
+  gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.STATIC_DRAW);
+  S.bufIdx = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, S.bufIdx);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+  S.nIndex = idx.length;
+  S.idxType = (S.meta.index_dtype === "uint16") ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
+  S.mesh = true;
+
+  // 读数
+  document.getElementById("ro-mesh").textContent = pick.name;
+  document.getElementById("ro-count").textContent = nVtx.toLocaleString() + " / " + nTri.toLocaleString();
+  document.getElementById("ro-ulen").textContent = ((nu - 1) * S.meta.u_step_m / 1000).toFixed(3) + " km";
+  document.getElementById("ro-zlen").textContent = (zmax - zmin).toFixed(2) + " m";
+  const planar = Math.hypot(xmax-xmin, ymax-ymin);
+  const dz = Math.max(zmax - zmin, 1e-6);
+  // ★ 比值只算一次，读数与提示语共用 —— 两处各算一次就会各说各话。
+  S.meta.planar = planar; S.meta.dz = dz; S.meta.ratio = Math.round(planar / dz);
+  document.getElementById("ro-ratio").textContent = "1 : " + S.meta.ratio;
+
+  // 坐标基准：★ 局部帧不需要带号，这里只是把"当前假定"显示出来（FR-017）
+  const gf = (crs && crs.geographic_frame) || null;
+  const roCrs = document.getElementById("ro-crs");
+  if (gf) {
+    const tags = [];
+    tags.push(gf.ready ? '<span class="tag ready">区域帧可用</span>'
+                       : '<span class="tag assumed">区域帧未启用</span>');
+    if (gf.assumed) tags.push('<span class="tag assumed">带号 ' + gf.zone_number + ' 为推断值</span>');
+    roCrs.innerHTML = tags.join(" ");
+    roCrs.title = "中央子午线 " + gf.central_meridian_deg + "°E，" + gf.ellipsoid
+      + "。局部帧不使用带号；它是区域帧的配置。";
+  } else {
+    roCrs.textContent = (crs && crs._error) ? "配置读取失败" : "未配置";
+  }
+
+  bindInteraction();
+  bindZScale();
+  window.addEventListener("resize", draw);
+  st.textContent = "就绪 · 拖动旋转，滚轮缩放";
+  draw();
+}
+
+boot().catch(e => fatal(String(e && e.message ? e.message : e)));
+</script>
+</body>
+</html>

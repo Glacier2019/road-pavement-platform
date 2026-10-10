@@ -1,0 +1,69 @@
+{
+  "version": "artifact_manifest.v0.1",
+  "generated_at": "2026-10-10T17:18:21.122031+08:00",
+  "producer": {
+    "module": "simulator/crg",
+    "note": "export_viewer_mesh.py 从 route_0p1m.crg 抽稀出两档 LOD"
+  },
+  "frame": {
+    "kind": "local",
+    "crs_ready": false,
+    "crs_assumed": true
+  },
+  "artifacts": [
+    {
+      "name": "terrain_overview.bin",
+      "kind": "terrain_mesh",
+      "present": true,
+      "bytes": 296316,
+      "mime": "application/octet-stream",
+      "note": "u 步长 4.0 m；由 route_0p1m.crg 抽稀",
+      "mesh": {
+        "nu": 1453,
+        "nv": 9,
+        "position_dtype": "float32",
+        "index_dtype": "uint16",
+        "u_step_m": 4.0,
+        "v_samples_m": [
+          -4.25,
+          -3.5,
+          -2.625,
+          -1.75,
+          0.0,
+          1.75,
+          2.625,
+          3.5,
+          4.25
+        ],
+        "z_source": "CRG 实测地形高程（86 通道在目标 v 处线性插值）。★ 不是中线控制点 z —— 后者比实际路面高约 200 mm 且无路拱。"
+      }
+    },
+    {
+      "name": "terrain_near.bin",
+      "kind": "terrain_mesh",
+      "present": true,
+      "bytes": 1184532,
+      "mime": "application/octet-stream",
+      "note": "u 步长 1.0 m；由 route_0p1m.crg 抽稀",
+      "mesh": {
+        "nu": 5807,
+        "nv": 9,
+        "position_dtype": "float32",
+        "index_dtype": "uint16",
+        "u_step_m": 1.0,
+        "v_samples_m": [
+          -4.25,
+          -3.5,
+          -2.625,
+          -1.75,
+          0.0,
+          1.75,
+          2.625,
+          3.5,
+          4.25
+        ],
+        "z_source": "CRG 实测地形高程（86 通道在目标 v 处线性插值）。★ 不是中线控制点 z —— 后者比实际路面高约 200 mm 且无路拱。"
+      }
+    }
+  ]
+}

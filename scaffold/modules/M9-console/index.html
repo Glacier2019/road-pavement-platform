@@ -68,6 +68,7 @@
   <a href="/" class="here">首页</a>
   <a href="/tables">数据表盘点</a>
   <a href="/geometry">GE 道路几何</a>
+  <a href="/sim">三维起伏</a>
   <a href="/import">设计数据导入</a>
   <a href="/docs">接口文档</a>
 </nav>
@@ -89,6 +90,16 @@
         <a href="/geometry">GE 道路几何</a>
         <p>按路段看桩号序列、交点链、线元链、纵断面，以及几何完整度等级 L0–L4。
            缺口分成「表还没建」与「建好了但没数据」两类。</p>
+      </div>
+      <div class="card">
+        <a href="/sim">三维起伏 · 局部帧</a>
+        <p>把 <span class="mono">route_0p1m.crg</span> 抽稀成网格后在浏览器里画出来，
+           看清这条路<strong>本身的三维起伏</strong>。
+           垂直放大倍数<strong>始终显示</strong>，默认真尺度 —— 平面约 4.5 km 对高差
+           29.75 m，真尺度下画面几乎是平的，<strong>那是尺度的性质，不是数据的问题</strong>。
+           <span class="muted">这一页<b>不加载任何外部资源</b>：三维渲染是内联手写 WebGL，
+           没有 CDN，也没有构建步骤。产物从只读交付目录
+           <span class="mono">artifacts/sim/</span> 按<b>清单白名单</b>取。</span></p>
       </div>
       <div class="card">
         <a href="/import">设计数据导入</a>

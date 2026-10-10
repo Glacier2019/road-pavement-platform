@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import pathlib
 import re
 import sys
@@ -146,6 +147,7 @@ def main() -> int:
     PAGES = {
         "geometry.html": 'const GW = "/gw"',
         "import.html": 'const GW = "/gw"',      # 读路段列表仍经 /gw → M6
+        "sim.html": 'const ENTRY = "/v1/sim/manifest"',   # 交付目录是 M9 自己的资产，不经 /gw
         "tables.html": 'const GW = ""',         # 表盘点经 /gw（见第 5 组）
         "index.html": 'const GW = ""',
     }
@@ -371,6 +373,160 @@ def main() -> int:
     ok("上游不可达 → 502（如实报，不假装）", r.status_code == 502, f"{r.status_code}")
     ok("502 的说明里点名了上游是谁", "M6" in str(r.json().get("detail", "")), r.text[:160])
     APP.GATEWAY_BASE = base
+
+    # ------------------------------------- 3f) 三维起伏页：交付目录的白名单与只读
+    # 这一组钉的是**两件在别处看不出来的事**：
+    #   · 白名单：目录里存在但没登记的文件必须取不到。用 StaticFiles 挂目录
+    #     会把暴露面交给目录内容 —— 谁丢个文件进去就多一个可取的东西。
+    #   · 只读挂载：容器必须**在结构上无法写**交付目录。写成 `:rw` 一切照常跑，
+    #     没有任何东西会红，直到某天产物被容器改掉而没人知道是谁改的。
+    print("\n=== 3f) 三维起伏页：白名单取数 + 交付目录只读 ===")
+    import tempfile
+
+    r = client.get("/sim")
+    ok("/sim → 200 且是 HTML", r.status_code == 200 and "<title>" in r.text, f"{r.status_code}")
+    ok("/sim 的内容确实是那一页", "三维起伏" in r.text)
+    ok("首页链到 /sim（入口真的点得到）", 'href="/sim"' in client.get("/").text)
+    ok("三维页链回首页", 'href="/"' in client.get("/sim").text)
+
+    _sim = (M9_DIR / "sim.html").read_text(encoding="utf-8")
+
+    # —— 页面不判定。宪法「未标定的阈值不得用于生产判定」。
+    _VERDICT = r"合格|不合格|超标|正常范围"
+    ok("三维页里没有判定字样（显示刻度不是判定阈值）",
+       not re.search(_VERDICT, _sim), str(re.findall(_VERDICT, _sim)[:3]))
+    ok("元测试：注入「判定为合格」后必须被认出来（非摆设）",
+       bool(re.search(_VERDICT, _sim + "<p>判定为合格</p>")))
+
+    # —— 垂直放大系数必须**始终可见**，且默认是真尺度。
+    #    真尺度下画面几乎是平的（4.5 km 对 29.75 m）。若默认自动放大，
+    #    一张截图拿出去就会被当成真实纵坡 —— 所以默认必须是 1.0。
+    ok("三维页有垂直放大控件，且读数元素常驻（不是只在拖动时出现）",
+       'id="zscale"' in _sim and 'id="zval"' in _sim)
+    ok("垂直放大默认 1.0（真尺度），不自动放大",
+       'value="1"' in _sim and "zscale: 1.0" in _sim)
+    ok("三维页说明了「真尺度下几乎是平的」不是数据问题",
+       "不是数据的问题" in _sim or "不是 bug" in _sim)
+    ok("元测试：把默认值改成自动放大后必须被认出来（非摆设）",
+       'value="1"' not in _sim.replace('value="1"', 'value="15"', 1))
+
+    # —— 交付目录必须是只读挂载，且路径固定。
+    _compose = (ROOT / "docker-compose.skeleton.yml").read_text(encoding="utf-8")
+    _sec = _compose.split("  console:")[1].split("\n  agent:")[0]
+    ok("compose 的 console 段挂了交付目录", "/data/sim" in _sec, _sec[:200])
+    ok("交付目录是**只读**挂载（:ro）", "../artifacts/sim:/data/sim:ro" in _sec)
+    ok("元测试：去掉 :ro 后必须被认出来（非摆设）",
+       "../artifacts/sim:/data/sim:ro" not in _sec.replace(":/data/sim:ro", ":/data/sim", 1))
+    ok("compose 通过环境变量告知交付目录位置（路径不写死在代码里）",
+       "SIM_ARTIFACTS_DIR" in _sec)
+    # ★★ 这一条是本组最值钱的一条。compose 的**相对路径相对 compose 文件所在目录**
+    #    解析 —— 写成 `./artifacts/sim` 会指向 scaffold/artifacts/sim，一个 docker
+    #    顺手建出来的**空目录**。表现是页面 503「清单不存在」，而宿主机上产物都在，
+    #    很容易去查路由或挂载权限，查不到点子上。实测踩过一次。
+    #    所以这里不比对字符串，而是**按 compose 的规则把路径解析出来再看磁盘**。
+    _mnt = re.search(r"-\s*(\S+):/data/sim:ro", _sec)
+    ok("挂载源路径解析得出来", _mnt is not None)
+    if _mnt:
+        _src = (_compose_dir := ROOT) / _mnt.group(1)
+        _src = pathlib.Path(os.path.normpath(str(_src)))
+        ok(f"挂载源按 compose 规则解析后指向交付目录（实得 {_src}）",
+           _src == ROOT.parent / "artifacts" / "sim", str(_src))
+        ok("挂载源里确实有清单（挂空目录会让页面 503，而宿主机上一切正常）",
+           (_src / "manifest.json").is_file(), f"{_src} 里没有 manifest.json")
+        ok("元测试：把路径改成 ./artifacts/sim 后必须被认出来（非摆设）",
+           pathlib.Path(os.path.normpath(str(ROOT / "./artifacts/sim")))
+           != ROOT.parent / "artifacts" / "sim")
+
+    # —— 白名单：**真的发一次请求**。用临时目录造三种文件：
+    #    登记过的、没登记的、以及一个路径穿越尝试。
+    with tempfile.TemporaryDirectory() as _td:
+        _t = pathlib.Path(_td)
+        (_t / "ok.bin").write_bytes(b"0123456789" * 10)
+        (_t / "sneaky.txt").write_bytes(b"should not be reachable")
+        (_t / "manifest.json").write_text(json.dumps({
+            "version": "artifact_manifest.v0.1",
+            "generated_at": "2026-10-10T00:00:00+08:00",
+            "producer": {"module": "test"},
+            "frame": {"kind": "local", "crs_ready": False, "crs_assumed": True},
+            "artifacts": [{
+                "name": "ok.bin", "kind": "terrain_mesh", "present": True,
+                "bytes": 100, "mime": "application/octet-stream",
+                "mesh": {"nu": 2, "nv": 2, "position_dtype": "float32",
+                         "index_dtype": "uint16", "u_step_m": 1.0},
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        _orig = APP.SIM_ARTIFACTS_DIR
+        APP.SIM_ARTIFACTS_DIR = _t
+        try:
+            ok("清单里登记的文件取得到", client.get("/artifacts/ok.bin").status_code == 200)
+            ok("清单里**没登记**的文件取不到 → 404（白名单生效）",
+               client.get("/artifacts/sneaky.txt").status_code == 404)
+            ok("目录里没登记的文件确实存在（上一条不是因为文件不存在才 404）",
+               (_t / "sneaky.txt").is_file())
+            ok("路径穿越 → 404", client.get("/artifacts/..%2Fmanifest.json").status_code == 404)
+            ok("路径穿越（未编码）→ 404", client.get("/artifacts/../manifest.json").status_code == 404)
+            # ★ Range：不返回 206 的实现**视频照样能播，只是拖不动进度条**。
+            #   "能播"会让粗看的人以为它对了 —— 所以这一条必须单独验。
+            _r = client.get("/artifacts/ok.bin", headers={"Range": "bytes=0-9"})
+            ok("带 Range 的请求 → 206 Partial Content", _r.status_code == 206, f"{_r.status_code}")
+            ok("206 响应带 Content-Range 且长度正确",
+               _r.headers.get("content-range", "").endswith("/100")
+               and len(_r.content) == 10,
+               f"{_r.headers.get('content-range')} len={len(_r.content)}")
+            # ★★ 这一条是本组最值钱的一条。Range 行为**不能依赖库版本**：
+            #    宿主机 starlette 0.38.6（无 Range）、容器 0.41.3（有 Range），
+            #    而 requirements.txt 只钉了 fastapi，starlette 是浮动解析的。
+            #    若把 Range 交给 FileResponse，同一份代码在两个环境行为不同，
+            #    "契约测试通过"就失去意义 —— 与"宿主机全绿、容器里 500"同型。
+            _app_src = (M9_DIR / "app.py").read_text(encoding="utf-8")
+            ok("Range 是自己实现的，不依赖库版本（两边行为必须一致）",
+               "def _serve_file_with_range(" in _app_src
+               and 'status_code=206' in _app_src)
+            ok("元测试：去掉自实现后必须被认出来（非摆设）",
+               "def _serve_file_with_range(" not in
+               _app_src.replace("def _serve_file_with_range(", "def _unused(", 1))
+            _r = client.get("/artifacts/ok.bin", headers={"Range": "bytes=90-"})
+            ok("bytes=90- 这类开放式区间也对（不只是闭区间）",
+               _r.status_code == 206 and len(_r.content) == 10, f"{_r.status_code}")
+            _r = client.get("/artifacts/ok.bin", headers={"Range": "bytes=-15"})
+            ok("bytes=-N（末 N 字节）也对", _r.status_code == 206 and len(_r.content) == 15,
+               f"{_r.status_code} len={len(_r.content)}")
+            _r = client.get("/artifacts/ok.bin", headers={"Range": "bytes=999-1200"})
+            ok("越界区间 → 416（不假装成 200）", _r.status_code == 416, f"{_r.status_code}")
+            _r = client.get("/artifacts/ok.bin", headers={"Range": "bytes=abc"})
+            ok("畸形区间 → 回退整文件 200（不假装成 206）",
+               _r.status_code == 200 and len(_r.content) == 100, f"{_r.status_code}")
+            _r = client.get("/artifacts/ok.bin")
+            ok("无 Range → 200 且带 accept-ranges（告诉客户端可以拖）",
+               _r.status_code == 200 and _r.headers.get("accept-ranges") == "bytes")
+            ok("元测试：把白名单换成直接拼路径后必须被认出来（非摆设）",
+               "sneaky.txt" in [p.name for p in _t.glob("*.txt")]
+               and not any(a["name"] == "sneaky.txt"
+                           for a in json.loads((_t / "manifest.json").read_text())["artifacts"]))
+        finally:
+            APP.SIM_ARTIFACTS_DIR = _orig
+
+    # 清单不存在时必须**如实报**，不能假装目录是空的
+    _orig = APP.SIM_ARTIFACTS_DIR
+    APP.SIM_ARTIFACTS_DIR = pathlib.Path("/nonexistent-delivery-dir")
+    try:
+        _r = client.get("/v1/sim/manifest")
+        ok("交付目录没有清单 → 503 且说明该跑哪个脚本",
+           _r.status_code == 503 and "export_viewer_mesh.py" in str(_r.json().get("detail", "")),
+           f"{_r.status_code}")
+    finally:
+        APP.SIM_ARTIFACTS_DIR = _orig
+
+    # —— 契约正本必须在 scaffold/contracts/ 下（宪法「接入约束」第 4 件）
+    _ctr = ROOT / "contracts" / "delivery" / "artifact_manifest.v0.1.schema.json"
+    ok("产物清单契约在 scaffold/contracts/delivery/ 下（正本唯一）",
+       _ctr.is_file(), str(_ctr))
+    if _ctr.is_file():
+        _sch = json.loads(_ctr.read_text(encoding="utf-8"))
+        ok("契约是白名单式的（additionalProperties: false）",
+           _sch.get("additionalProperties") is False)
+        ok("契约限定 name 不许含路径分隔符（路由据此防穿越）",
+           "/" not in _sch["properties"]["artifacts"]["items"]["properties"]["name"]["pattern"])
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0

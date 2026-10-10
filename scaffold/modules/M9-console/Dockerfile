@@ -19,6 +19,7 @@ COPY app.py ./
 COPY geometry.html ./
 COPY index.html ./
 COPY import.html ./
+COPY sim.html ./
 COPY tables.html ./
 # 配置外置：config/ 随镜像带默认值，生产由 volume/环境变量覆盖（五件套第 3 件）
 COPY config/ ./config/
