@@ -44,6 +44,7 @@
 #include <cmath>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 
 #include "chrono/physics/ChSystemSMC.h"
 #include "chrono/core/ChDataPath.h"
@@ -181,6 +182,7 @@ struct WheelLoad {
     double vertical;
     double lateral;
     double longitudinal;
+    double contact_z;   // 着地点高程；force 为 0 时用它区分「零载荷」与「没有数据」
 };
 
 static std::vector<WheelLoad> ReadWheelLoads(ChWheeledVehicle& veh, ChTerrain* terrain) {
@@ -200,11 +202,72 @@ static std::vector<WheelLoad> ReadWheelLoads(ChWheeledVehicle& veh, ChTerrain* t
             wl.vertical = tf.force.z();
             wl.lateral = tf.force.y();
             wl.longitudinal = tf.force.x();
+            wl.contact_z = tf.point.z();
             loads.push_back(wl);
         }
     }
     return loads;
 }
+
+// -----------------------------------------------------------------------------
+// 轮荷时间序列导出
+// -----------------------------------------------------------------------------
+// ★ 为什么必须有它：轮荷是**随时间变化的量**，只在结束时打一帧快照不算"出轮荷"。
+//   动载系数、轮荷谱、冲击系数，全都要看时间序列 —— 一帧快照一个都给不出来。
+//   这也是 Chrono 路线图 step 1 的最后一句「出轮荷/侧向力」的落点。
+//
+// 单位用 kN（Chrono 是 SI 的 N），因为下游看的都是 kN 量级。
+// 列名带轴号与左右，是为了让文件自己能说明自己，不必回头读代码。
+//
+// ★★ 为什么还有一列 pz_m（着地点高程）—— 用来区分两种"零"：
+//   Chrono 的 TerrainForce 在**没有接触**时是默认构造的，force 和 point 同时为
+//   零向量。于是 Fz=0 有两种完全不同的含义：
+//       · 轮胎真的离地了     → 没有载荷
+//       · 轮胎受力恰为零     → 有载荷，值为 0
+//   只看 Fz 分不出来，而这两种情况对 WIM 是天壤之别（一个该丢弃，一个该记录）。
+//   实测判据：路面高程在 54~84 m 之间，**真实的着地点不可能落在 z=0**。
+//   所以 `Fz=0 且 pz=0` ⇒ 无接触；`Fz=0 且 pz>0` ⇒ 真零载荷（本次运行未出现）。
+//   ★ 顺带这一列本身就是有用的数据：每个轮子脚下的路面高程。
+//   ★ 通用教训：**一个"零"如果可能表示"没有数据"，它就不能长得像"数值为零"。**
+//     必须让两者在数据里可区分，否则下游一定会误读。
+// -----------------------------------------------------------------------------
+class WheelLoadCsv {
+  public:
+    WheelLoadCsv(const std::string& path, double dt) : m_dt(dt) {
+        m_out.open(path);
+        m_ok = m_out.is_open();
+    }
+    bool ok() const { return m_ok; }
+    double dt() const { return m_dt; }
+
+    void Write(double t, double s, double lat, double speed, double chassis_z,
+               const std::vector<WheelLoad>& loads) {
+        if (!m_ok)
+            return;
+        if (!m_header_done) {
+            m_out << "t_s,s_m,lat_m,speed_mps,chassis_z_m";
+            for (const auto& w : loads)
+                for (const char* q : {"Fz_kN", "Fy_kN", "Fx_kN", "pz_m"})
+                    m_out << ",a" << w.axle << (w.left ? "_L_" : "_R_") << q;
+            m_out << "\n";
+            m_header_done = true;
+        }
+        m_out << t << ',' << s << ',' << lat << ',' << speed << ',' << chassis_z;
+        for (const auto& w : loads)
+            m_out << ',' << w.vertical / 1000.0 << ',' << w.lateral / 1000.0 << ','
+                  << w.longitudinal / 1000.0 << ',' << w.contact_z;
+        m_out << "\n";
+        ++m_rows;
+    }
+    long rows() const { return m_rows; }
+
+  private:
+    std::ofstream m_out;
+    bool m_ok = false;
+    bool m_header_done = false;
+    double m_dt = 0.05;
+    long m_rows = 0;
+};
 
 int main(int argc, char* argv[]) {
     // ---------------------------------------------------------------- 参数
@@ -214,6 +277,8 @@ int main(int argc, char* argv[]) {
     bool headless = false;
     double duration = 600.0;      // s
     double step = 0.002;          // s
+    std::string csv_path;         // 空 = 不导出
+    double csv_dt = 0.05;         // s，导出采样间隔
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -229,6 +294,11 @@ int main(int argc, char* argv[]) {
             next(duration);
         } else if (a == "--step") {
             next(step);
+        } else if (a == "--csv-dt") {
+            next(csv_dt);
+        } else if (a == "--csv") {
+            if (i + 1 < argc)
+                csv_path = argv[++i];
         } else if (a == "--headless") {
             headless = true;
         } else if (crg_file.empty()) {
@@ -238,7 +308,8 @@ int main(int argc, char* argv[]) {
     if (crg_file.empty()) {
         std::cout << "用法: " << argv[0]
                   << " <crg文件> [--speed 15] [--offset 0] [--headless]"
-                     " [--duration 600] [--step 0.002]\n";
+                     " [--duration 600] [--step 0.002]"
+                     " [--csv 轮荷.csv] [--csv-dt 0.05]\n";
         return 2;
     }
 
@@ -527,7 +598,14 @@ int main(int argc, char* argv[]) {
     auto driver = chrono_types::make_shared<ChPathFollowerDriver>(
         vehicle, path, "wim_path", target_speed,
         0.5,    // zero_duration：0.5 s 内目标速度保持 0，让车先落稳
-        2.0);   // ramp_duration：再用 2 s 把油门上限拉到 100%
+        2.0);   // ramp_duration：见下
+    // ★★ 注意 ramp_duration 这个名字是**骗人的**。它不是"速度斜坡"，
+    //   而是在这段时间里把**油门和转向一起**按 t/ramp_duration 线性缩放
+    //   （ChPathFollowerDriver.cpp:113-121，m_throttle *= alpha; m_steering *= alpha;）。
+    //   也就是说它同时压住两个通道的上限，作用类似"暖机"。
+    //   读名字以为在调速度曲线，实际上会连带把转向也压小 —— 起步阶段车
+    //   转不过弯，可能就是这个原因。真正调速度用构造器第 4 个参数或 SetDesiredSpeed。
+    //   ★ 通用教训：**参数的语义在实现里，不在名字里。**
     // 速度环用官方 demo 的增益（demo_VEH_CRGTerrain_VSG.cpp:108）
     driver->GetSpeedController().SetGains(0.4, 0, 0);
     // ★★★ 坑十：转向环的增益**默认全是 0**，必须自己设。★★★
@@ -589,6 +667,22 @@ int main(int argc, char* argv[]) {
     bool arrived = false;
     double max_lat = 0.0;
 
+    // 轮荷时间序列导出（--csv）。★ 在**进入循环前**就打开文件：
+    // 写不进去要立刻知道，而不是跑完 400 s 才发现路径是错的。
+    WheelLoadCsv csv(csv_path, csv_dt);
+    double next_csv_t = 0.0;
+    bool forces_valid = false;  // 轮胎模型是否已报出非零载荷（见循环里的采样条件）
+    long csv_rows = 0;          // 已导出的行数
+    long csv_airborne = 0;      // 其中有轮子离地的行数（Fz=0 且 pz=0）
+    if (!csv_path.empty()) {
+        if (!csv.ok()) {
+            std::cerr << "\n!!! 打不开轮荷 CSV：" << csv_path << "（拒绝继续）" << std::endl;
+            return 2;
+        }
+        std::cout << "==> 轮荷时间序列导出到 " << csv_path << "（每 " << csv_dt << " s 一行）"
+                  << std::endl;
+    }
+
     while (sys.GetChTime() < duration) {
         const double time = sys.GetChTime();
 
@@ -604,6 +698,45 @@ int main(int argc, char* argv[]) {
         double s = 0.0, lat = 0.0;
         QueryProgress(poly, vehicle.GetPos(), s, lat);
         max_lat = std::max(max_lat, lat);
+
+        // ★ 采样点放在**判据之前**：这样"飞出路面"和"到达终点"这两帧也会被记下来。
+        //   若放在判据之后，出问题的那一刻恰好是唯一没被记录的时刻。
+        //
+        // ★★ 起步那两帧的轮荷是 0，必须丢掉。这个坑我连踩三次，值得写清楚：
+        //   轮胎力由 vehicle.Synchronize() 算出，而采样在它之前，所以采样永远
+        //   落后一帧；而**第一帧 Synchronize(0) 本身就返回 0**（步长为 0，
+        //   TMeasy 不给力）。t=0 的真实轮荷其实是整备重量 24 kN，不是 0。
+        //   于是：
+        //     · 「跳过 t=0」        → t=0.002 那帧还是 0
+        //     · 「同步过就采」      → 同上，因为零力正是第一次同步的产物
+        //     · 「推进过就采」      → 还是同上，力要到**下一次**同步才更新
+        //   按时间或按调用次数猜都不对。唯一自洽的判据是**看数据本身**：
+        //   等轮胎模型第一次报出非零载荷，此前一律不写。
+        //   （这不掩盖真实事件：整车四轮同时为 0 只可能是起步那一瞬，
+        //     真腾空时这个条件也早已为真，腾空帧照样会被记下来。）
+        //
+        //   ★ 判据是「**每个轮子**都非零」，不是「合计非零」。合计非零还不够：
+        //     实测第一帧合计 16.08 kN，可它全来自前轴，后轴两个轮子都是 0。
+        //     同一类毛病下沉了一层，判据就得跟着下沉一层。
+        if (!csv_path.empty()) {
+            const auto loads_now = ReadWheelLoads(vehicle, &terrain);
+            bool all_nonzero = !loads_now.empty();
+            for (const auto& w : loads_now)
+                if (w.vertical == 0.0)
+                    all_nonzero = false;
+            if (all_nonzero)
+                forces_valid = true;
+            if (forces_valid && time >= next_csv_t) {
+                csv.Write(time, s, lat, vehicle.GetSpeed(), vehicle.GetPos().z(), loads_now);
+                next_csv_t += csv_dt;
+                ++csv_rows;
+                for (const auto& w : loads_now)
+                    if (w.vertical == 0.0 && w.contact_z == 0.0) {
+                        ++csv_airborne;
+                        break;
+                    }
+            }
+        }
 
         // ★ 「不飞出路面」判据：横向偏差超过半路宽即判飞出。
         //   这里用中心线到边界的距离，路宽 8.5 m → 半宽 4.25 m。
@@ -653,6 +786,12 @@ int main(int argc, char* argv[]) {
     std::cout << "最大横向偏差  : " << max_lat << " m  （半路宽 " << 0.5 * road_width << " m）" << std::endl;
     std::cout << "是否到达终点  : " << (arrived ? "是" : "否") << std::endl;
     std::cout << "是否飞出路面  : " << (off_road ? "是" : "否") << std::endl;
+    if (!csv_path.empty()) {
+        std::cout << "轮荷时间序列  : " << csv.rows() << " 行 → " << csv_path << std::endl;
+        std::cout << "  其中有轮子离地: " << csv_airborne << " 行（"
+                  << (csv_rows ? 100.0 * csv_airborne / csv_rows : 0.0) << "%）"
+                  << " —— 判据是 Fz=0 且 pz=0；不是零载荷，是**没有接触**" << std::endl;
+    }
 
     const auto loads = ReadWheelLoads(vehicle, &terrain);
     double total_v = 0.0;
