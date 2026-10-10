@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rp.local/contracts/delivery/artifact_manifest.v0.1.schema.json",
+  "title": "仿真产物清单 v0.1（M9 消费 · 草案）",
+  "description": "交付目录的清单。M9 的 GET /artifacts/{name} 只接受本清单里登记的名字——清单即白名单，目录里存在但未登记的文件取不到。这样「新增资产必须登记」在结构上做不到违反，而不是靠约定。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "generated_at",
+    "producer",
+    "artifacts"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "artifact_manifest.v0.1"
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "清单生成时刻（ISO 8601，含时区）。用于判断产物新旧，不作判定依据。"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "note"],
+      "properties": {
+        "module": {
+          "type": "string",
+          "description": "产出方模块号或脚本名，如 M2-ingest 或 simulator/crg。"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "description": "本次产出的一句话说明。不得留空——空白会掩盖问题。"
+        }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "description": "本节产物所处的坐标帧。★ 局部帧与坐标基准无关；geographic 段只作声明，不参与几何计算。",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["local", "geographic"],
+          "description": "local = 设计坐标系（X=北, Y=东, Z=上，米），与大地基准无关。本 feature 只用 local。"
+        },
+        "crs_ready": {
+          "type": "boolean",
+          "description": "geographic 帧是否可用于计算。当前应为 false——带号是推断值。"
+        },
+        "crs_assumed": {
+          "type": "boolean",
+          "description": "所用带号是否为推断值。与 crs_ready 分开：一个说能不能用，一个说值可不可信。"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "★ 唯一的白名单。GET /artifacts/{name} 只认这里的 name。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "present"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "description": "文件名，只能是平坦的相对名。禁止 / 与 ..——取数路由不接受路径穿越。"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["terrain_mesh", "vehicle_track", "video", "figure", "other"]
+          },
+          "present": {
+            "type": "boolean",
+            "description": "清单先于产物存在，所以允许登记尚未产出的文件；未产出时必须为 false。"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "文件大小。present 为 true 时必填，且必须与磁盘实际大小一致（契约测试会核）。"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "mesh": {
+            "type": "object",
+            "description": "kind=terrain_mesh 时必填。二进制本身不自描述，元信息全在这里。",
+            "additionalProperties": false,
+            "required": ["nu", "nv", "position_dtype", "index_dtype", "u_step_m"],
+            "properties": {
+              "nu": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "纵向格点数。"
+              },
+              "nv": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "横向格点数。本 feature 为 9（路面边缘 / 车道边缘 / 车道中心 / 路中线）。"
+              },
+              "position_dtype": {
+                "type": "string",
+                "const": "float32"
+              },
+              "index_dtype": {
+                "type": "string",
+                "enum": ["uint16", "uint32"],
+                "description": "★ 缺省 uint16。抽稀脚本必须断言 nu*nv < 65536；越过该界限时 uint16 会静默截断，几何以「看起来只是有点错」的方式坏掉。"
+              },
+              "u_step_m": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "纵向抽稀步长（米）。"
+              },
+              "v_samples_m": {
+                "type": "array",
+                "items": { "type": "number" },
+                "minItems": 2,
+                "description": "横向样点的 v 坐标（米，正=左）。长度必须等于 nv。★ 这些样点落在有物理意义的 v 上，网格边线即路面边线与车道边线。"
+              },
+              "z_source": {
+                "type": "string",
+                "description": "高程来源。必须写明取的是实测地形高程而不是中线控制点 z——后者比实际路面高约 0.2 m 且无路拱。"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
