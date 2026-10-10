@@ -52,6 +52,8 @@ simulator ──MQTT──▶ EMQX ──▶ ingest(M2) ──▶ PostgreSQL 分
 scaffold/
 ├─ SKELETON-GUIDE.md               # ★ 各模块开发总纲：开工前先读这篇
 ├─ run_contract_tests.sh           # ★ 一键跑全部契约测试（离线，--list 看清单）
+├─ run_e2e_smoke.sh                # ★ 端到端冒烟：真发报文、真落库、真读接口（在线）
+├─ verify.sh                       # ★ 只读核查：容器 / 库 / 网页端
 ├─ docker-compose.skeleton.yml     # 一套编排起全栈（端口避让本机已占用端口）
 ├─ .env.example                    # 复制为 .env；密码不入库、不进交付物
 ├─ contracts/                      # ★ 模块接入的唯一依据（四份契约 + 模块产出契约）
@@ -138,9 +140,47 @@ docker exec -it rp-pg psql -U rp -d road_pavement \
   -c "SELECT count(*) AS 过车数, sum(esal) AS esal合计 FROM wim_axle_record;" \
   -c "SELECT issue_code, count(*) FROM data_quality_log GROUP BY 1;" \
   -c "SELECT batch_no, raw_count, valid_count, truth_flag FROM data_import_batch;"
+
+# 7) ★ 端到端冒烟：真的把一条报文推进链路，逐跳问"到了吗"
+./run_e2e_smoke.sh
 ```
 
 Grafana：<http://localhost:3001>（admin/admin），面板「骨架栈 · WIM 轴载链路」已自动装载。
+
+### 4.1 三个检查脚本，各管一段（别只跑一个）
+
+| 脚本 | 在不在线 | 它回答的问题 | 它**回答不了**的 |
+|---|---|---|---|
+| `run_contract_tests.sh` | 离线 | 契约与实现自洽吗 | 线上跑的是不是这份代码 |
+| `verify.sh` | 只读 | 容器在不在、表建没建 | 报文能不能走通 |
+| **`run_e2e_smoke.sh`** | **在线** | **报文真的到了吗** | 数据对不对（那是业务测试的事） |
+
+**为什么必须有第三个。** 前两个都绿，链路仍然可以是断的：
+契约测试查的是**源文件里的字符串**，线上跑的是**容器里已构建的镜像** —— 两者可以不一致，
+且没有任何东西会提醒你。本仓就发生过契约测试 18/18 全绿、而部署的容器缺少已提交端点。
+一个只读源文件的检查，永远无法回答"报文到了吗"。
+
+冒烟脚本做 13 跳，正向 11 跳、负向 2 跳：
+
+```kv cols=2
+第 1 跳: 六个链路容器都在跑
+第 2–3 跳: 记基线，发一条 qos 1 报文
+第 4 跳: M2 落库（等不到就打印 ingest 日志）
+第 5 跳: 超载标志/超载率/ESAL 是入库时重算的，不是报文透传
+第 6 跳: 轴组明细与主记录同事务（条数 = axle_num，轴重合计 = 总重）
+第 7 跳: 重发同 seq 仍只一行，且日志里有去重记录
+第 8 跳: 未注册设备的报文被挡（行数不变）
+第 9–11 跳: M6 详情/列表/指标三个出口都读得到
+第 12 跳: console 与 grafana 在线
+第 13 跳: 删掉本次写入的行，行数与冒烟前一致
+```
+
+**它自己会失败，这一点验证过**（不然它只是一段装饰）：
+
+- 停掉 `rp-ingest` → 第 1 跳报"未运行"，**退出码 2**（"没跑成"不等于"通过"）
+- 容器全在、但报文发到没人订阅的主题 → 第 4 跳报"等 6s 也没等到落库"，**退出码 1**
+
+用 `--keep` 保留写入的行供人工查看；用 `--verbose` 打印每次 curl / psql 的原始返回。
 
 **端口避让说明**：本机已有服务占用 5432 / 8000 / 3000，故骨架栈映射为
 55432（PG）、18883（MQTT）、18083（EMQX 控制台）、9002/9003（MinIO）、3001（Grafana）、
