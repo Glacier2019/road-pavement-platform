@@ -1,6 +1,6 @@
 {
   "version": "artifact_manifest.v0.1",
-  "generated_at": "2026-10-10T17:18:21.122031+08:00",
+  "generated_at": "2026-10-10T18:08:18.713809+08:00",
   "producer": {
     "module": "simulator/crg",
     "note": "export_viewer_mesh.py 从 route_0p1m.crg 抽稀出两档 LOD"
@@ -64,6 +64,30 @@
         ],
         "z_source": "CRG 实测地形高程（86 通道在目标 v 处线性插值）。★ 不是中线控制点 z —— 后者比实际路面高约 200 mm 且无路拱。"
       }
+    },
+    {
+      "name": "wheel_loads.csv",
+      "kind": "vehicle_track",
+      "present": true,
+      "note": "整车仿真产出的轮荷时间序列（7986 行 / 0.05 s）。前 5 列 t_s,s_m,lat_m,speed_mps,chassis_z_m 之后是 x_m,y_m,heading_deg，再往后是四个轮的 Fz/Fy/Fx/pz。heading_deg 用设计表同一套方位角约定（X=北、Y=东，从 +X 转向 +Y 为正）。",
+      "bytes": 1626081,
+      "mime": "text/csv"
+    },
+    {
+      "name": "vehicle_on_crg_lane_right_10x.mp4",
+      "kind": "video",
+      "present": true,
+      "note": "全路段靠右行驶，10 倍速（797 帧 @ 20 fps，1280×720）。",
+      "bytes": 11051853,
+      "mime": "video/mp4"
+    },
+    {
+      "name": "vehicle_on_crg_lane_right_realtime.mp4",
+      "kind": "video",
+      "present": true,
+      "note": "同一段仿真的 2 fps 慢放版本（797 帧，1280×720）。",
+      "bytes": 28335656,
+      "mime": "video/mp4"
     }
   ]
 }

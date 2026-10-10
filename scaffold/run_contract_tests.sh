@@ -59,6 +59,12 @@ TESTS=(
   "覆盖区间|契约② FR-005~008：实际覆盖区间回填 + 声明vs实际校验 + 原子性（离线，含元测试）|M2|PY|tests/contract/test_coverage_check.py"
   "桩号文本|契约② FR-009~011：桩号文本↔数值双向还原（全 332 条）+ 加桩不得规整（含元测试）|M2|PY|tests/contract/test_station_text.py"
   "桩号区间查询|契约② FR-018：按桩号区间查询（相交≠包含，含前置断言与证伪）|M3/M6|API|tests/contract/test_station_query.py"
+  # ★ v0.7 新增（003 局部帧查看器 US2–US5）。它钉的是**交付目录里的东西**：
+  #   轨迹 CSV 的四列位姿、沿程量「无数据 ≠ 实测 0」的编码、产物的登记与降级、
+  #   视频 Range、带号这个假定的可见性。与 m9-集成面 的失效方式不同 ——
+  #   一边是"M9 越权了"，一边是"少了一列/少了一个产物"，所以分开成组。
+  #   它**不打真库、不起容器**，只读交付目录 + 用 TestClient 走 M9 路由。
+  "仿真轨迹|003 US2–US5：轨迹四列位姿、沿程量无数据编码、产物降级、视频 Range、带号假定|M9|CONSOLE|tests/contract/test_sim_track.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

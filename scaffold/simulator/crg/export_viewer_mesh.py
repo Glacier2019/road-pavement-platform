@@ -35,6 +35,7 @@ import datetime as _dt
 import json
 import math
 import pathlib
+import re
 import struct
 import sys
 
@@ -49,6 +50,61 @@ LODS = {
 }
 
 UINT16_MAX_VERTICES = 65536
+
+# 伴随产物：本脚本**不生成**它们，但负责登记。缺失时登记为 present: false。
+# ★ (文件名, kind, 说明)。kind 必须落在契约的 enum 里。
+COMPANION_ARTIFACTS = [
+    (
+        "wheel_loads.csv",
+        "vehicle_track",
+        "整车仿真产出的轮荷时间序列（7986 行 / 0.05 s）。"
+        "前 5 列 t_s,s_m,lat_m,speed_mps,chassis_z_m 之后是 x_m,y_m,heading_deg，"
+        "再往后是四个轮的 Fz/Fy/Fx/pz。heading_deg 用设计表同一套方位角约定"
+        "（X=北、Y=东，从 +X 转向 +Y 为正）。",
+    ),
+    (
+        "vehicle_on_crg_lane_right_10x.mp4",
+        "video",
+        "全路段靠右行驶，10 倍速（797 帧 @ 20 fps，1280×720）。",
+    ),
+    (
+        "vehicle_on_crg_lane_right_realtime.mp4",
+        "video",
+        "同一段仿真的 2 fps 慢放版本（797 帧，1280×720）。",
+    ),
+]
+
+COMPANION_MIME = {
+    "vehicle_track": "text/csv",
+    "video": "video/mp4",
+    "figure": "image/png",
+    "other": "application/octet-stream",
+}
+
+DEFAULT_CRS_CONFIG = pathlib.Path("modules/M9-console/config/crs.yaml")
+
+
+def _read_crs_flags(path: pathlib.Path | None) -> tuple[bool, bool]:
+    """从 crs.yaml 读 (ready, assumed)。
+
+    ★ 不引 PyYAML：本脚本的标准库-only 属性是它能在任意目录直接跑的原因，
+      为两个布尔量破这条规矩不划算。所以只做**定点匹配**，匹配不到就
+      响亮地说出来 —— 静默 fallback 到 (False, True) 会让"读不到配置"
+      伪装成"配置就是这么写的"。
+    """
+    if path is None or not path.is_file():
+        print(f"    ⚠ 读不到 crs.yaml（{path}）—— frame 标记回退为 ready=False assumed=True")
+        return False, True
+    txt = path.read_text(encoding="utf-8")
+    # 只看 geographic_frame 段，避免命中 local_frame 里的同名键
+    seg = txt.split("geographic_frame:", 1)
+    seg = seg[1] if len(seg) > 1 else txt
+    ready = re.search(r"^\s*ready:\s*(true|false)", seg, re.M)
+    assumed = re.search(r"^\s*assumed:\s*(true|false)", seg, re.M)
+    if not ready or not assumed:
+        print(f"    ⚠ crs.yaml 里 ready / assumed 没认出来（{path}）—— 回退为 False/True")
+        return False, True
+    return ready.group(1) == "true", assumed.group(1) == "true"
 
 
 def parse_header(path: pathlib.Path) -> dict:
@@ -180,7 +236,22 @@ def main() -> int:
         default="-4521.122,3119.874",
         help="端点自检期望值（X,Y），来自本次会话对 CRG 的实测",
     )
+    ap.add_argument(
+        "--crs-config",
+        type=pathlib.Path,
+        default=None,
+        help="crs.yaml 路径（默认自动向上找模块目录里的那一份）",
+    )
     args = ap.parse_args()
+
+    # crs.yaml 的位置：默认按仓库布局找；找不到就让 _read_crs_flags 说出来。
+    if args.crs_config is None:
+        here = pathlib.Path(__file__).resolve()
+        for up in here.parents:
+            cand = up / DEFAULT_CRS_CONFIG
+            if cand.is_file():
+                args.crs_config = cand
+                break
 
     if not args.crg.is_file():
         print(f"!! 找不到 CRG：{args.crg}", file=sys.stderr)
@@ -254,6 +325,32 @@ def main() -> int:
             }
         )
 
+    # ── 伴随产物：不由本脚本生成，但**必须由本脚本登记** ──────────────────
+    # ★ 清单只能有**一个写者**。让仿真程序或搬运脚本各写一份清单，两份就会漂，
+    #   而漂的方向永远是"清单说在、磁盘上没有"，页面表现为 503 —— 看起来像路径
+    #   问题，其实是登记问题。所以这里只**登记**，不生成。
+    # ★ `present: false` 是合法状态，不是错误：契约因此可以先于产物存在。
+    for cname, ckind, cnote in COMPANION_ARTIFACTS:
+        cpath = args.out / cname
+        exists = cpath.is_file()
+        entry = {
+            "name": cname,
+            "kind": ckind,
+            "present": exists,
+            "note": cnote,
+        }
+        if exists:
+            entry["bytes"] = cpath.stat().st_size
+            entry["mime"] = COMPANION_MIME.get(ckind, "application/octet-stream")
+        else:
+            entry["note"] = cnote + "　★ 当前未产出（present: false），页面据此显示「未产出」"
+        entries.append(entry)
+
+    # ★ frame 的两个标记**从 crs.yaml 读**，不写死。写死的话，有人把
+    #   assumed 改成 false 之后清单还在说"这是推断值" —— 一个不会被任何人
+    #   发现的谎言，因为没有任何东西会因此报错。
+    crs_ready, crs_assumed = _read_crs_flags(args.crs_config)
+
     manifest = {
         "version": "artifact_manifest.v0.1",
         "generated_at": _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(),
@@ -263,14 +360,16 @@ def main() -> int:
         },
         "frame": {
             "kind": "local",
-            "crs_ready": False,
-            "crs_assumed": True,
+            "crs_ready": crs_ready,
+            "crs_assumed": crs_assumed,
         },
         "artifacts": entries,
     }
     mpath = args.out / "manifest.json"
     mpath.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"==> 清单已写：{mpath}（{len(entries)} 条）")
+    n_present = sum(1 for e in entries if e["present"])
+    print(f"==> 清单已写：{mpath}（{len(entries)} 条，其中 {n_present} 条已产出）")
+    print(f"    frame: crs_ready={crs_ready} crs_assumed={crs_assumed}（读自 crs.yaml）")
     print("==> 完成")
     return 0
 

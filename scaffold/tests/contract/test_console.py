@@ -528,6 +528,7 @@ def main() -> int:
         ok("契约限定 name 不许含路径分隔符（路由据此防穿越）",
            "/" not in _sch["properties"]["artifacts"]["items"]["properties"]["name"]["pattern"])
 
+
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
 

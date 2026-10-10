@@ -246,12 +246,23 @@ class WheelLoadCsv {
     bool ok() const { return m_ok; }
     double dt() const { return m_dt; }
 
+    // ★★★ 列是**追加**的，绝不重排。★★★
+    //   前 5 列（t_s, s_m, lat_m, speed_mps, chassis_z_m）已被
+    //   plot_wheel_loads.py 按位置消费。在中间插一列不会报错 ——
+    //   它只是把图**静默画错**，这比崩溃难查得多。
+    //   新增的 x_m / y_m / heading_deg 一律排在最后。
     void Write(double t, double s, double lat, double speed, double chassis_z,
+               double x_m, double y_m, double heading_deg,
                const std::vector<WheelLoad>& loads) {
         if (!m_ok)
             return;
         if (!m_header_done) {
             m_out << "t_s,s_m,lat_m,speed_mps,chassis_z_m";
+            // ★ 平面位姿：三维鸟瞰叠轨迹要用，而 chassis_z 只能给高度。
+            //   heading_deg 用的是**设计表同一套方位角约定**（X=北、Y=东，
+            //   从 +X 转向 +Y 为正），所以它可以和 alignment_element.azimuth_deg
+            //   直接相减比较 —— 否则角度差 90° 这种错要人肉去猜。
+            m_out << ",x_m,y_m,heading_deg";
             for (const auto& w : loads)
                 for (const char* q : {"Fz_kN", "Fy_kN", "Fx_kN", "pz_m"})
                     m_out << ",a" << w.axle << (w.left ? "_L_" : "_R_") << q;
@@ -259,6 +270,7 @@ class WheelLoadCsv {
             m_header_done = true;
         }
         m_out << t << ',' << s << ',' << lat << ',' << speed << ',' << chassis_z;
+        m_out << ',' << x_m << ',' << y_m << ',' << heading_deg;
         for (const auto& w : loads)
             m_out << ',' << w.vertical / 1000.0 << ',' << w.lateral / 1000.0 << ','
                   << w.longitudinal / 1000.0 << ',' << w.contact_z;
@@ -1092,7 +1104,16 @@ int main(int argc, char* argv[]) {
             if (all_nonzero)
                 forces_valid = true;
             if (forces_valid && time >= next_csv_t) {
-                csv.Write(time, s, lat, vehicle.GetSpeed(), vehicle.GetPos().z(), loads_now);
+                // ★ 车体局部 +X 是车头方向（ChVehicle 的车体坐标系：X 前 / Y 左 / Z 上）。
+                //   转到世界系后再取平面分量 —— 直接对四元数取"yaw"需要一个
+                //   欧拉角约定的假设，而旋转一个单位向量的语义是唯一的。
+                //   pitch / roll 只影响它的 z 分量，不影响 atan2 的结果。
+                const ChVector3d fwd = vehicle.GetRot().Rotate(ChVector3d(1, 0, 0));
+                const double heading_deg =
+                    std::atan2(fwd.y(), fwd.x()) * 180.0 / CH_PI;
+                const ChVector3d p = vehicle.GetPos();
+                csv.Write(time, s, lat, vehicle.GetSpeed(), p.z(),
+                          p.x(), p.y(), heading_deg, loads_now);
                 next_csv_t += csv_dt;
                 ++csv_rows;
                 for (const auto& w : loads_now)

@@ -8,6 +8,7 @@
   :root {
     --bg: #0d1117; --panel: #161b22; --line: #30363d;
     --fg: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --warn: #d29922;
+    --car: #f85149; --nodata: #6e7681;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
@@ -31,19 +32,51 @@
     position: absolute; background: rgba(22,27,34,.94); border: 1px solid var(--line);
     border-radius: 6px; padding: 10px 12px;
   }
-  #controls { top: 12px; left: 12px; width: 268px; }
-  #readout { bottom: 12px; left: 12px; width: 268px; }
+  #controls { top: 12px; left: 12px; width: 292px; }
+  #readout { bottom: 12px; left: 12px; width: 292px; }
+  #crsbox { top: 12px; right: 12px; width: 330px; max-height: 46%; overflow: auto; }
+  #media { bottom: 12px; right: 12px; width: 330px; max-height: 42%; overflow: auto; }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
   .row:last-child { margin-bottom: 0; }
   label { color: var(--dim); font-size: 12px; }
   input[type=range] { width: 100%; accent-color: var(--accent); }
+  select {
+    background: #0d1117; color: var(--fg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 6px; font: inherit; font-size: 12px;
+  }
   .big { font-size: 15px; font-weight: 600; color: var(--accent); }
   .hint { color: var(--warn); font-size: 11px; margin-top: 6px; line-height: 1.4; }
+  .note { color: var(--dim); font-size: 11px; margin-top: 6px; line-height: 1.4; }
   .kv { display: flex; justify-content: space-between; font-size: 11px; color: var(--dim); }
   .kv b { color: var(--fg); font-weight: 500; }
   .tag { padding: 1px 6px; border-radius: 3px; font-size: 11px; }
   .tag.assumed { background: #3d2f0a; color: var(--warn); border: 1px solid #6b5320; }
   .tag.ready { background: #12261a; color: #3fb950; border: 1px solid #1f6f3a; }
+  .tag.missing { background: #2d1d1d; color: #f85149; border: 1px solid #6e2b2b; }
+  h2.sec { font-size: 12px; margin: 0 0 6px; color: var(--fg); font-weight: 600; }
+  ul.ev { margin: 4px 0 0; padding-left: 16px; font-size: 11px; color: var(--dim); }
+  ul.ev li { margin-bottom: 3px; }
+  .legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .swatch { width: 26px; height: 10px; border: 1px solid var(--line); border-radius: 2px; flex: none; }
+  .sramp { background: linear-gradient(90deg, #295a85, #d9a04d); }
+  .sno { background: repeating-linear-gradient(45deg, #383c42 0 3px, #61686f 3px 6px); }
+  .media-row { display: flex; align-items: center; gap: 8px; font-size: 11px; margin-bottom: 6px; }
+  .media-row a { color: var(--accent); text-decoration: none; }
+  .media-row a:hover { text-decoration: underline; }
+  .media-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  video { width: 100%; margin-bottom: 8px; background: #000; border: 1px solid var(--line); border-radius: 4px; }
+  #banner {
+    display: none; position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    max-width: 60%; background: #2d1d1d; border: 1px solid #6e2b2b; color: #ffb3ae;
+    padding: 8px 12px; border-radius: 6px; font-size: 12px; line-height: 1.5; z-index: 5;
+  }
+  #probe {
+    display: none; position: absolute; pointer-events: none; z-index: 6;
+    background: rgba(13,17,23,.96); border: 1px solid var(--accent);
+    border-radius: 5px; padding: 6px 9px; font-size: 11px; line-height: 1.6;
+    white-space: nowrap; color: var(--fg);
+  }
+  #probe b { color: var(--accent); }
   #fatal { display: none; position: absolute; inset: 0; padding: 24px; background: var(--bg); }
   #fatal h2 { color: var(--warn); font-size: 14px; }
   #fatal pre { white-space: pre-wrap; color: var(--dim); font-size: 12px; }
@@ -60,6 +93,9 @@
 <main>
   <canvas id="gl"></canvas>
 
+  <div id="banner"></div>
+  <div id="probe"></div>
+
   <div class="panel" id="controls">
     <div class="row">
       <label for="zscale">垂直放大</label>
@@ -67,6 +103,33 @@
     </div>
     <input type="range" id="zscale" min="1" max="30" step="0.5" value="1">
     <div class="hint" id="zhint"></div>
+
+    <div class="row" style="margin-top:10px">
+      <label for="quantity">沿程量</label>
+      <select id="quantity">
+        <option value="elev">高程</option>
+        <option value="load">轮荷</option>
+        <option value="curv">曲率</option>
+      </select>
+    </div>
+    <div class="legend">
+      <span class="swatch sramp"></span><span id="lg-lo">—</span>
+      <span style="margin-left:auto"></span><span id="lg-hi">—</span>
+    </div>
+    <div class="legend">
+      <span class="swatch sno"></span><span>无数据（条纹）—— 与实测 0 不同</span>
+    </div>
+    <div class="note" id="qnote"></div>
+
+    <div class="row" style="margin-top:10px">
+      <label for="symscale">车辆符号放大</label>
+      <span class="big" id="symval">60×</span>
+    </div>
+    <input type="range" id="symscale" min="1" max="500" step="1" value="60">
+    <div class="note">
+      车辆实长 4.6 m，鸟瞰下不到 1 px。符号倍数**常驻显示**，
+      它放大的是符号，不是路，也不是纵坡。
+    </div>
   </div>
 
   <div class="panel" id="readout">
@@ -75,7 +138,19 @@
     <div class="kv"><span>纵向范围</span><b id="ro-ulen">—</b></div>
     <div class="kv"><span>高程范围</span><b id="ro-zlen">—</b></div>
     <div class="kv"><span>真尺度纵向比</span><b id="ro-ratio">—</b></div>
+    <div class="kv" style="margin-top:6px"><span>轨迹点数</span><b id="ro-trk">—</b></div>
+    <div class="kv"><span>轨迹里程</span><b id="ro-trks">—</b></div>
     <div class="kv" style="margin-top:6px"><span>坐标基准</span><b id="ro-crs">—</b></div>
+  </div>
+
+  <div class="panel" id="crsbox">
+    <h2 class="sec">坐标基准</h2>
+    <div id="crs-body">—</div>
+  </div>
+
+  <div class="panel" id="media">
+    <h2 class="sec">交付产物</h2>
+    <div id="media-body">—</div>
   </div>
 
   <div id="fatal">
@@ -93,124 +168,271 @@ const ENTRY = "/v1/sim/manifest";
 
 // ---------------------------------------------------------------- 状态
 const S = {
-  zscale: 1.0,          // ★ 默认 1.0 = 真尺度。不自动放大（FR-004）。
-  az: -0.6, el: 0.85, dist: 0,   // 轨道相机
+  zscale: 1.0,          // ★ 默认真尺度，不自动放大
+  symscale: 60,
+  quantity: "elev",
+  az: -0.6, el: 0.85, dist: 0,
   target: [0, 0, 0],
-  gl: null, prog: null, buf: null,
-  nIndex: 0, mesh: null, meta: null,
-  aspect: 1,
+  gl: null, aspect: 1,
+  prog: null, lineProg: null,
+  mesh: null, meta: {}, crs: null, manifest: null,
+  bufPos: null, bufNrm: null, bufIdx: null, bufQ: null,
+  nIndex: 0, idxType: 0, nVtx: 0,
+  bufLine: null, nLine: 0,
+  bufSym: null, nSym: 0,
+  track: null,        // {x,y,s,head,load,airborne} 数组
+  spawnEnd: 0,        // 出生瞬态结束时刻（只用于读数说明）
+  qLo: 0, qHi: 1, qUnit: "m",
 };
 
-// ---------------------------------------------------------------- 矩阵（列主序，与 WebGL 一致）
 function mat4() { return new Float32Array(16); }
 function perspective(out, fovy, aspect, near, far) {
-  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
-  out[0]=f/aspect; out[1]=0; out[2]=0;  out[3]=0;
-  out[4]=0; out[5]=f; out[6]=0; out[7]=0;
-  out[8]=0; out[9]=0; out[10]=(far+near)*nf; out[11]=-1;
-  out[12]=0; out[13]=0; out[14]=2*far*near*nf; out[15]=0;
+  const f = 1 / Math.tan(fovy / 2);
+  out.fill(0);
+  out[0] = f / aspect; out[5] = f; out[11] = -1;
+  out[10] = (far + near) / (near - far); out[14] = (2 * far * near) / (near - far);
   return out;
 }
 function lookAt(out, eye, ctr, up) {
   const z = norm(sub(eye, ctr)), x = norm(cross(up, z)), y = cross(z, x);
-  out[0]=x[0]; out[1]=y[0]; out[2]=z[0]; out[3]=0;
-  out[4]=x[1]; out[5]=y[1]; out[6]=z[1]; out[7]=0;
-  out[8]=x[2]; out[9]=y[2]; out[10]=z[2]; out[11]=0;
-  out[12]=-dot(x,eye); out[13]=-dot(y,eye); out[14]=-dot(z,eye); out[15]=1;
+  out[0] = x[0]; out[4] = y[0]; out[8] = z[0];
+  out[1] = x[1]; out[5] = y[1]; out[9] = z[1];
+  out[2] = x[2]; out[6] = y[2]; out[10] = z[2];
+  out[12] = -dot(x, eye); out[13] = -dot(y, eye); out[14] = -dot(z, eye);
+  out[3] = out[7] = out[11] = 0; out[15] = 1;
   return out;
 }
 function mul(out, a, b) {
-  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
-    let s = 0; for (let k = 0; k < 4; k++) s += a[k*4+j] * b[i*4+k];
-    out[i*4+j] = s;
-  }
+  for (let i = 0; i < 4; i++)
+    for (let j = 0; j < 4; j++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k];
+      out[i * 4 + j] = s;
+    }
   return out;
 }
-const sub = (a,b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
-const dot = (a,b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
-const cross = (a,b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
-function norm(a) { const L = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/L, a[1]/L, a[2]/L]; }
+function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function cross(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function norm(a) { const L = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / L, a[1] / L, a[2] / L]; }
 
 // ---------------------------------------------------------------- 着色器
-// ★ 法线按非均匀缩放的逆转置修正：S = diag(1,1,k) ⇒ n' = (n.x, n.y, n.z/k)。
-//   不修正的话，放大后光照仍按真实表面走，视觉上会和几何对不上。
-const VS = `
-attribute vec3 aPos;
-attribute vec3 aNrm;
-uniform mat4 uMVP;
-uniform float uZ;
-varying vec3 vN;
-varying float vZraw;
-void main() {
-  vec3 p = vec3(aPos.x, aPos.y, aPos.z * uZ);
-  vN = normalize(vec3(aNrm.x, aNrm.y, aNrm.z / uZ));
-  vZraw = aPos.z;
-  gl_Position = uMVP * vec4(p, 1.0);
-}`;
+// ★ 顶点着色器里 z 乘 uZ 的那一行配合法线逆变换 (n.x, n.y, n.z/uZ)，
+//   否则放大后光照方向全错 —— 地形看起来会像被人从侧面打了一束光。
+const VS = [
+  "attribute vec3 aPos;",
+  "attribute vec3 aNrm;",
+  "attribute vec3 aQ;",                       // x=归一值 y=有无数据 z=横向坐标 v(m)
+  "uniform mat4 uMVP;",
+  "uniform float uZ;",
+  "varying vec3 vN;",
+  "varying vec3 vQ;",
+  "void main() {",
+  "  vN = normalize(vec3(aNrm.x, aNrm.y, aNrm.z / uZ));",
+  "  vQ = aQ;",
+  "  gl_Position = uMVP * vec4(aPos.x, aPos.y, aPos.z * uZ, 1.0);",
+  "}",
+].join("\n");
 
-const FS = `
-precision mediump float;
-varying vec3 vN;
-varying float vZraw;
-uniform vec3 uLight;
-uniform float uZmin;
-uniform float uZspan;
-void main() {
-  float lam = max(dot(normalize(vN), uLight), 0.0);
-  // 高程着色：**显示刻度**，不是判定阈值。低处偏青，高处偏暖。
-  float t = clamp((vZraw - uZmin) / max(uZspan, 1e-6), 0.0, 1.0);
-  vec3 lo = vec3(0.16, 0.36, 0.52);
-  vec3 hi = vec3(0.85, 0.63, 0.30);
-  vec3 base = mix(lo, hi, t);
-  gl_FragColor = vec4(base * (0.42 + 0.58 * lam), 1.0);
-}`;
+const FS = [
+  "precision mediump float;",
+  "varying vec3 vN;",
+  "varying vec3 vQ;",
+  "uniform vec3 uLight;",
+  "void main() {",
+  "  if (vQ.y < 0.5) {",
+  // ★★★ 「没有数据」不能用色带上的任何一种颜色表示。
+  //   色带上的每个颜色都对应一个实测值 —— 包括最小值那头的 0。
+  //   把"没测"画成"测出来是 0"是本项目已经吃过一次的教训。
+  //   所以这里走一条完全不同的视觉通道：横向条纹，且不参与光照。
+  "    float stripe = step(0.5, fract(vQ.z / 0.5));",
+  "    gl_FragColor = vec4(mix(vec3(0.20,0.22,0.25), vec3(0.42,0.45,0.50), stripe), 1.0);",
+  "    return;",
+  "  }",
+  "  float t = clamp(vQ.x, 0.0, 1.0);",
+  "  vec3 base = mix(vec3(0.16,0.36,0.52), vec3(0.85,0.63,0.30), t);",
+  "  vec3 n = normalize(vN);",
+  "  float lam = max(dot(n, normalize(uLight)), 0.0);",
+  "  gl_FragColor = vec4(base * (0.42 + 0.58 * lam), 1.0);",
+  "}",
+].join("\n");
+
+// 线/符号的着色器：同一个 uZ 约定，平涂不参与光照。
+const LVS = [
+  "attribute vec3 aPos;",
+  "uniform mat4 uMVP;",
+  "uniform float uZ;",
+  "void main() { gl_Position = uMVP * vec4(aPos.x, aPos.y, aPos.z * uZ, 1.0); }",
+].join("\n");
+const LFS = [
+  "precision mediump float;",
+  "uniform vec4 uColor;",
+  "void main() { gl_FragColor = uColor; }",
+].join("\n");
 
 function compile(gl, type, src) {
   const s = gl.createShader(type);
-  gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
     throw new Error("着色器编译失败：" + gl.getShaderInfoLog(s));
-  }
   return s;
+}
+function program(gl, vs, fs, attrs, unis) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("着色器链接失败：" + gl.getProgramInfoLog(p));
+  for (const a of attrs) p[a] = gl.getAttribLocation(p, a);
+  for (const u of unis) p[u] = gl.getUniformLocation(p, u);
+  return p;
 }
 
 // ---------------------------------------------------------------- 网格解码
-// ★ 二进制里没有自描述头 —— nu/nv/位宽全在清单里。
-//   这是有意的：清单是契约，几何是载荷，两者分开。
 function decodeMesh(buf, meshMeta) {
-  const { nu, nv, position_dtype, index_dtype } = meshMeta;
-  if (position_dtype !== "float32") throw new Error("位置位宽不支持：" + position_dtype);
-  const nVtx = nu * nv, nTri = (nu - 1) * (nv - 1) * 2;
-  const posBytes = nVtx * 12;
-  const pos = new Float32Array(buf, 0, nVtx * 3);
-  let idx;
-  if (index_dtype === "uint16") idx = new Uint16Array(buf, posBytes, nTri * 3);
-  else if (index_dtype === "uint32") idx = new Uint32Array(buf, posBytes, nTri * 3);
-  else throw new Error("索引位宽不支持：" + index_dtype);
-  if (buf.byteLength !== posBytes + nTri * 3 * (index_dtype === "uint16" ? 2 : 4)) {
+  const nu = meshMeta.nu, nv = meshMeta.nv;
+  const nvtx = nu * nv;
+  const posBytes = nvtx * 3 * 4;
+  const idBytes = meshMeta.index_dtype === "uint32" ? 4 : 2;
+  const uint16 = idBytes === 2;
+  const bpe = uint16 ? 2 : 4;
+  let off = 0;
+  let remaining = buf.byteLength - posBytes;
+  const nTri = Math.floor(remaining / (3 * bpe));
+  const want = posBytes + nTri * 3 * bpe;
+  if (buf.byteLength !== want)
     throw new Error("二进制长度与清单不符：实得 " + buf.byteLength + " 字节");
-  }
-  return { pos, idx, nu, nv, nVtx, nTri };
+  const pos = new Float32Array(buf, off, nvtx * 3); off += posBytes;
+  const idx = uint16
+    ? new Uint16Array(buf.slice(off))
+    : new Uint32Array(buf.slice(off));
+  return { nu, nv, nvtx, pos, idx, uint16, nTri };
 }
-
-// 由规则网格差分求顶点法线。★ 规则网格的好处：法线是纯算术，不必遍历三角面。
 function computeNormals(pos, nu, nv) {
-  const n = new Float32Array(nu * nv * 3);
-  for (let iu = 0; iu < nu; iu++) {
-    for (let iv = 0; iv < nv; iv++) {
-      const a = (iu * nv + iv) * 3;
-      const iuP = Math.min(iu + 1, nu - 1), iuM = Math.max(iu - 1, 0);
-      const ivP = Math.min(iv + 1, nv - 1), ivM = Math.max(iv - 1, 0);
-      const su = (iuP - iuM) || 1, sv = (ivP - ivM) || 1;
-      const b = (iuP * nv + iv) * 3, c = (iuM * nv + iv) * 3;
-      const d = (iu * nv + ivP) * 3, e = (iu * nv + ivM) * 3;
-      const t1 = [(pos[b]-pos[c])/su, (pos[b+1]-pos[c+1])/su, (pos[b+2]-pos[c+2])/su];
-      const t2 = [(pos[d]-pos[e])/sv, (pos[d+1]-pos[e+1])/sv, (pos[d+2]-pos[e+2])/sv];
+  const n = new Float32Array(pos.length);
+  const su = 1, sv = 1;
+  const stride = nv * 3;
+  for (let i = 0; i < nu; i++) {
+    for (let j = 0; j < nv; j++) {
+      const a = (i * nv + j) * 3;
+      const i0 = Math.max(0, i - 1), i1 = Math.min(nu - 1, i + 1);
+      const j0 = Math.max(0, j - 1), j1 = Math.min(nv - 1, j + 1);
+      const b = (i1 * nv + j) * 3, c = (i0 * nv + j) * 3;
+      const d = (i * nv + j1) * 3, e = (i * nv + j0) * 3;
+      const t1 = [(pos[b] - pos[c]) / su, (pos[b + 1] - pos[c + 1]) / su, (pos[b + 2] - pos[c + 2]) / su];
+      const t2 = [(pos[d] - pos[e]) / sv, (pos[d + 1] - pos[e + 1]) / sv, (pos[d + 2] - pos[e + 2]) / sv];
       const nn = norm(cross(t1, t2));
-      n[a] = nn[0]; n[a+1] = nn[1]; n[a+2] = nn[2];
+      n[a] = nn[0]; n[a + 1] = nn[1]; n[a + 2] = nn[2];
     }
   }
   return n;
+}
+
+// ---------------------------------------------------------------- 沿程量
+// ★ 网格的 u 与轨迹的 s_m **都是沿同一条中线的弧长**，所以两者可以按里程直接对齐，
+//   不需要任何空间索引。这是"同一份线形"这个事实给的好处。
+function buildQuantity() {
+  const st = S.track, m = S.meta;
+  const nu = m.nu, nv = m.nv;
+  const q = new Float32Array(nu * nv * 3);
+  const uStep = m.uStep;
+  let lo = Infinity, hi = -Infinity;
+  const vals = new Float32Array(nu);
+  const has = new Uint8Array(nu);
+
+  if (S.quantity === "elev") {
+    for (let i = 0; i < nu; i++) {
+      // 用中线那一列的高度做沿程量；条纹/色带都按高度排
+      const a = (i * nv + 4) * 3 + 2;
+      vals[i] = m.pos[a]; has[i] = 1;
+    }
+  } else if (S.quantity === "curv") {
+    for (let i = 0; i < nu; i++) { vals[i] = m.curv[i]; has[i] = 1; }
+  } else {
+    // 轮荷：有轨迹的里程段才有值。段外是**没有数据**，不是 0。
+    for (let i = 0; i < nu; i++) {
+      const u = i * uStep;
+      const v = (st ? sampleLoadAtU(u) : null);
+      if (v === null) { vals[i] = 0; has[i] = 0; }
+      else { vals[i] = v; has[i] = 1; }
+    }
+  }
+  for (let i = 0; i < nu; i++) {
+    if (!has[i]) continue;
+    if (vals[i] < lo) lo = vals[i];
+    if (vals[i] > hi) hi = vals[i];
+  }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  const span = (hi - lo) || 1;
+  const vSamples = m.vSamples;
+  for (let i = 0; i < nu; i++) {
+    const t = has[i] ? (vals[i] - lo) / span : 0;
+    for (let j = 0; j < nv; j++) {
+      const k = (i * nv + j) * 3;
+      q[k] = t; q[k + 1] = has[i]; q[k + 2] = vSamples[Math.min(j, vSamples.length - 1)];
+    }
+  }
+  S.qLo = lo; S.qHi = hi;
+  S.qData = q;          // ★ 数组叫 qData，GL buffer 才叫 bufQ —— 两者同名的话
+}                       //   先赋值数组再 createBuffer 会把数组丢掉（本页第一版就是这样）
+
+function sampleLoadAtU(u) {
+  const st = S.track;
+  if (!st || !st.length) return null;
+  // 里程是单调的（毫米级抖动不影响最近邻查找），二分即可
+  let lo = 0, hi = st.length - 1;
+  if (u < st[0].s || u > st[hi].s) return null;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (st[mid].s <= u) lo = mid; else hi = mid;
+  }
+  const a = st[lo], b = st[hi];
+  const w = (u - a.s) / ((b.s - a.s) || 1);
+  return a.load + (b.load - a.load) * Math.max(0, Math.min(1, w));
+}
+
+// ---------------------------------------------------------------- 轨迹
+function parseTrack(text) {
+  const lines = text.split(/\r?\n/).filter(x => x.length);
+  if (lines.length < 2) throw new Error("轨迹 CSV 只有 " + lines.length + " 行");
+  const head = lines[0].split(",");
+  const ix = head.indexOf("x_m"), iy = head.indexOf("y_m");
+  const is = head.indexOf("s_m"), ih = head.indexOf("heading_deg");
+  const it = head.indexOf("t_s");
+  const fzCols = [];
+  for (let c = 0; c < head.length; c++) if (/_Fz_kN$/.test(head[c])) fzCols.push(c);
+
+  // ★★★ 缺平面位姿时**不画**，也绝不假定位姿在原点。
+  //   T015 之前这个 CSV 就没有 x/y。如果那时页面把缺列当成 (0,0)，
+  //   读者会看到一辆车停在坐标系原点上，并且**没有任何东西会报错** ——
+  //   一张看起来正常、实际完全错误的图。
+  //   heading_deg 同样是必需列：缺了它符号就指不了方向，
+  //   而"符号朝北"是又一个不会报错的错答案。
+  if (ix < 0 || iy < 0 || is < 0 || ih < 0) {
+    const need = [];
+    if (ix < 0) need.push("x_m");
+    if (iy < 0) need.push("y_m");
+    if (is < 0) need.push("s_m");
+    if (ih < 0) need.push("heading_deg");
+    return { missingPose: true, head, need, rows: 0 };
+  }
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const f = lines[i].split(",");
+    let load = 0;
+    for (const c of fzCols) load += parseFloat(f[c]) || 0;
+    out.push({
+      x: +f[ix], y: +f[iy], s: +f[is],
+      head: +f[ih],
+      t: it >= 0 ? +f[it] : 0,
+      load,
+    });
+  }
+  return { missingPose: false, head, rows: out.length, pts: out };
 }
 
 // ---------------------------------------------------------------- 渲染
@@ -222,6 +444,9 @@ function resize() {
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
   S.aspect = w / h;
 }
+
+// 记录最后一帧的 MVP，供悬停拾取复用（避免拾取和渲染用两套矩阵）
+let LAST_MVP = null;
 
 function draw() {
   const gl = S.gl;
@@ -241,24 +466,115 @@ function draw() {
   const proj = perspective(mat4(), 0.9, S.aspect, S.dist / 500, S.dist * 8);
   const view = lookAt(mat4(), eye, S.target, [0, 0, 1]);
   const mvp = mul(mat4(), proj, view);
+  LAST_MVP = mvp;
 
+  // —— 地面：**把网格往后推**，而不是把叠加物往前抬。
+  //    抬 0.1 m 在这种尺度下压不住 z-fighting（6 km 处深度分辨率约 0.2 m），
+  //    抬 2 m 又会在放大 30 倍时让轨迹明显浮起来。polygonOffset 两头都不欠。
+  gl.enable(gl.POLYGON_OFFSET_FILL);
+  gl.polygonOffset(1.0, 1.0);
   gl.useProgram(S.prog);
   gl.uniformMatrix4fv(S.prog.uMVP, false, mvp);
   gl.uniform1f(S.prog.uZ, S.zscale);
   gl.uniform3f(S.prog.uLight, 0.42, 0.34, 0.84);
-  gl.uniform1f(S.prog.uZmin, S.meta.zmin);
-  gl.uniform1f(S.prog.uZspan, S.meta.zmax - S.meta.zmin);
-
   gl.bindBuffer(gl.ARRAY_BUFFER, S.bufPos);
   gl.enableVertexAttribArray(S.prog.aPos);
   gl.vertexAttribPointer(S.prog.aPos, 3, gl.FLOAT, false, 0, 0);
-
   gl.bindBuffer(gl.ARRAY_BUFFER, S.bufNrm);
   gl.enableVertexAttribArray(S.prog.aNrm);
   gl.vertexAttribPointer(S.prog.aNrm, 3, gl.FLOAT, false, 0, 0);
-
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufQ);
+  gl.enableVertexAttribArray(S.prog.aQ);
+  gl.vertexAttribPointer(S.prog.aQ, 3, gl.FLOAT, false, 0, 0);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, S.bufIdx);
   gl.drawElements(gl.TRIANGLES, S.nIndex, S.idxType, 0);
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+
+  // —— 轨迹与车辆符号
+  gl.useProgram(S.lineProg);
+  gl.uniformMatrix4fv(S.lineProg.uMVP, false, mvp);
+  gl.uniform1f(S.lineProg.uZ, S.zscale);
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufLine);
+  gl.enableVertexAttribArray(S.lineProg.aPos);
+  gl.vertexAttribPointer(S.lineProg.aPos, 3, gl.FLOAT, false, 0, 0);
+  if (S.nLine > 1) {
+    gl.uniform4f(S.lineProg.uColor, 0.97, 0.32, 0.29, 1.0);
+    gl.drawArrays(gl.LINE_STRIP, 0, S.nLine);
+  }
+  if (S.nSym > 0) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, S.bufSym);
+    gl.vertexAttribPointer(S.lineProg.aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.uniform4f(S.lineProg.uColor, 1.0, 0.78, 0.16, 1.0);
+    gl.drawArrays(gl.TRIANGLES, 0, S.nSym);
+  }
+}
+
+// ---------------------------------------------------------------- 网格插值
+// ★ 车辆符号的 z **从网格查得**，不用 CSV 的 chassis_z_m：
+//   chassis_z 是车体质心（含悬架姿态），而符号是贴在**路面**上的标记。
+//   用质心高度会让符号在起伏处穿进地面或浮起来。
+function meshZAt(x, y) {
+  const m = S.meta;
+  let best = null, bestD = Infinity;
+  // 只沿中线找最近里程，再在横断面内插值 —— 路是窄的，这个近似足够
+  const nu = m.nu, nv = m.nv, pos = m.pos;
+  for (let i = 0; i < nu; i++) {
+    const a = (i * nv + 4) * 3;
+    const dx = pos[a] - x, dy = pos[a + 1] - y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  if (best === null) return 0;
+  const v4 = (best * nv + 4) * 3;
+  return pos[v4 + 2];
+}
+
+function buildOverlays() {
+  const m = S.meta;
+  // —— 轨迹线
+  if (S.track && S.track.length) {
+    const n = S.track.length;
+    const arr = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const p = S.track[i];
+      arr[i * 3] = p.x; arr[i * 3 + 1] = p.y;
+      // ★ z 在装载时**算一次**存进 p.z。原先这里每个点都调 meshZAt，
+      //   而 meshZAt 要扫全线（7986 × 1453 ≈ 1.2e7 次），
+      //   拖动"车辆符号放大"滑块会因此卡顿 —— 那个滑块只是改符号大小，
+      //   和路面的高度毫无关系。
+      arr[i * 3 + 2] = p.z + 0.05;
+    }
+    S.bufLineArr = arr; S.nLine = n;
+  } else { S.nLine = 0; S.bufLineArr = new Float32Array(0); }
+
+  // —— 车辆符号：一个按 heading 定向的扁平四边形 + 一个车头缺口
+  if (S.track && S.track.length) {
+    const p = S.track[S.track.length - 1];
+    const k = S.symscale;
+    const L = 4.6 * k / 2, W = 2.2 * k / 2;
+    const th = p.head * Math.PI / 180;
+    const ux = Math.cos(th), uy = Math.sin(th);   // 车头方向（X=北、Y=东）
+    const nx = -uy, ny = ux;
+    const z = meshZAt(p.x, p.y) + 0.06;
+    const v = [];
+    const put = (a, b) => v.push(p.x + ux * a + nx * b, p.y + uy * a + ny * b, z);
+    put(L, -W); put(L, W); put(-L, W);
+    put(L, -W); put(-L, W); put(-L, -W);
+    S.bufSymArr = new Float32Array(v);
+    S.nSym = v.length / 3;
+  } else { S.nSym = 0; S.bufSymArr = new Float32Array(0); }
+}
+
+function uploadOverlays() {
+  const gl = S.gl;
+  if (S.bufLine) gl.deleteBuffer(S.bufLine);
+  S.bufLine = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufLine);
+  gl.bufferData(gl.ARRAY_BUFFER, S.bufLineArr, gl.STATIC_DRAW);
+  if (S.bufSym) gl.deleteBuffer(S.bufSym);
+  S.bufSym = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufSym);
+  gl.bufferData(gl.ARRAY_BUFFER, S.bufSymArr, gl.STATIC_DRAW);
 }
 
 // ---------------------------------------------------------------- 交互
@@ -268,9 +584,10 @@ function bindInteraction() {
   cv.addEventListener("pointerdown", e => {
     dragging = true; lx = e.clientX; ly = e.clientY;
     cv.classList.add("dragging"); cv.setPointerCapture(e.pointerId);
+    hideProbe();
   });
   cv.addEventListener("pointermove", e => {
-    if (!dragging) return;
+    if (!dragging) { probeAt(e); return; }
     S.az -= (e.clientX - lx) * 0.006;
     S.el = Math.max(-1.45, Math.min(1.45, S.el + (e.clientY - ly) * 0.006));
     lx = e.clientX; ly = e.clientY;
@@ -280,11 +597,59 @@ function bindInteraction() {
     dragging = false; cv.classList.remove("dragging");
     try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
   });
+  cv.addEventListener("pointerleave", hideProbe);
   cv.addEventListener("wheel", e => {
     e.preventDefault();
     S.dist *= Math.exp(e.deltaY * 0.0012);
     draw();
   }, { passive: false });
+}
+
+function hideProbe() { document.getElementById("probe").style.display = "none"; }
+
+// 沿程查询：把中线顶点投到屏幕，取离光标最近的那个。
+// ★ 这条路在鸟瞰下只有约 2 px 宽，中线就是它在屏幕上的全部 ——
+//   所以屏幕空间最近中线点等价于"点到哪一段路"，而且不需要空间索引。
+function probeAt(e) {
+  const mvp = LAST_MVP;
+  if (!mvp || !S.mesh) return;
+  const cv = document.getElementById("gl");
+  const rect = cv.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const mx = (e.clientX - rect.left) * dpr;
+  const my = (e.clientY - rect.top) * dpr;
+  const W = cv.width, H = cv.height;
+  const m = S.meta, pos = m.pos, nu = m.nu, nv = m.nv;
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < nu; i++) {
+    const a = (i * nv + 4) * 3;
+    const x = pos[a], y = pos[a + 1], z = pos[a + 2] * S.zscale;
+    const cw = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+    if (cw <= 0) continue;
+    const cx = (mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]) / cw;
+    const cy = (mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]) / cw;
+    const sx = (cx * 0.5 + 0.5) * W, sy = (1 - (cy * 0.5 + 0.5)) * H;
+    const d = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  const R = 26 * dpr;
+  if (best < 0 || bestD > R * R) { hideProbe(); return; }
+  const u = best * m.uStep;
+  const a = (best * nv + 4) * 3;
+  const z = pos[a + 2];
+  const load = sampleLoadAtU(u);
+  const curv = m.curv[best];
+  const el = document.getElementById("probe");
+  el.innerHTML =
+    "<b>" + u.toFixed(1) + " m</b> 里程<br>" +
+    "高程 " + z.toFixed(3) + " m<br>" +
+    (load === null
+      ? "轮荷 <span style='color:#8b949e'>无数据（该里程不在轨迹范围）</span>"
+      : "轮荷 " + load.toFixed(3) + " kN") + "<br>" +
+    "曲率 " + (curv * 1000).toFixed(3) + " ‰/m";
+  el.style.display = "block";
+  el.style.left = Math.min(e.clientX - rect.left + 14, rect.width - 220) + "px";
+  el.style.top = Math.max(4, e.clientY - rect.top - 10) + "px";
 }
 
 function bindZScale() {
@@ -309,11 +674,55 @@ function bindZScale() {
   apply();
 }
 
+function bindSymScale() {
+  const sl = document.getElementById("symscale");
+  const out = document.getElementById("symval");
+  const apply = () => {
+    S.symscale = parseFloat(sl.value);
+    out.textContent = S.symscale.toFixed(0) + "×";
+    buildOverlays();
+    uploadOverlays();
+    draw();
+  };
+  sl.addEventListener("input", apply);
+  apply();
+}
+
+function bindQuantity() {
+  const sel = document.getElementById("quantity");
+  const note = document.getElementById("qnote");
+  const apply = () => {
+    S.quantity = sel.value;
+    buildQuantity();
+    const gl = S.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, S.bufQ);
+    gl.bufferData(gl.ARRAY_BUFFER, S.qData, gl.DYNAMIC_DRAW);
+    const fmt = v => (S.quantity === "curv" ? (v * 1000).toFixed(3) + " ‰/m" : v.toFixed(3));
+    document.getElementById("lg-lo").textContent = fmt(S.qLo);
+    document.getElementById("lg-hi").textContent = fmt(S.qHi);
+    // ★ 这里只是刻度。刻意不写任何"多少算好、多少算坏"的话 ——
+    //   在标定完成之前，页面只显示数值，不替人下结论。
+    note.textContent = (S.quantity === "elev")
+      ? "高程来自 CRG 实测（0.1 m 网格），色带是显示刻度。"
+      : (S.quantity === "curv")
+        ? "曲率由网格中线的方位角沿里程求导得到，与仿真无关。色带是显示刻度。"
+        : "轮荷是四个轮 Fz 之和，按里程对齐到路面。轨迹没覆盖的里程显示为条纹。";
+    draw();
+  };
+  sel.addEventListener("change", apply);
+  apply();
+}
+
 // ---------------------------------------------------------------- 启动
 function fatal(msg) {
   document.getElementById("fatal-msg").textContent = msg;
   document.getElementById("fatal").style.display = "block";
   document.getElementById("status").textContent = "载入失败";
+}
+function banner(msg) {
+  const b = document.getElementById("banner");
+  b.innerHTML = msg;
+  b.style.display = "block";
 }
 
 async function boot() {
@@ -325,98 +734,213 @@ async function boot() {
     throw new Error("GET " + ENTRY + " → " + resp.status + "\n" + body.slice(0, 600));
   }
   const { manifest, crs } = await resp.json();
+  S.manifest = manifest; S.crs = crs;
+  const arts = manifest.artifacts || [];
+  const byName = n => arts.find(a => a.name === n);
 
-  // 优先总览档（体积小、首屏快）；没有就退到任意一档地形网格。
-  const meshes = manifest.artifacts.filter(a => a.kind === "terrain_mesh" && a.present);
-  if (!meshes.length) throw new Error("清单里没有 present 的地形网格。");
-  const pick = meshes.find(m => m.name.indexOf("overview") >= 0) || meshes[0];
-  S.meta = pick.mesh;
-
-  st.textContent = "下载网格 " + pick.name + "…";
+  // —— 网格
+  const meshes = arts.filter(a => a.kind === "terrain_mesh" && a.present);
+  if (!meshes.length) throw new Error("清单里没有已产出的 terrain_mesh");
+  const pick = meshes.find(a => a.name.indexOf("overview") >= 0) || meshes[0];
+  st.textContent = "读网格…";
   const mresp = await fetch("/artifacts/" + encodeURIComponent(pick.name));
   if (!mresp.ok) throw new Error("GET /artifacts/" + pick.name + " → " + mresp.status);
   const buf = await mresp.arrayBuffer();
+  const dec = decodeMesh(buf, pick.mesh);
+  const nrm = computeNormals(dec.pos, dec.nu, dec.nv);
+  S.mesh = dec;
+  S.meta = {
+    nu: dec.nu, nv: dec.nv, pos: dec.pos,
+    uStep: pick.mesh.u_step_m,
+    vSamples: pick.mesh.v_samples_m || [-4.25, -3.5, -2.625, -1.75, 0, 1.75, 2.625, 3.5, 4.25],
+  };
 
-  const { pos, idx, nu, nv, nVtx, nTri } = decodeMesh(buf, S.meta);
-  const nrm = computeNormals(pos, nu, nv);
-
-  let zmin = Infinity, zmax = -Infinity;
+  // —— 网格范围与真尺度比值（只算一次，读数与提示语共用）
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
-  for (let i = 0; i < nVtx; i++) {
-    const x = pos[i*3], y = pos[i*3+1], z = pos[i*3+2];
-    if (z < zmin) zmin = z; if (z > zmax) zmax = z;
+  let zmin = Infinity, zmax = -Infinity;
+  for (let i = 0; i < dec.nvtx; i++) {
+    const x = dec.pos[i * 3], y = dec.pos[i * 3 + 1], z = dec.pos[i * 3 + 2];
     if (x < xmin) xmin = x; if (x > xmax) xmax = x;
     if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+    if (z < zmin) zmin = z; if (z > zmax) zmax = z;
   }
+  const planar = Math.hypot(xmax - xmin, ymax - ymin);
+  const dz = Math.max(zmax - zmin, 1e-6);
+  S.meta.planar = planar; S.meta.dz = dz;
+  S.meta.ratio = Math.round(planar / dz);
+  S.meta.bbox = [xmin, xmax, ymin, ymax];
   S.meta.zmin = zmin; S.meta.zmax = zmax;
-  S.target = [(xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2];
-  const span = Math.max(xmax-xmin, ymax-ymin);
-  S.dist = span * 0.95;
 
-  const cv = document.getElementById("gl");
-  const gl = cv.getContext("webgl", { antialias: true, depth: true });
-  if (!gl) throw new Error("浏览器不支持 WebGL。");
-  S.gl = gl;
-
-  const prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VS));
-  gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    throw new Error("着色器链接失败：" + gl.getProgramInfoLog(prog));
+  // —— 曲率：由**网格中线**的方位角沿里程求导。
+  //   刻意不用仿真轨迹的 heading —— 那条序列在出生瞬态里有尖峰，
+  //   求导会把尖峰放大成假的曲率。几何量就该从几何来。
+  const nu = dec.nu, nv = dec.nv, pos = dec.pos;
+  const curv = new Float32Array(nu);
+  const phi = new Float32Array(nu);
+  for (let i = 0; i < nu; i++) {
+    const i0 = Math.max(0, i - 1), i1 = Math.min(nu - 1, i + 1);
+    const a = (i0 * nv + 4) * 3, b = (i1 * nv + 4) * 3;
+    phi[i] = Math.atan2(pos[b + 1] - pos[a + 1], pos[b] - pos[a]);
   }
-  prog.aPos = gl.getAttribLocation(prog, "aPos");
-  prog.aNrm = gl.getAttribLocation(prog, "aNrm");
-  prog.uMVP = gl.getUniformLocation(prog, "uMVP");
-  prog.uZ   = gl.getUniformLocation(prog, "uZ");
-  prog.uLight = gl.getUniformLocation(prog, "uLight");
-  prog.uZmin = gl.getUniformLocation(prog, "uZmin");
-  prog.uZspan = gl.getUniformLocation(prog, "uZspan");
-  S.prog = prog;
+  const du = pick.mesh.u_step_m;
+  for (let i = 0; i < nu; i++) {
+    const i0 = Math.max(0, i - 1), i1 = Math.min(nu - 1, i + 1);
+    let d = phi[i1] - phi[i0];
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    curv[i] = d / ((i1 - i0) * du || 1);
+  }
+  S.meta.curv = curv;
+
+  // —— 轨迹
+  const csvMeta = byName("wheel_loads.csv");
+  if (csvMeta && csvMeta.present) {
+    st.textContent = "读轨迹…";
+    const cresp = await fetch("/artifacts/" + encodeURIComponent(csvMeta.name));
+    if (!cresp.ok) throw new Error("GET /artifacts/wheel_loads.csv → " + cresp.status);
+    const parsed = parseTrack(await cresp.text());
+    if (parsed.missingPose) {
+      // ★ 缺平面位姿 → 明确报告，不画，也不假定位姿在原点
+      banner("轨迹 CSV 缺平面位姿列：<b>" + parsed.need.join(" / ") +
+             "</b> 中至少一列不在表头里。<br>" +
+             "因此**不叠加轨迹** —— 也不会把车画在坐标原点冒充位姿。");
+      S.track = null;
+    } else {
+      S.track = parsed.pts;
+      // —— T018 判据：平面位置是否始终落在网格的平面外接矩形内
+      let out = 0, outside = null;
+      for (const p of S.track) {
+        if (p.x < xmin || p.x > xmax || p.y < ymin || p.y > ymax) {
+          out++; if (!outside) outside = p;
+        }
+      }
+      if (out > 0) {
+        banner("轨迹有 <b>" + out + "</b> / " + S.track.length +
+               " 个点的平面位置落在网格范围之外（首个 s = " +
+               outside.s.toFixed(1) + " m）。<br>" +
+               "轨迹与路面可能不同批次 —— 两者不是同一条线形跑出来的。");
+      }
+      // ★ 每个轨迹点的路面高度只算一次（见 buildOverlays 的注释）
+      for (const p of S.track) p.z = meshZAt(p.x, p.y);
+    }
+  } else {
+    banner("清单里 <b>wheel_loads.csv</b> 未产出（present: false），本页不叠加轨迹。");
+  }
+
+  // 出生瞬态：t < 5 s 的 heading 还在收敛，读数里点明它
+  S.spawnEnd = 5.0;
+
+  // —— GL 与缓冲
+  const gl = document.getElementById("gl").getContext("webgl", { antialias: true, depth: true });
+  if (!gl) throw new Error("这个浏览器拿不到 WebGL 上下文");
+  S.gl = gl;
+  S.prog = program(gl, VS, FS, ["aPos", "aNrm", "aQ"], ["uMVP", "uZ", "uLight"]);
+  S.lineProg = program(gl, LVS, LFS, ["aPos"], ["uMVP", "uZ", "uColor"]);
 
   S.bufPos = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, S.bufPos);
-  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, dec.pos, gl.STATIC_DRAW);
   S.bufNrm = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, S.bufNrm);
   gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.STATIC_DRAW);
   S.bufIdx = gl.createBuffer();
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, S.bufIdx);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
-  S.nIndex = idx.length;
-  S.idxType = (S.meta.index_dtype === "uint16") ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
-  S.mesh = true;
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, dec.idx, gl.STATIC_DRAW);
+  S.nIndex = dec.idx.length;
+  S.idxType = dec.uint16 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
+  S.nVtx = dec.nvtx;
+  buildQuantity();
+  S.bufQ = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.bufQ);
+  gl.bufferData(gl.ARRAY_BUFFER, S.qData, gl.DYNAMIC_DRAW);
 
-  // 读数
-  document.getElementById("ro-mesh").textContent = pick.name;
-  document.getElementById("ro-count").textContent = nVtx.toLocaleString() + " / " + nTri.toLocaleString();
-  document.getElementById("ro-ulen").textContent = ((nu - 1) * S.meta.u_step_m / 1000).toFixed(3) + " km";
-  document.getElementById("ro-zlen").textContent = (zmax - zmin).toFixed(2) + " m";
-  const planar = Math.hypot(xmax-xmin, ymax-ymin);
-  const dz = Math.max(zmax - zmin, 1e-6);
-  // ★ 比值只算一次，读数与提示语共用 —— 两处各算一次就会各说各话。
-  S.meta.planar = planar; S.meta.dz = dz; S.meta.ratio = Math.round(planar / dz);
+  S.dist = planar * 0.95;
+  S.target = [(xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2];
+
+  buildOverlays();
+  uploadOverlays();
+
+  // —— 读数
+  document.getElementById("ro-mesh").textContent =
+    pick.name.replace(/^terrain_/, "").replace(/\.bin$/, "") + " · " + pick.mesh.u_step_m.toFixed(1) + " m";
+  document.getElementById("ro-count").textContent = dec.nvtx + " / " + dec.nTri;
+  document.getElementById("ro-ulen").textContent =
+    (S.meta.vSamples[S.meta.vSamples.length - 1] - S.meta.vSamples[0]).toFixed(2) + " m 宽 · " +
+    ((nu - 1) * du / 1000).toFixed(2) + " km 长";
+  document.getElementById("ro-zlen").textContent = zmin.toFixed(2) + " … " + zmax.toFixed(2) + " m";
   document.getElementById("ro-ratio").textContent = "1 : " + S.meta.ratio;
+  document.getElementById("ro-trk").textContent = S.track ? S.track.length + " 点" : "未叠加";
+  document.getElementById("ro-trks").textContent = S.track
+    ? S.track[0].s.toFixed(1) + " → " + S.track[S.track.length - 1].s.toFixed(1) + " m"
+    : "—";
 
-  // 坐标基准：★ 局部帧不需要带号，这里只是把"当前假定"显示出来（FR-017）
+  // —— 坐标基准：★ ready 与 assumed 是**两个不同的标记**
+  //   一个说"能不能用"，一个说"值可不可信"。合并成一个就会丢掉
+  //   「先用着，但我知道它是猜的」这个合法状态。
   const gf = (crs && crs.geographic_frame) || null;
+  const lf = (crs && crs.local_frame) || null;
   const roCrs = document.getElementById("ro-crs");
+  const body = document.getElementById("crs-body");
   if (gf) {
     const tags = [];
     tags.push(gf.ready ? '<span class="tag ready">区域帧可用</span>'
                        : '<span class="tag assumed">区域帧未启用</span>');
     if (gf.assumed) tags.push('<span class="tag assumed">带号 ' + gf.zone_number + ' 为推断值</span>');
     roCrs.innerHTML = tags.join(" ");
-    roCrs.title = "中央子午线 " + gf.central_meridian_deg + "°E，" + gf.ellipsoid
-      + "。局部帧不使用带号；它是区域帧的配置。";
+    let h = "<div style='margin-bottom:6px'>局部帧：" +
+      (lf ? lf.axes + "，单位 " + lf.unit : "未配置") +
+      "</div><div class='note'>局部帧不使用带号 —— 带号是区域帧的配置。" +
+      "下面这些只在把局部坐标投影到经纬度时才生效。</div>";
+    h += "<div class='kv' style='margin-top:8px'><span>椭球</span><b>" + gf.ellipsoid + "</b></div>";
+    h += "<div class='kv'><span>投影</span><b>" + gf.projection + "（" +
+         gf.zone_width_deg + " 度带）</b></div>";
+    h += "<div class='kv'><span>带号</span><b>" + gf.zone_number + "</b></div>";
+    h += "<div class='kv'><span>中央子午线</span><b>" + gf.central_meridian_deg + "°E</b></div>";
+    h += "<div class='kv'><span>EPSG</span><b>" +
+         (gf.epsg_after_confirm || "确认前不填") + "</b></div>";
+    if (gf.assumed && gf.evidence) {
+      h += "<div class='note' style='margin-top:8px'>★ 这个带号是<b>从数据反推</b>的，不是设计方给的。" +
+           "推错的后果是位置差几百公里，而任何局部视图里都看不出来 —— " +
+           "它只在交付那一刻暴露。</div>";
+      h += "<ul class='ev'>";
+      for (const e of gf.evidence) h += "<li>" + e + "</li>";
+      h += "</ul>";
+    }
+    if (gf.confirm_path) h += "<div class='note'>" + gf.confirm_path + "</div>";
+    body.innerHTML = h;
   } else {
     roCrs.textContent = (crs && crs._error) ? "配置读取失败" : "未配置";
+    body.textContent = roCrs.textContent;
   }
+
+  // —— 交付产物：★ present: false 显示为「未产出」，不是空白、也不是报错
+  const mb = document.getElementById("media-body");
+  let mh = "";
+  for (const a of arts) {
+    if (a.kind === "video" && a.present) {
+      mh += "<video controls preload='metadata' src='/artifacts/" +
+            encodeURIComponent(a.name) + "'></video>";
+    }
+    mh += "<div class='media-row'>";
+    if (a.present) {
+      mh += "<span class='nm'><a href='/artifacts/" + encodeURIComponent(a.name) +
+            "'>" + a.name + "</a></span>";
+      mh += "<span>" + (a.bytes / 1048576).toFixed(1) + " MB</span>";
+    } else {
+      mh += "<span class='nm' style='color:#8b949e'>" + a.name + "</span>";
+      mh += "<span class='tag missing'>未产出</span>";
+    }
+    mh += "</div>";
+    if (a.note) mh += "<div class='note' style='margin:-2px 0 8px'>" + a.note + "</div>";
+  }
+  mb.innerHTML = mh || "<div class='note'>清单里没有产物</div>";
 
   bindInteraction();
   bindZScale();
+  bindSymScale();
+  bindQuantity();
   window.addEventListener("resize", draw);
-  st.textContent = "就绪 · 拖动旋转，滚轮缩放";
+  st.textContent = "就绪 · 拖动旋转，滚轮缩放，悬停读数";
   draw();
 }
 

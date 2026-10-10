@@ -84,7 +84,16 @@ SIM_ARTIFACTS_DIR = pathlib.Path(os.getenv("SIM_ARTIFACTS_DIR", "/data/sim"))
 SIM_MANIFEST_NAME = "manifest.json"
 #: 坐标基准配置。★ 局部帧**不需要**它；读它是为了把"带号是推断值"这件事
 #: 显示出来（FR-017）。它不参与任何几何计算。
-CRS_CONFIG = pathlib.Path(os.getenv("CRS_CONFIG", "config/crs.yaml"))
+#: ★ 相对路径一律**按模块所在目录**解析，不按进程 CWD。
+#:   原先写的是 `pathlib.Path("config/crs.yaml")` —— 那意味着"只有从对的目录
+#:   启动才读得到"，而读不到时的表现是 `{"_error": ...}`：接口照样 200，
+#:   页面上带号那一栏静静地空着。这类失败不会报错，只会少显示东西。
+def _resolve_crs_config(raw: str) -> pathlib.Path:
+    p = pathlib.Path(raw)
+    return p if p.is_absolute() else pathlib.Path(__file__).resolve().parent / p
+
+
+CRS_CONFIG = _resolve_crs_config(os.getenv("CRS_CONFIG", "config/crs.yaml"))
 
 TABLES_PAGE = pathlib.Path(__file__).with_name("tables.html")
 GEOMETRY_PAGE = pathlib.Path(__file__).with_name("geometry.html")
