@@ -5,10 +5,11 @@
 //       前作 03_visualize.cpp 只把「路面」画出来，没有车；本文件补上「车」。
 //
 // 用法：
-//   ./demo_vehicle_on_crg <crg文件> [--speed 15] [--offset 0] [--headless]
+//   ./demo_vehicle_on_crg <crg文件> [--speed 15] [--offset -1.75] [--headless]
 //                          [--duration 600] [--step 0.002]
 //     --speed    目标速度 m/s（默认 15 ≈ 54 km/h）—— 速度可设
-//     --offset   相对中心线的横向偏移 m，正数=向左（默认 0）—— 轨迹可设
+//     --offset   相对路中线的横向偏移 m，正数=向左
+//                （默认 -1.75 = 靠右行驶，右侧 3.5 m 车道的中心线）—— 轨迹可设
 //     --headless 不开窗口，纯计算（批量扫参数时用）
 //     --duration 最长仿真时长 s（默认 600）
 //     --step     积分步长 s（默认 0.002）
@@ -45,11 +46,16 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <cstdio>
+#include <system_error>
 
 #include "chrono/physics/ChSystemSMC.h"
 #include "chrono/core/ChDataPath.h"
 #include "chrono/core/ChBezierCurve.h"
 #include "chrono/assets/ChVisualShapeBox.h"
+#include "chrono/assets/ChVisualShapeTriangleMesh.h"
+#include "chrono/geometry/ChTriangleMeshConnected.h"
+#include <chrono>
 
 #include "chrono_vehicle/ChVehicleDataPath.h"
 #include "chrono_vehicle/ChWorldFrame.h"
@@ -273,12 +279,33 @@ int main(int argc, char* argv[]) {
     // ---------------------------------------------------------------- 参数
     std::string crg_file;
     double target_speed = 15.0;   // m/s
-    double offset = 0.0;          // m，正=左
+    // ★★★ 默认**靠右行驶**，不是压中线。★★★
+    //   这是二级公路，横断面直接从设计表里读得到（roadbed_design_point，
+    //   section_id = 6）：
+    //     左车道 3.5 + 右车道 3.5 + 左硬路肩 0.75 + 右硬路肩 0.75 = 8.5 m
+    //     （左/右中央分隔带均为 0，加减速车道 extra_width_09/11 均为 0）
+    //   8.5 m 正好等于 CRG 的 v 覆盖宽度，反过来印证了这张横断面表。
+    //   右侧车道中心距路中线 3.5 / 2 = 1.75 m；
+    //   而 offset **正 = 左**（BuildOffsetPath 取左法向 (-ty, tx)，
+    //   见函数头注释），所以靠右就是 **-1.75**。
+    //   ★ 默认值就是"对的那一个"：不加 --offset 时也应当合法上路。
+    //     压着中线跑虽然动力学上完全正常，但几何上它是**对向车道**，
+    //     WIM 断面（K4640+000 行车道 2 轮迹带）也不在线上。
+    double offset = -1.75;        // m，正=左；默认 = 右侧车道中心
     bool headless = false;
     double duration = 600.0;      // s
     double step = 0.002;          // s
     std::string csv_path;         // 空 = 不导出
     double csv_dt = 0.05;         // s，导出采样间隔
+    std::string video_dir;        // 空 = 不抓帧；否则把 PNG 写进这个目录
+    double video_dt = 0.2;        // s，抓帧间隔（仿真时间）
+    int video_w = 1280, video_h = 720;   // 视频分辨率
+    double render_dt = 0.0;       // s，渲染节流；0 = 不节流（每步都渲染）
+    bool use_texture = true;      // 路面贴纹理（--no-texture 关）
+    bool use_sky = true;          // 天空穹顶（--no-sky 关）
+    bool use_shadows = true;      // 硬阴影（--no-shadows 关）
+    bool use_markings = true;     // 车道标线（--no-markings 关）
+    int  pbr = 0;                 // 0=只漫反射  1=+法线  2=+法线+粗糙度
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -299,6 +326,33 @@ int main(int argc, char* argv[]) {
         } else if (a == "--csv") {
             if (i + 1 < argc)
                 csv_path = argv[++i];
+        } else if (a == "--video-dt") {
+            next(video_dt);
+        } else if (a == "--render-dt") {
+            next(render_dt);
+        } else if (a == "--no-texture") {
+            use_texture = false;
+        } else if (a == "--no-sky") {
+            use_sky = false;
+        } else if (a == "--no-markings") {
+            use_markings = false;
+        } else if (a == "--no-shadows") {
+            use_shadows = false;
+        } else if (a == "--pbr") {
+            if (i + 1 < argc)
+                pbr = std::stoi(argv[++i]);
+        } else if (a == "--video-size") {
+            if (i + 1 < argc) {
+                const std::string wh = argv[++i];
+                const auto x = wh.find('x');
+                if (x != std::string::npos) {
+                    video_w = std::stoi(wh.substr(0, x));
+                    video_h = std::stoi(wh.substr(x + 1));
+                }
+            }
+        } else if (a == "--video") {
+            if (i + 1 < argc)
+                video_dir = argv[++i];
         } else if (a == "--headless") {
             headless = true;
         } else if (crg_file.empty()) {
@@ -307,9 +361,17 @@ int main(int argc, char* argv[]) {
     }
     if (crg_file.empty()) {
         std::cout << "用法: " << argv[0]
-                  << " <crg文件> [--speed 15] [--offset 0] [--headless]"
+                  << " <crg文件> [--speed 15] [--offset -1.75] [--headless]"
                      " [--duration 600] [--step 0.002]"
-                     " [--csv 轮荷.csv] [--csv-dt 0.05]\n";
+                     " [--csv 轮荷.csv] [--csv-dt 0.05]"
+                     " [--video 帧目录] [--video-dt 0.2] [--video-size 1280x720]"
+                     " [--render-dt 0.1] [--no-texture] [--no-sky] [--no-shadows] [--no-markings] [--pbr 0|1|2]\n";
+        return 2;
+    }
+    // --video 与 --headless 互斥：headless 根本不建窗口，没有帧可抓。
+    // 这种自相矛盾的参数必须当场拒绝，而不是跑完 400 s 才发现一个文件都没写。
+    if (!video_dir.empty() && headless) {
+        std::cerr << "\n!!! --video 需要窗口，--headless 不建窗口，两者不能同时给。" << std::endl;
         return 2;
     }
 
@@ -383,14 +445,212 @@ int main(int argc, char* argv[]) {
     std::cout << "\n==> CRG 文件: " << crg_file << std::endl;
     CRGTerrain terrain(&sys);
     terrain.UseMeshVisualization(true);
+    // ★★ 视觉网格简化：CRGTerrain::SimplifyMesh(true) 把 v 通道从
+    //    「按 m_vinc 等分」换成一张固定的 5 条表（vbeg, -0.05, 0, 0.05, vend），
+    //    见 CRGTerrain.cpp:159-163。我们这个 CRG 有 86 条 v 通道，
+    //    简化后三角面数除以 17。
+    //    ★ 它只改**画出来的网格**；物理仍走 crgEvaluv2z 的解析查询，
+    //      轮荷、轨迹一个字都不变。
+    //    头文件对不简化的那支的原话就是「Default: show original mesh, maybe slow」——
+    //    实测 1280x720 软件渲染下约 13 s/帧，不简化根本录不成视频。
+    if (!video_dir.empty() || render_dt > 0.0) {
+        terrain.SimplifyMesh(true);
+        std::cout << "==> 视觉网格已简化（v 通道 86 → 5，只为出图；物理不受影响）" << std::endl;
+    }
+    // ★★ 路面纹理。不加纹理时，CRG 地形是一张**平涂灰色网格**：
+    //    靠近的路面邻接三角面法向几乎相同 → 渲染出来就是一整片均匀灰，
+    //    追随相机看 0.5 s（15 m/s 走 7.5 m）画面几乎不变。
+    //    实测：整帧平均像素差只有 0.0002/255，全图 45%~56% 是同一个背景色。
+    //    贴一张混凝土漫反射图之后，路面自己带着纹理在动，视频才有信息量。
+    //    ★ 这条必须放在 Initialize() 之前 —— 纹理是在 Initialize →
+    //      SetupMeshGraphics() 里挂到 visual shape 上的（CRGTerrain.cpp:543-561），
+    //      之后再设文件名不会生效。
+    if (use_texture) {
+        const std::string tex_dir = "vehicle/terrain/textures/Concrete002_2K-JPG/";
+        terrain.SetRoadDiffuseTextureFile(tex_dir + "Concrete002_2K_Color.jpg");
+        if (pbr >= 1)
+            terrain.SetRoadNormalTextureFile(tex_dir + "Concrete002_2K_NormalGL.jpg");
+        if (pbr >= 2)
+            terrain.SetRoadRoughnessTextureFile(tex_dir + "Concrete002_2K_Roughness.jpg");
+        std::cout << "==> 路面纹理已挂（Concrete002，漫反射"
+                  << (pbr >= 1 ? " + 法线" : "") << (pbr >= 2 ? " + 粗糙度" : "") << "）"
+                  << std::endl;
+    }
     terrain.SetContactFrictionCoefficient(0.8f);
     terrain.SetRoadsidePostDistance(50.0);
     terrain.Initialize(crg_file);
 
     const double road_length = terrain.GetLength();
     const double road_width = terrain.GetWidth();
+
+    // ---------------------------------------------------------------- 车道标线
+    // ★ 二级公路的标准横断面（数字直接来自设计表 roadbed_design_point，
+    //   section_id = 6 的 332 个断面全都是这一组值）：
+    //       左硬路肩 0.75 | 左车道 3.50 | 右车道 3.50 | 右硬路肩 0.75
+    //       左/右中央分隔带 0.00，加减速车道 extra_width_09/11 均为 0.00
+    //   合计 8.5 m —— 与 CRG 报的 v 覆盖宽度一致，互为印证。
+    //   于是标线的位置是算出来的，不是挑出来的：
+    //       v =  0.00  → 路中线（黄色虚线）
+    //       v = ±3.50  → 行车道边缘线（白色实线，正好是车道与硬路肩的分界）
+    //       v = -1.75  → 右侧车道中心 = 本程序的默认行驶位置
+    //   为什么非加不可：路面只有一张混凝土贴图时，8.5 m 宽的路面是一整片
+    //   **无参照的灰**，车在哪条车道上根本看不出来 —— 而"靠右行驶"恰恰
+    //   是必须一眼可辨的事。中心线用**虚线**还有第二个好处：
+    //   它本身就带运动视差，能让人确认车在往前走。
+    if (use_markings) {
+        // ★★ 标线必须建立在**修复后**的中线上。★★
+        //   CRGTerrain::m_isClosed 是个纯几何猜测（首末航向差 < 60°），
+        //   对这条开放的 5805 m 山路**误判为闭合**，于是 GetRoadCenterLine()
+        //   的末控制点被首点覆盖，曲线里凭空多出一段约 8.7 km 的跳变
+        //   （折线总长 14499.8 m vs 路长 5805.4 m）。
+        //   跳过变段去问地形高程时，点落在 CRG 网格之外，
+        //   crgEvalxy2uv 在那里反复迭代不收敛 —— 第一版就是这样把整个
+        //   程序拖到 5 分钟超时（exit 124、0 帧）的。
+        //   ★ 注意这不是"GetHeight 太贵"：实测它 0.0084 ms/次
+        //     （≈12 万次/秒），2.9 万次只要 0.24 s。成本猜错了两次，
+        //     最后靠的是实测。
+        //   判据与下面主路径那处修复完全一致（> 1.2 × 路长 才算误闭合）。
+        auto center_curve = terrain.GetRoadCenterLine();
+        {
+            Polyline probe = SamplePath(center_curve, 8);
+            if (!probe.s.empty() && probe.s.back() > 1.2 * road_length) {
+                std::vector<ChVector3d> cpts = center_curve->GetPoints();
+                cpts.pop_back();
+                center_curve = chrono_types::make_shared<ChBezierCurve>(cpts, false);
+            }
+        }
+
+        auto MakeStripe = [&](double v_center, double width, double dash_period,
+                              double dash_len, float r, float g, float b) {
+            auto mesh = chrono_types::make_shared<ChTriangleMeshConnected>();
+            std::vector<ChVector3d>& V = mesh->GetCoordsVertices();
+            std::vector<ChVector3i>& F = mesh->GetIndicesVertices();
+
+            // 沿中线按弧长取断面（SamplePath 已按弧长重采样，间距约 0.375 m）
+            Polyline pl = SamplePath(center_curve, 8);
+            const int M = static_cast<int>(pl.pts.size());
+            const double STEP = 3.0;   // 每 3 m 一个断面，够贴 255 m 半径的圆曲线
+
+            // 高程逐顶点问地形。GetHeight 走 crgEvalxy2uv（逆变换、迭代搜索），
+            // 我一度认定它太贵 —— **实测 0.0084 ms/次**，2.9 万次总共 0.24 s。
+            // "逐顶点反查把程序算死"是错的；真凶是上面那段跳变曲线。
+            // ★ 顺带一条：中线控制点自己的 z 与地形实测差了约 0.2 m，
+            //   所以**不能**拿中线 z 当路面高程用，必须问地形（见下面的自检）。
+            //
+
+            auto put = [&](int i, double dv) {
+                const int i0 = (i == 0) ? 0 : i - 1;
+                const int i1 = (i + 1 >= M) ? M - 1 : i + 1;
+                ChVector3d t(pl.pts[i1].x() - pl.pts[i0].x(),
+                             pl.pts[i1].y() - pl.pts[i0].y(), 0.0);
+                if (t.Length() < 1e-9)
+                    t = ChVector3d(1, 0, 0);
+                t.Normalize();
+                const ChVector3d nrm(-t.y(), t.x(), 0.0);   // 左法向，与 BuildOffsetPath 同式
+                ChVector3d q = pl.pts[i] + (v_center + dv) * nrm;
+                // 高程问地形实测，再抬 2 cm 防 z-fighting
+                q.z() = terrain.GetHeight(q) + 0.02;
+                return q;
+            };
+
+            // 沿弧长每 STEP 米取一个断面。
+            // ★ 虚线遇到空隙时必须把 prev 清掉，否则下一段会跨过空隙
+            //   跟上一段连成一个大四边形 —— 虚线会被"填实"，
+            //   而且看起来像画对了。
+            int prev_a = -1, prev_b = -1;
+            double next_s = -1.0;
+            for (int i = 0; i < M; ++i) {
+                if (pl.s[i] + 1e-9 < next_s)
+                    continue;
+                next_s = pl.s[i] + STEP;
+
+                if (dash_period > 0.0 &&
+                    std::fmod(pl.s[i], dash_period) >= dash_len) {
+                    prev_a = prev_b = -1;      // ← 空隙：断开
+                    continue;
+                }
+
+                const ChVector3d A = put(i, +0.5 * width);
+                const ChVector3d B = put(i, -0.5 * width);
+                const int a1 = static_cast<int>(V.size()); V.push_back(A);
+                const int b1 = static_cast<int>(V.size()); V.push_back(B);
+                if (prev_a >= 0) {
+                    // 绕序 (A0,B0,A1) 与 (B0,B1,A1) 的叉积都是 +z
+                    //（已手算核对），所以法线朝上，无需自己填法线：
+                    // ChShapeBuilderVSG.cpp:552-559 在法线索引缺失时会
+                    // 自己用叉积算面法线。
+                    F.push_back(ChVector3i(prev_a, prev_b, a1));
+                    F.push_back(ChVector3i(prev_b, b1, a1));
+                }
+                prev_a = a1; prev_b = b1;
+            }
+
+            auto shape = chrono_types::make_shared<ChVisualShapeTriangleMesh>();
+            shape->SetMesh(mesh);
+            shape->SetColor(ChColor(r, g, b));
+            return shape;
+        };
+
+        auto mark_body = chrono_types::make_shared<ChBody>();
+        mark_body->SetFixed(true);
+        mark_body->EnableCollision(false);          // 纯视觉，不参与动力学
+        sys.Add(mark_body);
+        mark_body->AddVisualShape(MakeStripe( 0.00, 0.15, 6.0, 4.0, 0.95f, 0.80f, 0.10f));
+        mark_body->AddVisualShape(MakeStripe( 3.50, 0.15, 0.0, 0.0, 0.92f, 0.92f, 0.92f));
+        mark_body->AddVisualShape(MakeStripe(-3.50, 0.15, 0.0, 0.0, 0.92f, 0.92f, 0.92f));
+        std::cout << "==> 车道标线已加（黄虚线中线 v=0；白实线车道边缘 v=±3.50；"
+                  << "行车道 3.5 m + 硬路肩 0.75 m）" << std::endl;
+        // ★ 标线高程自检。标线的 z 直接取自地形实测，所以这里只需要说清
+        //   两件事，都是我原先猜错、后来量出来的：
+        //     (1) 中线控制点自己的 z 与地形实测**差约 0.2 m** ⇒ 不能拿它当
+        //         路面高程用（标线因此走 GetHeight，不受影响）。
+        //     (2) 真实路拱高差有多大 —— 我曾凭 elev_diff 表推出"2.53% 横坡"，
+        //         那是错的；横坡小到可以忽略，路面近乎水平。
+        //   代价：抽 24 断面 × 3 点 = 72 次 GetHeight ≈ 0.6 ms。
+        {
+            Polyline chk = SamplePath(center_curve, 8);
+            const int MC = static_cast<int>(chk.pts.size());
+            auto nrm_at = [&](int i) {
+                const int i0 = (i == 0) ? 0 : i - 1;
+                const int i1 = (i + 1 >= MC) ? MC - 1 : i + 1;
+                ChVector3d t(chk.pts[i1].x() - chk.pts[i0].x(),
+                             chk.pts[i1].y() - chk.pts[i0].y(), 0.0);
+                t.Normalize();
+                return ChVector3d(-t.y(), t.x(), 0.0);
+            };
+            double worst = 0.0, crown = 0.0;
+            int tested = 0;
+            for (int k = 0; k < 24; ++k) {
+                const int i = (MC - 1) * k / 23;
+                const ChVector3d n = nrm_at(i);
+                const double zc = terrain.GetHeight(chk.pts[i]);
+                worst = std::max(worst, std::fabs(zc - chk.pts[i].z()));
+                for (double vv : {3.50, -3.50}) {
+                    ChVector3d q = chk.pts[i] + vv * n;
+                    crown = std::max(crown, std::fabs(terrain.GetHeight(q) - zc));
+                    ++tested;
+                }
+            }
+            std::cout << "    标线高程自检：抽 " << tested << " 点；路拱高差最大 "
+                      << crown * 1000.0 << " mm；中线控制点 z 与地形实测最大差 "
+                      << worst * 1000.0 << " mm（标线取实测值，不受其影响）"
+                      << std::endl;
+        }
+    }
     std::cout << "    路长 = " << road_length << " m   路宽 = " << road_width << " m"
               << "   闭合 = " << (terrain.IsPathClosed() ? "是" : "否") << std::endl;
+    if (use_texture) {
+        // 纹理重复次数 = CRGTerrain::SetupMeshGraphics() 里 SetTextureScale() 的
+        // scale_u，算法是 0.5 * 路长 / 路宽（CRGTerrain.cpp:551-553）。
+        // ★ 这段必须放在 Initialize() **之后**：Initialize() 之前 CRG 还没读，
+        //   GetLength()/GetWidth() 都返回 0，算出来是 0/0 = NaN，
+        //   转成 int 就是 INT_MIN —— 我第一版就打印出了「重复 -2147483648 次」。
+        //   ★ 一个荒唐到刺眼的数字救了我；如果当初打印的是"每 0 m 一个循环"
+        //     这种看着合理的值，这个错误会一直留着。
+        const double tex_repeat = 0.5 * road_length / road_width;
+        std::cout << "    路面纹理重复 " << static_cast<int>(tex_repeat) << " 次（每 "
+                  << road_length / tex_repeat << " m 一个循环）" << std::endl;
+    }
 
     // ---------------------------------------------------------------- 路径
     //
@@ -588,6 +848,24 @@ int main(int argc, char* argv[]) {
     std::cout << "==> 车辆已装: HMMWV_Full   轴数 = " << vehicle.GetNumberAxles()
               << "   质心 = " << vehicle.GetPos() << std::endl;
 
+    // ★★ 开车辆可视化。**Chrono 9 把这事的默认值改成了 NONE**，
+    //    于是 HMMWV 在画面里是**完全隐形的** —— 而它并不是没有模型：
+    //    HMMWV_Chassis.cpp:72 早就写好了 m_geometry.vis_model_file =
+    //    "hmmwv/hmmwv_chassis.obj"，HMMWV_Wheel.cpp:38 写了 hmmwv_rim.obj，
+    //    HMMWV_TMeasyTire 写了 hmmwv_tire_left/right.obj。
+    //    只是那份几何要有人**主动物化**：ChRigidChassis::AddVisualizationAssets()
+    //    会调 m_geometry.CreateVisualizationAssets(m_body, vis)
+    //    （ChRigidChassis.cpp:67-72），而它的上游开关就是下面这几句。
+    //    ★ ChWheeledVehicle 上**没有**一个总的 SetVisualizationType，
+    //      必须按部件分别设（ChVehicle.h:254 + ChWheeledVehicle.h:137-153）。
+    //      只设底盘不设轮子，车会像一块"浮在路上的板子"。
+    //    ★ 不放这几句的后果不是报错，是**画面里没有车**：
+    //      追随相机一直对着一段空路，你只会以为"视频没动"。
+    vehicle.SetChassisVisualizationType(VisualizationType::MESH);
+    vehicle.SetWheelVisualizationType(VisualizationType::MESH);
+    vehicle.SetTireVisualizationType(VisualizationType::MESH);
+    std::cout << "==> 车辆可视化已开（底盘 / 轮辋 / 轮胎 = MESH）" << std::endl;
+
     // ---------------------------------------------------------------- 驾驶
     // ★ 必须给目标速度加**斜坡**。ChPathFollowerDriver 的速度环是
     //   throttle = Kp * (目标 - 实际)，静止起步时误差 15 m/s、Kp=0.4 => 6.0，
@@ -626,10 +904,18 @@ int main(int argc, char* argv[]) {
     if (!headless) {
         vis = chrono_types::make_shared<ChWheeledVehicleVisualSystemVSG>();
         vis->SetWindowTitle("2025Y095 - vehicle on CRG road");
-        vis->SetWindowSize(1400, 900);
+        vis->SetWindowSize(video_dir.empty() ? 1400 : video_w,
+                           video_dir.empty() ? 900 : video_h);
         vis->SetChaseCamera(ChVector3d(0, 0, 1.75), 8.0, 1.0);
         vis->SetLightDirection(1.5 * CH_PI_2, CH_PI_4);
-        vis->EnableShadows();
+        if (use_shadows)
+            vis->EnableShadows();
+        // ★ 天空穹顶。默认背景是一块纯色（实测占画面 45%~56%），
+        //   换成天空贴图后画面才有远近参照，车跑起来才看得出在动。
+        //   ★ 必须在 Initialize() 之前调用（头文件原话：This function must be
+        //     called before Initialize()）。
+        if (use_sky)
+            vis->EnableSkyTexture(SkyMode::DOME);
         vis->AttachVehicle(&vehicle);
         vis->AttachTerrain(&terrain);
         vis->Initialize();
@@ -667,6 +953,47 @@ int main(int argc, char* argv[]) {
     bool arrived = false;
     double max_lat = 0.0;
 
+    // 视频抓帧（--video）。★★ 三个必须讲清楚的点：
+    //
+    // 1) 为什么不能每步都渲染。
+    //    本程序原本在循环里**每步**调 vis->Render()。无窗口时那是空操作，
+    //    有窗口时就是每步真渲染一次。实测：软件渲染（lavapipe）下渲染一帧
+    //    约 0.15 s，而不渲染的一步只要 1.8 ms —— 差 80 倍。全程 400 s 是
+    //    20 万步，每步渲染要跑 8 小时。所以开视频时**只在抓帧的那几步渲染**。
+    //
+    // 2) 为什么抓的是"上一帧"。
+    //    ChVisualSystemVSG::Render() 内部先 recordAndSubmit()，再检查
+    //    m_capture_image，此时 ExportScreenImage() 取的是 imageIndex(1)，
+    //    也就是**前一帧**的色缓冲（ChVisualSystemVSG.cpp:1200-1208）。
+    //    官方 CRGTerrain demo 因此写成「先 BeginScene/Render，再
+    //    WriteImageToFile」——落盘的其实是这次 Render 之前的那一帧。
+    //    照抄这个顺序，文件与仿真时刻就是对齐的。
+    //
+    // 3) 为什么第一帧必须跳过。
+    //    同上：第一帧没有"上一帧"可取。官方 demo 里留着一行注释
+    //    「does not work with frame == 0!」（demo_VSG_assets.cpp:457）。
+    //    这里用 rendered_so_far 计数，第一帧只渲染不写文件。
+    long video_rendered = 0;   // 已经渲染过多少帧（用来跳过第 0 帧）
+    long video_written = 0;    // 已经落盘多少张
+    // 渲染节流间隔：--video 用 video_dt；否则用 --render-dt；都没有 = 每步渲染。
+    // ★ 节流是给**外部录屏**用的：窗口按固定仿真时间间隔刷新，
+    //   仿真本身全速跑。不走 Chrono 的 WriteImageToFile，因为那条路
+    //   每抓一帧要新建 staging buffer/command pool/fence 并同步等设备，
+    //   软件 Vulkan 下实测 13~18 s/帧，做不成视频。
+    const double vis_dt = !video_dir.empty() ? video_dt : render_dt;
+    double next_render_t = 0.0;
+    if (!video_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(video_dir, ec);
+        if (ec) {
+            std::cerr << "\n!!! 建不了视频帧目录：" << video_dir << "（" << ec.message()
+                      << "）拒绝继续" << std::endl;
+            return 2;
+        }
+        std::cout << "==> 视频抓帧到 " << video_dir << "（每 " << video_dt << " s 一帧，"
+                  << video_w << "x" << video_h << "）" << std::endl;
+    }
+
     // 轮荷时间序列导出（--csv）。★ 在**进入循环前**就打开文件：
     // 写不进去要立刻知道，而不是跑完 400 s 才发现路径是错的。
     WheelLoadCsv csv(csv_path, csv_dt);
@@ -686,12 +1013,50 @@ int main(int argc, char* argv[]) {
     while (sys.GetChTime() < duration) {
         const double time = sys.GetChTime();
 
+        // ★★ 只节流**渲染**，不节流 Run/Synchronize/Advance。
+        //    (1) 省不到东西。节流前后同一个 20 s 仿真分别是 79.3 s 和 78.8 s
+        //        —— 1 万步的 Run/Synchronize/Advance 加起来只占 0.5 s。
+        //        真正贵的是 Render()，而 Render() 贵在**地形网格的面数**
+        //        （见上面 SimplifyMesh 那一段）。起初我以为 71 s 全花在
+        //        这三个函数的每步开销上，量完发现不是 —— 方向猜对了一半。
+        //    (2) 节流会**弄坏相机**。ChVehicleVisualSystemVSG::Advance(step)
+        //        内部是
+        //            double t = 0;
+        //            while (t < step) { h = min(m_stepsize, step - t);
+        //                               m_camera->Update(h);  t += h; }
+        //        也就是追随相机的**积分步**，隐含假设「每步都调一次，
+        //        于是 Σstep = 已过时间」。按 --render-dt 节流后每 0.5 s
+        //        只喂 0.002 s，相机只走正常速度的 0.4%，等于定住。
+        //        实测证据：节流版的地平线从第 279 行一路爬到 547 行、
+        //        7.5 s 后彻底不动；不节流版的地平线全程稳在 278~282 行。
+        //        ★ 定住这一点骗过了我很久 —— 因为追随相机跑在一条路上，
+        //          地平线**本来就该**固定在屏幕同一行。真正露馅的是
+        //          "先爬 268 行再不动"这个**过程**。
+        //    ★ 教训：**节流一个"每步调用"的回调之前，先量它值多少钱。**
+        //      这次它一文不值，而节流它引入了一个静默的相机失效。
+        const bool render_now = !vis || vis_dt <= 0.0 || time >= next_render_t;
+
         if (vis) {
             if (!vis->Run())
                 break;
-            vis->BeginScene();
-            vis->Render();
-            vis->EndScene();
+            if (render_now) {
+                vis->BeginScene();
+                vis->Render();
+                vis->EndScene();
+                if (vis_dt > 0.0)
+                    next_render_t = time + vis_dt;
+                if (!video_dir.empty()) {
+                    // ★ 第一帧跳过：没有"上一帧"可抓。
+                    if (video_rendered > 0) {
+                        char buf[1024];
+                        std::snprintf(buf, sizeof(buf), "%s/frame_%05ld.png",
+                                      video_dir.c_str(), video_written);
+                        vis->WriteImageToFile(buf);
+                        ++video_written;
+                    }
+                    ++video_rendered;
+                }
+            }
         }
 
         // 进度与横向偏差
@@ -776,6 +1141,16 @@ int main(int argc, char* argv[]) {
         sys.DoStepDynamics(step);
     }
 
+    // ★ 收尾补一次渲染。最后一次 WriteImageToFile 只是置了标志，真正的
+    //   ExportScreenImage() 发生在**下一次** Render() 里。循环一结束就没有
+    //   下一次了，不补这一下，最后一张就永远停在标志位里、文件不会出现。
+    //   （这不是理论担忧：只渲染不补渲染，落盘张数会比预期少一张。）
+    if (vis && !video_dir.empty()) {
+        vis->BeginScene();
+        vis->Render();
+        vis->EndScene();
+    }
+
     // ---------------------------------------------------------------- 报告
     double final_s = 0.0, final_lat = 0.0;
     QueryProgress(poly, vehicle.GetPos(), final_s, final_lat);
@@ -791,6 +1166,14 @@ int main(int argc, char* argv[]) {
         std::cout << "  其中有轮子离地: " << csv_airborne << " 行（"
                   << (csv_rows ? 100.0 * csv_airborne / csv_rows : 0.0) << "%）"
                   << " —— 判据是 Fz=0 且 pz=0；不是零载荷，是**没有接触**" << std::endl;
+    }
+
+    if (!video_dir.empty()) {
+        std::cout << "视频帧        : " << video_written << " 张 → " << video_dir << std::endl;
+        std::cout << "  合成命令    : ffmpeg -framerate " << (1.0 / video_dt)
+                  << " -i " << video_dir << "/frame_%05d.png"
+                  << " -c:v libx264 -pix_fmt yuv420p -crf 20 输出.mp4" << std::endl;
+        std::cout << "  （-framerate 取 1/video_dt 即为**实时**；调大就是快放）" << std::endl;
     }
 
     const auto loads = ReadWheelLoads(vehicle, &terrain);
