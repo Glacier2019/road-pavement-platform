@@ -298,10 +298,69 @@ def main() -> int:
         ok("crs.yaml 存在（带号是配置项，不是代码里的常量）", crs_f.is_file(), str(crs_f))
         if crs_f.is_file():
             c = crs_f.read_text(encoding="utf-8")
-            ok("crs.yaml 标了 assumed（推断值必须显式标注）", "assumed: true" in c)
+            gy = c.split("geographic_frame:", 1)[-1]
+            # ★ 判据与**当前状态无关**：assumed 可以是 true 也可以是 false，
+            #   但标记必须存在、必须是布尔字面量。原先断言 "assumed: true"
+            #   把「值」和「标记在不在」混成了一件事 —— 带号一确认，
+            #   这条检查就变成在检查「它还没被确认」。
+            assumed_m = re.search(r"^\s*assumed:\s*(true|false)", gy, re.M)
+            ok("crs.yaml 标了 assumed，且取值是 true/false（与当前状态无关）",
+               bool(assumed_m), (assumed_m.group(0) if assumed_m else "没找到"))
             ok("crs.yaml 记了推断依据", "evidence:" in c)
-            ok("元测试：把 assumed 删掉后必须被认出（非摆设）",
-               "assumed: true" not in c.replace("assumed: true", "assumed_removed: true"))
+            ok("元测试：把 assumed 整个删掉后必须被认出（非摆设）",
+               not re.search(r"^\s*assumed:", gy.replace("assumed:", "assumed_removed:"), re.M))
+
+            # ★★★ 不变量：assumed 与 epsg_after_confirm 必须一致 ——
+            #     猜的时候不许填 EPSG，确认了就必须填。
+            #     这条与状态无关，且在两个方向上都可能失败。
+            epsg_m = re.search(r"^\s*epsg_after_confirm:\s*(\S+)", gy, re.M)
+            epsg_v = epsg_m.group(1) if epsg_m else ""
+            epsg_filled = epsg_v not in ("", "null", "~")
+            is_assumed = (assumed_m.group(1) == "true") if assumed_m else None
+
+            def _consistent(filled: bool, assumed: bool) -> bool:
+                """猜的时候不许填 EPSG，确认了就必须填。"""
+                return filled != assumed
+
+            ok("assumed 与 epsg_after_confirm 一致（猜 ⟹ 空；确认 ⟹ 非空）",
+               is_assumed is not None and _consistent(epsg_filled, is_assumed),
+               f"assumed={is_assumed} epsg={epsg_v!r}")
+            # ★★ 双向元测试：谓词必须两个方向都能判不过。
+            #    只测一个方向的话，「永远返回 True」也能蒙过去。
+            ok("元测试：已确认却不填 EPSG 必须判不过（非摆设）",
+               not _consistent(False, False))
+            ok("元测试：还没确认就填了 EPSG 必须判不过（非摆设）",
+               not _consistent(True, True))
+
+            # ★★★ 带号 → EPSG 的对应关系**用公式算，不硬编码**。
+            #     两个系列，差别只在 Y 值带不带带号前缀：
+            #       CM 系列（无前缀）: code = 4534 + (CM - 75) / 3
+            #       zone 系列（有前缀）: code = 4525 + (zone - 37) = 4488 + zone
+            #     锚点实测于 EPSG def 页（x_0 一并记下，因为 x_0 正是区别所在）：
+            #       CM 87E=4538 / 111E=4546 / 114E=4547 / 117E=4548 / 120E=4549  x_0=500000
+            #       zone 37=4525 / 38=4526 / 39=4527 / 40=4528                  x_0=38500000/39500000/40500000
+            #     ★ 这条检查的存在理由：本仓库曾把 39 带写成「EPSG:4547 一类」，
+            #       而 4547 是 CM 114E，也就是**38 带** —— 差 3 度、约 300 km。
+            #       写错它的成本正是一个只打印经纬度的检查就能发现的那种错。
+            if epsg_filled:
+                zz_m = re.search(r"^\s*zone_number:\s*(\d+)", gy, re.M)
+                cm_m = re.search(r"^\s*central_meridian_deg:\s*(\d+)", gy, re.M)
+                if zz_m and cm_m:
+                    zz, cm = int(zz_m.group(1)), int(cm_m.group(1))
+                    ok("中央子午线与带号自洽（3 度带：CM = 3 × 带号）",
+                       cm == 3 * zz, f"{zz} 带 / {cm}°E")
+                    want_cm = 4534 + (cm - 75) // 3
+                    want_zone = 4488 + zz
+
+                    def _epsg_ok(code: int) -> bool:
+                        return code in (want_cm, want_zone)
+
+                    ok(f"EPSG 与带号对应（{cm}°E 无前缀={want_cm}，有前缀={want_zone}）",
+                       _epsg_ok(int(epsg_v)), f"实填 {epsg_v}")
+                    ok(f"元测试：EPSG 换成隔壁带 {want_cm - 1} 必须判不过（非摆设）",
+                       not _epsg_ok(want_cm - 1))
+                    ok("元测试：EPSG 换成有前缀的 series 值也必须判不过（两个 series 不可混用）",
+                       not _epsg_ok(want_zone + 1))
 
         ok("页面把 ready 与 assumed 显示为两个不同的标记",
            "区域帧可用" in _sim or "区域帧未启用" in _sim)
@@ -309,7 +368,12 @@ def main() -> int:
            "gf.zone_number" in _sim and "gf.central_meridian_deg" in _sim)
         ok("页面渲染推断依据（evidence 逐条列出）",
            "gf.evidence" in _sim and "ul class='ev'" in _sim)
-        ok("页面说明「确认前不填 EPSG」（不凭记忆填带号编码）", "确认前不填" in _sim)
+        # ★ 依据列表**两种状态都要渲染**。原先用 `gf.assumed && gf.evidence`
+        #   守着，于是确认一发生，审计痕迹就从页面上消失了。
+        ok("页面无条件渲染依据（不因 assumed 变 false 就把审计痕迹藏掉）",
+           "if (gf.evidence)" in _sim)
+        ok("页面为「EPSG 未填」留了兜底文案（不显示成空白）",
+           "未确认，不填" in _sim)
         # ★★ 元测试：判据必须落在「assumed 这个标记本身」，
         #    而不是那句中文措辞 —— 措辞可以改，标记不能没有。
         ok("元测试：删掉 assumed 标记后必须被认出来（非摆设）",
@@ -325,6 +389,16 @@ def main() -> int:
                all(k in gf for k in ("zone_number", "ready", "assumed")), str(sorted(gf)))
             ok("ready 与 assumed 是两个字段，不能合并成一个",
                isinstance(gf.get("ready"), bool) and isinstance(gf.get("assumed"), bool))
+            # ★ 确认后接口必须把 EPSG 带出来 —— 页面显示的就是它。
+            #   这条只在 assumed=false 时才有意义，所以按状态断言。
+            if gf.get("assumed") is False:
+                ok("assumed=false 时接口带出 epsg_after_confirm",
+                   gf.get("epsg_after_confirm") not in (None, "", "null"),
+                   repr(gf.get("epsg_after_confirm")))
+            else:
+                ok("assumed=true 时接口的 epsg_after_confirm 必须为空（猜的时候不许填）",
+                   gf.get("epsg_after_confirm") in (None, "", "null"),
+                   repr(gf.get("epsg_after_confirm")))
             ok("接口带出推断依据（>=4 条）",
                isinstance(gf.get("evidence"), list) and len(gf["evidence"]) >= 4,
                f"{len(gf.get('evidence') or [])} 条")

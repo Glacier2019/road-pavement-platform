@@ -885,7 +885,12 @@ async function boot() {
     const tags = [];
     tags.push(gf.ready ? '<span class="tag ready">区域帧可用</span>'
                        : '<span class="tag assumed">区域帧未启用</span>');
-    if (gf.assumed) tags.push('<span class="tag assumed">带号 ' + gf.zone_number + ' 为推断值</span>');
+    // ★ 两个状态都要有标记。原先只在 assumed 时给标记，
+    //   确认之后带号就从这个徽标行里**消失了** —— 一个已确认的值
+    //   反而比一个推断值更不显眼，这说不过去。
+    tags.push(gf.assumed
+      ? '<span class="tag assumed">带号 ' + gf.zone_number + ' 为推断值</span>'
+      : '<span class="tag ready">带号 ' + gf.zone_number + ' 已确认</span>');
     roCrs.innerHTML = tags.join(" ");
     let h = "<div style='margin-bottom:6px'>局部帧：" +
       (lf ? lf.axes + "，单位 " + lf.unit : "未配置") +
@@ -897,15 +902,22 @@ async function boot() {
     h += "<div class='kv'><span>带号</span><b>" + gf.zone_number + "</b></div>";
     h += "<div class='kv'><span>中央子午线</span><b>" + gf.central_meridian_deg + "°E</b></div>";
     h += "<div class='kv'><span>EPSG</span><b>" +
-         (gf.epsg_after_confirm || "确认前不填") + "</b></div>";
-    if (gf.assumed && gf.evidence) {
-      h += "<div class='note' style='margin-top:8px'>★ 这个带号是<b>从数据反推</b>的，不是设计方给的。" +
-           "推错的后果是位置差几百公里，而任何局部视图里都看不出来 —— " +
-           "它只在交付那一刻暴露。</div>";
+         (gf.epsg_after_confirm || "未确认，不填") + "</b></div>";
+    // ★ 依据列表**两种状态都显示**。确认之后它不失效 ——
+    //   它是这个值的历史，也是接手者复核的起点。
+    //   原先只在 assumed 时显示，等于确认一发生就把审计痕迹藏了。
+    if (gf.evidence) {
+      h += gf.assumed
+        ? "<div class='note' style='margin-top:8px'>★ 这个带号是<b>从数据反推</b>的，不是设计方给的。" +
+          "推错的后果是位置差几百公里，而任何局部视图里都看不出来 —— " +
+          "它只在交付那一刻暴露。</div>"
+        : "<div class='note' style='margin-top:8px'>★ 这个带号<b>已确认</b>。下面是它被确认之前" +
+          "赖以推出的依据，保留下来供接手者复核 —— 已确认的值同样可以被推翻。</div>";
       h += "<ul class='ev'>";
       for (const e of gf.evidence) h += "<li>" + e + "</li>";
       h += "</ul>";
     }
+    if (gf.epsg_note) h += "<div class='note'>" + gf.epsg_note + "</div>";
     if (gf.confirm_path) h += "<div class='note'>" + gf.confirm_path + "</div>";
     body.innerHTML = h;
   } else {

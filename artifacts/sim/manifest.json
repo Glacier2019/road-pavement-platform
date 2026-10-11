@@ -1,14 +1,14 @@
 {
   "version": "artifact_manifest.v0.1",
-  "generated_at": "2026-10-10T18:08:18.713809+08:00",
+  "generated_at": "2026-10-11T09:19:21.410399+08:00",
   "producer": {
     "module": "simulator/crg",
     "note": "export_viewer_mesh.py 从 route_0p1m.crg 抽稀出两档 LOD"
   },
   "frame": {
     "kind": "local",
-    "crs_ready": false,
-    "crs_assumed": true
+    "crs_ready": true,
+    "crs_assumed": false
   },
   "artifacts": [
     {
