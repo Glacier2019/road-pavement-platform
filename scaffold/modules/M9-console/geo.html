@@ -54,6 +54,25 @@
   .sec0{color:var(--dim)}
   .disclaim{margin-top:14px;padding:9px 11px;border-radius:5px;
             background:#152230;border:1px solid #23405c;color:#9fc6ea;font-size:12px}
+  /* ---- 断面 ---- */
+  h2.sh{margin:18px 0 8px;font-size:13px;font-weight:600;color:var(--dim);
+        border-top:1px solid var(--line);padding-top:12px}
+  .xs{border:1px solid var(--line);border-radius:6px;padding:8px 10px;
+      margin-bottom:8px;font-size:12.5px}
+  .xs .hd{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px}
+  .xs .st{font-weight:600}
+  .xs .src{font-size:11.5px;padding:1px 6px;border-radius:9px;white-space:nowrap}
+  .src-ok{background:#16351f;border:1px solid #2c6b3f;color:#8fe0a6}
+  .src-calc{background:#152230;border:1px solid #23405c;color:#9fc6ea}
+  .src-no{background:#3a2a17;border:1px solid #7a562f;color:#f0c48a}
+  .xs .co{font-variant-numeric:tabular-nums;color:var(--fg)}
+  .xs .why{color:#f0c48a;margin-top:3px}
+  .dev{margin-top:5px;padding-top:5px;border-top:1px dashed var(--line);
+       display:flex;justify-content:space-between;gap:8px}
+  .dev .tag{font-size:11px;padding:1px 6px;border-radius:9px;white-space:nowrap}
+  .tag-sim{background:#2b1d3a;border:1px solid #6b4a94;color:#d7b6ff}
+  .tag-phy{background:#1b222b;border:1px solid var(--line);color:var(--dim)}
+  .tag-unk{background:#3a2a17;border:1px solid #7a562f;color:#f0c48a}
 </style>
 </head>
 <body>
@@ -97,9 +116,15 @@
 
     <dl class="kv" id="meta"></dl>
 
+    <h2 class="sh">监测断面 —— 位置是怎么来的</h2>
+    <div id="xsecs"></div>
+
     <div class="disclaim" id="disclaim">
       位置由桩号换算得到。库中 <code>monitor_cross_section</code> 的
       <code>lat</code>/<code>lon</code> 两列为空，位置没有第二个来源。
+      <br>★ <b>算不出来不等于没有这个断面</b>：一个断面若挂在**没有线形**的路段上，
+      它的位置按定义就不存在 —— 这里会照实说，不会给它安一个坐标，
+      也不会把它从名单里去掉。
     </div>
   </aside>
 </main>
@@ -150,11 +175,14 @@ async function loadSections() {
     if (s.element_count > 0) {
       o.textContent = `${tag}${s.section_name}（${s.element_count} 段线元）`;
     } else {
-      // ★ 不列出来，用户会以为"这条路不见了"；列出来但标明没数据，才是实话。
-      // 空壳图层画出来是一个永远空的画面，看起来像 bug、实际是没数据。
-      o.textContent = `${tag}${s.section_name} —— 无几何数据`;
+      // ★ 标出来，但**不禁用**。
+      //   禁用的理由是"画不出这条路的线形" —— 那是对**画布**说的；
+      //   而这个路段上可能挂着断面、设备（路段 1 就挂着 2 个断面）。
+      //   一旦禁用，那 2 个断面在界面上就点不到了，
+      //   等于**在 UI 里把"算不出来"又变回了"不存在"** ——
+      //   正是 spec 刚刚删掉的那个缺陷，换个地方长回来。
+      o.textContent = `${tag}${s.section_name} —— 无线形数据`;
       o.className = "sec0";
-      o.disabled = true;
     }
     SEC.appendChild(o);
   }
@@ -167,13 +195,89 @@ async function loadRoute() {
   clearFail();
   const sid = SEC.value;
   const step = Math.max(1, Math.min(1000, Number(STEP.value) || 20));
-  const d = await getJSON(
-    `${GW}/v1/geometry/sections/${sid}/geo/route?step_m=${step}`);
-  ROUTE = d;
   document.getElementById("disclaim").style.display = "block";
-  draw();
-  fillMeta();
-  fillTable();
+  try {
+    ROUTE = await getJSON(
+      `${GW}/v1/geometry/sections/${sid}/geo/route?step_m=${step}`);
+  } catch (e) {
+    // ★ 「这个路段没有线形」不是错误，是这个路段的一种状态。
+    //   把画布清干净、把话说清楚，然后**照常去取断面** ——
+    //   挂在它上面的断面仍然存在，只是算不出位置。
+    ROUTE = null;
+    GEOM = null;
+    CTX.clearRect(0, 0, CV.width, CV.height);
+    META.innerHTML = "";
+    TBODY.innerHTML = "";
+    POP.style.display = "none";
+    fail(`这个路段没有线形数据，画不出路线。（${e.message}）`);
+  }
+  if (ROUTE) { draw(); fillMeta(); fillTable(); }
+}
+
+/* ---------------------------------------------------------- 取断面 */
+async function loadXsecs() {
+  const sid = SEC.value;
+  const box = document.getElementById("xsecs");
+  box.innerHTML = "";
+  let d;
+  try {
+    d = await getJSON(`${GW}/v1/geometry/sections/${sid}/monitor-sections`);
+  } catch (e) {
+    box.innerHTML = `<div class="xs why">断面取数失败：${e.message}</div>`;
+    return;
+  }
+  if (!d.cross_sections.length) {
+    box.innerHTML = `<div class="xs" style="color:var(--dim)">` +
+                    `这个路段上没有登记监测断面。</div>`;
+    return;
+  }
+  const SRC = {
+    stored: ["src-ok", "库里有坐标"],
+    computed_from_station: ["src-calc", "由桩号换算"],
+    unavailable: ["src-no", "算不出来"],
+  };
+  const DEV = {
+    true:  ["tag-sim", "仿真"],
+    false: ["tag-phy", "实体"],
+    null:  ["tag-unk", "安装方式未分类"],
+  };
+  for (const xs of d.cross_sections) {
+    const [cls, txt] = SRC[xs.position_source] || ["src-no", xs.position_source];
+    const el = document.createElement("div");
+    el.className = "xs";
+    let body;
+    if (xs.position_source === "unavailable") {
+      // ★ 不print坐标。算不出来就没有坐标这个字段 —— 不是 0，也不是空格。
+      body = `<div class="why">${xs.unavailable_reason || "算不出来"}</div>`;
+    } else {
+      body = `<div class="co">${xs.lat_deg.toFixed(6)}°N ` +
+             `${xs.lon_deg.toFixed(6)}°E</div>`;
+      if (xs.position_source === "computed_from_station") {
+        body += `<div style="color:var(--dim);font-size:11.5px">` +
+                `由桩号 ${xs.station_text} 换算得到，库里没有坐标</div>`;
+      }
+    }
+    let devs = "";
+    for (const dv of (xs.devices || [])) {
+      const key = dv.simulated === true ? "true"
+                : dv.simulated === false ? "false" : "null";
+      const [dcls, dtxt] = DEV[key];
+      devs += `<div class="dev"><span>${dv.serial_no || "—"} · ` +
+              `${dv.sensor_type_code || ""}</span>` +
+              `<span class="tag ${dcls}">${dtxt}</span></div>`;
+    }
+    el.innerHTML =
+      `<div class="hd"><span class="st">${xs.station_text}` +
+      `${xs.lane_no == null ? "" : ` · 行车道 ${xs.lane_no}`}</span>` +
+      `<span class="src ${cls}">${txt}</span></div>` +
+      body + devs;
+    box.appendChild(el);
+  }
+}
+
+async function loadSection() {
+  await loadRoute();
+  await loadXsecs();
 }
 
 /* ---------------------------------------------------------- 画 */
@@ -365,15 +469,15 @@ CV.addEventListener("click", ev => {
 CV.addEventListener("mouseleave", () => { POP.style.display = "none"; });
 
 /* ---------------------------------------------------------- 启动 */
-SEC.addEventListener("change", () => loadRoute().catch(e => fail(e.message)));
+SEC.addEventListener("change", () => loadSection().catch(e => fail(e.message)));
 document.getElementById("reload").addEventListener("click",
-  () => loadRoute().catch(e => fail(e.message)));
+  () => loadSection().catch(e => fail(e.message)));
 window.addEventListener("resize", () => draw());
 
 (async () => {
   try {
     await loadSections();
-    await loadRoute();
+    await loadSection();
   } catch (e) {
     fail(`取数失败：${e.message}`);
   }

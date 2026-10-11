@@ -226,6 +226,73 @@ def main() -> int:
     ok("元测试：南北画反后必须被认出来",
        re.search(r"const\s+py\s*=\s*n\s*=>\s*[^;]*n1\s*-\s*n",
                  _geo.replace("(n1 - n)", "(n - n1)", 1)) is None)
+
+    # ------------------------------------------------------ 3g-2) US3：位置来源
+    ok("区域帧页向分段的断面接口取数（不是自己拼坐标）",
+       "monitor-sections" in _geo)
+    ok("区域帧页把三种位置来源都画出来（stored / computed_from_station / unavailable）",
+       all(k in _geo for k in ("stored", "computed_from_station", "unavailable")),
+       "三种来源都在")
+    # ★★ 关键：来源是 unavailable 时**不许输出坐标**。
+    #    这不是排版偏好 —— 一旦这里 print 了 lat/lon，
+    #    "算不出来"就又变成了一个位置，FR-010 从界面上被破掉。
+    _unav = re.search(
+        r'if \(xs\.position_source === "unavailable"\) \{(.*?)\} else \{',
+        _geo, re.S)
+    ok("区域帧页的 unavailable 分支存在", _unav is not None)
+    ok("★ 区域帧页在「算不出来」时不输出经纬度（只给理由）",
+       _unav is not None and "lat_deg" not in _unav.group(1)
+       and "lon_deg" not in _unav.group(1),
+       (_unav.group(1)[:80] if _unav else "分支没找到"))
+    ok("★ 区域帧页在「算不出来」时确实给出理由字段",
+       _unav is not None and "unavailable_reason" in _unav.group(1))
+    # 元测试：让 unavailable 分支也 print 坐标，上面那条必须红
+    _leak = _geo.replace(
+        'body = `<div class="why">${xs.unavailable_reason || "算不出来"}</div>`;',
+        'body = `<div class="why">${xs.unavailable_reason}`'
+        '${xs.lat_deg}${xs.lon_deg}</div>`;', 1)
+    _unav2 = re.search(
+        r'if \(xs\.position_source === "unavailable"\) \{(.*?)\} else \{',
+        _leak, re.S)
+    ok("元测试：unavailable 分支偷偷输出坐标后必须被认出来",
+       _leak != _geo and _unav2 is not None
+       and ("lat_deg" in _unav2.group(1) or "lon_deg" in _unav2.group(1)))
+
+    # ★★ 「没有线形的路段」不得在下拉框里被**禁用**。
+    #    禁用的理由是"画不出这条路"，那是对**画布**说的；
+    #    那个路段上可能挂着断面（路段 1 就有 2 个）。
+    #    一旦禁用，那些断面在界面上就点不到了 ——
+    #    等于**把 spec 刚删掉的"悄悄丢掉 2 个断面"换个地方长回来**。
+    _loadsec = re.search(r"async function loadSections\(\).*?\n\}", _geo, re.S)
+    ok("区域帧页能取到路段列表源码", _loadsec is not None)
+    ok("★ 区域帧页**不禁用**没有线形的路段（断面仍然点得到）",
+       _loadsec is not None and "disabled" not in _loadsec.group(0),
+       "未出现 disabled")
+    ok("区域帧页仍然把没有线形的路段标出来（不是藏起来）",
+       _loadsec is not None and "sec0" in _loadsec.group(0))
+    # 元测试：把路段重新禁用后必须被认出来
+    _dis = _geo.replace('o.className = "sec0";',
+                        'o.className = "sec0";\n      o.disabled = true;', 1)
+    _dis_sec = re.search(r"async function loadSections\(\).*?\n\}", _dis, re.S)
+    ok("元测试：把路段重新禁用后必须被认出来",
+       _dis != _geo and _dis_sec is not None
+       and "disabled" in _dis_sec.group(0))
+
+    # ★★ 仿真设备靠**数据自己的字段**区分，不靠序列号。
+    ok("★ 区域帧页按 install_mode 的结果字段区分仿真设备",
+       "dv.simulated" in _geo)
+    ok("区域帧页没有把 SIMWIM01 写死成判断依据",
+       "SIMWIM01" not in _geo)
+    ok("区域帧页把「仿真 / 实体 / 未分类」三态都画出来",
+       all(t in _geo for t in ("tag-sim", "tag-phy", "tag-unk")))
+    ok("★ 区域帧页把「未分类」显式写出，不默认成实体",
+       "安装方式未分类" in _geo)
+    # 元测试：把三态并成两态（未分类也当实体），必须被认出来
+    _twostate = _geo.replace('null:  ["tag-unk", "安装方式未分类"]',
+                             'null:  ["tag-phy", "实体"]')
+    ok("元测试：把「未分类」并进「实体」后必须被认出来",
+       "安装方式未分类" not in _twostate)
+
     # ------------------------------------------------- 3b) 导入页的边界
     # 导入是**写**，而 /gw 的契约是「有边界的只读转发」（下面第 4 组会断言
     # POST /gw/... → 405）。所以导入页必须**另有**入口，不能把写塞进 /gw。
