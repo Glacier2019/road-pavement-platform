@@ -129,6 +129,13 @@ t_s,s_m,lat_m,speed_mps,chassis_z_m,x_m,y_m,heading_deg,a0_L_Fz_kN,...,a1_R_pz_m
 
 `scaffold/modules/M9-console/config/crs.yaml`
 
+> ★★★ **下面这个 yaml 块是 003 完成当时（2026-10-10）的摘录，不是文件的当前内容。**
+> 它是**手抄的**，抄完就不跟着走 —— 2026-10-11 带号经用户确认为真实值之后，
+> 真文件已变成 `ready: true` / `assumed: false`，并多出 `epsg_note`、
+> `confirm_path`、`epsg_after_confirm` 与 4 条 evidence。
+> **以 `crs.yaml` 为准**；要看当前状态就去读它，别读这里。
+> 这个块的用途是记录"003 当时在跟一个什么形状的配置打交道"，不是提供现值。
+
 ```yaml
 # 当前使用的坐标基准。局部帧不需要它；它的存在是为区域帧预留挂点，
 # 并让"39 带"这个推断值有一个带标记的位置，而不是散落在对话记录里。
@@ -155,13 +162,19 @@ geographic_frame:
 
 | 字段 | 类型 | 语义 |
 |---|---|---|
-| `ready` | bool | 区域帧能否使用。**当前 `false`** —— 因为带号未经确认 |
+| `ready` | bool | 区域帧能否使用 |
 | `assumed` | bool | 该基准是推断值。**界面或日志必须能读到它** |
 | `evidence` | list | 推断依据。**与值一同记录**，使接手者能复核或推翻 |
 
-★ `ready: false` 与 `assumed: true` **是两个不同的标记**，不能合并：
+★ `ready` 与 `assumed` **是两个不同的标记**，不能合并：
 一个说"能不能用"，一个说"值可不可信"。把 `ready` 设成 `true` 而
 `assumed` 仍是 `true` 是合法状态 —— 那是"先用着，但我知道它是猜的"。
+
+★ **两个标记独立，所以四种组合都合法。** 本 feature 的代码与测试都不许
+假定其中某一种：2026-10-10 是 `ready: false` / `assumed: true`（未就绪，
+且值是猜的），2026-10-11 用户确认带号为真实值之后是 `ready: true` /
+`assumed: false`。`tests/contract/test_sim_track.py` 的 US5 组正是按这条写的 ——
+它断言的是 `filled != assumed` 这个**关系**，不是某个固定状态。
 
 ---
 
