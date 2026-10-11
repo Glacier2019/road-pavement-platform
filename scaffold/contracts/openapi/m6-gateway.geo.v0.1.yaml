@@ -116,6 +116,34 @@ paths:
         "404":
           description: section_id 不存在
 
+  /v1/geometry/sections/{section_id}/monitor-sections:
+    get:
+      summary: 监测断面的位置（含仿真设备溯源）
+      description: >-
+        US3 用。每个断面都带 position_source，取值三选一且**穷尽**：
+        stored（库里有经纬度）/ computed_from_station（由桩号换算）/
+        unavailable（算不出来，附 unavailable_reason）。
+        ★★ lat_deg/lon_deg 两个键**只在有位置时才出现** —— 这是 FR-010
+        「不得把 NULL 当成 (0,0)」的结构性保证：无条件取用的人拿到的是
+        缺键，而不是 (0,0)，所以这个错误**无法静默发生**。
+        ★ 「算不出来」不是错误：同一平台上实测路段、只有桩号的路段、
+        未做数字化线形的路段都是常态，故走 200 而不是 404。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: >-
+            cross_sections（各含 id、station_text、station_m、stored_lat/lon、
+            position_source、unavailable_reason、有位置时的 lat_deg/lon_deg/
+            north_m/east_m、devices）、counts_by_source、position_rule、
+            epsg、central_meridian_deg、zone_number
+        "503":
+          description: 坐标基准不可用，或取数触到仓储行数上限（拒绝返回不完整结果）
+
 # ----------------------------------------------------------------------------
 # 本契约不改动的部分（刻意声明，防止"顺手"扩大范围）
 # ----------------------------------------------------------------------------

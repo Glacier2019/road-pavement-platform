@@ -557,6 +557,74 @@ def get_geo_route(
     return {"section_id": section_id, **geo_mod.route_lonlat(els, gf, step_m)}
 
 
+# ⚠ `DomainRepository.list_objects` 的默认 `limit=100` 是**静默截断**：
+#   超过 100 行时它不报错，只是少给。商用平台上断面/设备数以万计，
+#   靠"取全表再在应用里过滤"迟早会撞上这条线，而撞上时**不会有人知道**。
+#
+# ★ 这里不猜表有多大，而是**检测**有没有撞上限：取满即视为截断，直接 503。
+#   代价是一次多余的行，收益是"少给了数据"这件事永远会响。
+# ★ 真正的修法（给仓储加带条件的取数，而不是取全表）不属本 feature ——
+#   已记入 004 的通用性待办，见 tasks.md。
+_LIST_PROBE = 100
+
+
+def _list_tracked(domain_repo, table: str) -> list[dict[str, Any]]:
+    """取整表，**并在被截断时报错而不是少给**。"""
+    try:
+        rows = domain_repo.list_objects(table, limit=_LIST_PROBE)
+    except DaoError as exc:
+        raise _http(exc) from exc
+    if len(rows) >= _LIST_PROBE:
+        raise HTTPException(
+            503, f"{table} 取数触到仓储上限 {_LIST_PROBE} 行，结果可能不完整；"
+                 f"在补齐带条件的取数之前，本接口拒绝返回不完整的结果")
+    return rows
+
+
+@app.get("/v1/geometry/sections/{section_id}/monitor-sections", tags=["区域帧"],
+         summary="监测断面的位置（含仿真设备溯源）")
+def get_monitor_sections(section_id: int) -> dict[str, Any]:
+    """列出某路段的监测断面，每个都带上**它的位置是怎么来的**。
+
+    ★★★ 三种来源，穷尽，**不会少一个**：
+      · `stored`                —— 库里有经纬度，直接用
+      · `computed_from_station` —— 库里没有，由桩号换算
+      · `unavailable`           —— 换算不出来，**给出 `unavailable_reason`**
+
+    ★★ `lat_deg` / `lon_deg` 两个键**只在有位置时才出现**。
+      这是 FR-010「不得把 NULL 当成 (0,0)」的**结构性**保证：
+      无条件取用的人拿到 `KeyError`/`undefined`，**而不是 (0,0)** ——
+      也就是说，这个错误无法静默发生。
+
+    ★★ 「算不出来」**不是**错误：同一个平台上有实测坐标的路段、
+      只有桩号的路段、以及还没做数字化线形的路段，都是正常的。
+      所以 `unavailable` 走 200 而不是 404 —— 它是一个**正常的答案**，
+      不是"资源不存在"。
+
+    ★ 设备带 `install_mode` 与 `simulated` 两个字段（判断 + 依据）。
+      仿真设备不冒充实体资产。
+    """
+    gf = _geo_crs()
+    try:
+        # ★ 先证明**路段存在**，再回答"它有几个断面"。
+        #   两件事必须分开：路段不存在 → 404；路段存在但没有断面 → 200 空列表。
+        #   不先证明，写错一个 section_id 得到的是"没有数据"，而不是"没有这个路段" ——
+        #   这正是本 feature 一路在挡的那类静默错。
+        dao.ge.section(section_id)
+        raw_els = dao.ge.alignment(section_id)["elements"]
+    except DaoError as exc:
+        raise _http(exc) from exc
+    # ★ 此处**不**复用 `_geo_elements`：它为"没有线元"抛 404，
+    #   而本接口要能对没有线元的路段照常作答（断面全部 unavailable）。
+    els = geo_mod.as_adapter_elements(raw_els) if raw_els else []
+
+    xsecs = [r for r in _list_tracked(dao.ge, "monitor_cross_section")
+             if r.get("section_id") == section_id]
+    sensors = _list_tracked(dao.re, "sensor_install")
+
+    return {"section_id": section_id, **geo_mod.section_positions(els, xsecs, sensors, gf)}
+
+
 # ----------------------------------------------------------------- 指标查询
 @app.get("/v1/metrics/wim_hourly", tags=["指标查询"],
          summary="小时级过车量/超载数/ESAL/均速")

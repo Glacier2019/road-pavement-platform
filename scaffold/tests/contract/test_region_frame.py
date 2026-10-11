@@ -93,7 +93,7 @@ def _ensure_pg_driver():
 
 _ensure_pg_driver()
 
-from rpdao import NotFound  # noqa: E402  （须在 sys.path 与 psycopg 桩就位之后）
+from rpdao import NotFound, UnknownTable  # noqa: E402  （须在 sys.path 与 psycopg 桩就位之后）
 
 
 def load_app():
@@ -173,10 +173,18 @@ class _FakeGe:
     ★ 默认吐的是 `dao_elements()` —— **`ELEMENTS_SQL` 的输出形状**，
       不是夹具里的原始表行。理由见上面那段注释：形状错了，测试就会
       替一个生产里不存在的形状背书。
+
+    ★★ 还带 `list_objects` —— 真 `dao.ge` 是 `DomainRepository`，
+      通用取数口是它的**形状的一部分**。假的不带，新路由就直接
+      `AttributeError`（这次会响）；更坏的情况是有人为了让它不响，
+      把生产代码改成绕过仓储 —— 那就把域白名单也一起绕掉了。
+      未知表名**抛错**，与真仓储的 `_check` 一致。
     """
 
-    def __init__(self, elements=None):
+    def __init__(self, elements=None, monitors=None):
         self._elements = dao_elements() if elements is None else elements
+        self._monitors = (FIX["monitor_cross_section"]
+                          if monitors is None else monitors)
 
     def alignment(self, section_id):
         if section_id != FIX["section_id"]:
@@ -193,10 +201,25 @@ class _FakeGe:
             raise NotFound(f"路段 {section_id} 不存在")
         return FIX["road_section"][0]
 
+    def list_objects(self, table, *, limit=100):
+        if table != "monitor_cross_section":
+            raise UnknownTable(f"GE 域无此表：{table}")
+        return [dict(r) for r in self._monitors][:limit]
+
+
+class _FakeRe:
+    """RE 域仓储。`sensor_install` 是**设备溯源**的依据所在。"""
+
+    def list_objects(self, table, *, limit=100):
+        if table != "sensor_install":
+            raise UnknownTable(f"RE 域无此表：{table}")
+        return [dict(r) for r in FIX["sensor_install"]][:limit]
+
 
 class _FakeDao:
-    def __init__(self, elements=None):
-        self.ge = _FakeGe(elements)
+    def __init__(self, elements=None, monitors=None):
+        self.ge = _FakeGe(elements, monitors)
+        self.re = _FakeRe()
 
     def ping(self): return True
     def pool_stats(self): return {"pool_size": 0, "pool_available": 0}
@@ -604,7 +627,152 @@ def main() -> int:
           "★ 把北/东读反 → 落点跑到太平洋（说明这一层真的在区分）",
           f"读反后 {lat_sw:.4f} °N / {lon_sw:.4f} °E")
 
-    # ---------------------------------------------------------------- 汇总
+    # ============================================================ 11) US3 沿线设施
+    print("\n=== 11) US3 沿线设施：位置怎么来的，必须说得出来 ===")
+
+    sid6 = FIX["section_id"]          # 6 = 毕设，有 33 个线元
+    els6 = elements()
+    bb = GEO.route_lonlat(els6, gf(), 20.0)["bbox"]
+
+    def _inside(la, lo):
+        return (bb["lat_min"] - 1e-6 <= la <= bb["lat_max"] + 1e-6
+                and bb["lon_min"] - 1e-6 <= lo <= bb["lon_max"] + 1e-6)
+
+    r_ms = c.get(f"/v1/geometry/sections/{sid6}/monitor-sections")
+    check(r_ms.status_code == 200, "GET …/monitor-sections 200",
+          f"HTTP {r_ms.status_code}")
+    jm = r_ms.json()
+    rows = jm.get("cross_sections", [])
+
+    # ★ 只应有路段 6 的那一个断面。路段 1 的两个断面**不属于**本路段 ——
+    #   这正是 spec 的 Edge Cases 自己说的「两个路段桩号语义不同」：
+    #   K4635+710 与 K2+900 不是同一个里程域，混在一起就是静默串台。
+    check([r["id"] for r in rows] == [3],
+          "只返回本路段的断面（K2+900），不含路段 1 的两个",
+          f"ids={[r['id'] for r in rows]}")
+
+    row3 = rows[0]
+    check(row3["position_source"] == "computed_from_station",
+          "K2+900 的位置由桩号换算（库里 lat/lon 为空）",
+          f"source={row3['position_source']}")
+    check("lat_deg" in row3 and "lon_deg" in row3,
+          "有位置时 lat_deg/lon_deg 两个键都在", "键在")
+    check(_inside(row3["lat_deg"], row3["lon_deg"]),
+          "★ 换算出的位置落在 US1 给出的路线包围盒内",
+          f"{row3['lat_deg']:.6f} °N / {row3['lon_deg']:.6f} °E ∈ "
+          f"[{bb['lat_min']:.5f},{bb['lat_max']:.5f}]×"
+          f"[{bb['lon_min']:.5f},{bb['lon_max']:.5f}]")
+    check(jm["counts_by_source"] == {"stored": 0, "computed_from_station": 1,
+                                     "unavailable": 0},
+          "counts_by_source 与实际逐行来源一致",
+          str(jm["counts_by_source"]))
+
+    # ★★ 「路段不存在」与「路段存在但没断面」是**两件事**，不能都答 200 空列表。
+    #    否则写错一个 section_id，得到的是"没有数据"而不是"没有这个路段" ——
+    #    静默错，正是本 feature 一路在挡的东西。
+    r_nf2 = c.get("/v1/geometry/sections/999999/monitor-sections")
+    check(r_nf2.status_code == 404, "★ 路段不存在 → 404（不是 200 空列表）",
+          f"HTTP {r_nf2.status_code}")
+
+    # ★★ FR-010 的**结构性**保证：位置与来源一一对应，且
+    #    「没有位置」不是 0，而是**没有这两个键**。
+    for r in rows:
+        has = ("lat_deg" in r) and ("lon_deg" in r)
+        check(has == (r["position_source"] != "unavailable"),
+              f"断面 {r['id']}：有位置 ⟺ 来源不是 unavailable",
+              f"有键={has} source={r['position_source']}")
+        if has:
+            check(not (r["lat_deg"] == 0.0 and r["lon_deg"] == 0.0),
+                  f"断面 {r['id']}：位置不是 (0,0)",
+                  "非 (0,0)")
+            check(_inside(r["lat_deg"], r["lon_deg"]),
+                  f"★ 断面 {r['id']} 的位置落在本路段自己的区域帧内",
+                  f"{r['lat_deg']:.6f}/{r['lon_deg']:.6f}")
+
+    # ---- 仿真溯源：「判断」和「依据」两个都要有
+    dv = row3.get("devices", [])
+    check(len(dv) == 1, "K2+900 挂着 1 台设备", f"{len(dv)} 台")
+    if dv:
+        check(dv[0]["install_mode"] == "仿真" and dv[0]["simulated"] is True,
+              "★ 仿真设备被标出来（依据是 install_mode，不是序列号）",
+              f"install_mode={dv[0]['install_mode']} simulated={dv[0]['simulated']}")
+        check(dv[0]["serial_no"] == "SIMWIM01",
+              "仿真设备登记在自己的序列号下，不占用实体 WIM01",
+              str(dv[0]["serial_no"]))
+
+    # ★★ 元测试：**夹具里出现过的每一种安装方式都必须被分类**。
+    #    将来数据里多出一种（比如"半实物仿真"），这条会红 ——
+    #    否则它会被**静默当成实体资产**。
+    modes = sorted({r["install_mode"] for r in FIX["sensor_install"]})
+    unclassified = [m for m in modes if GEO.classify_install_mode(m) is None]
+    check(not unclassified,
+          "★ 夹具里每一种 install_mode 都被分类（不得有未分类）",
+          f"出现过 {modes}；未分类 {unclassified}")
+    check(GEO.classify_install_mode("仿真") is True
+          and GEO.classify_install_mode("埋入式") is False
+          and GEO.classify_install_mode("半实物仿真") is None
+          and GEO.classify_install_mode(None) is None,
+          "★ 未分类走 None，**不默认成实体**",
+          "仿真→True 埋入式→False 半实物仿真→None 空→None")
+
+    # ---- 「算不出来」是**正常的答案**，不是 404
+    pos_sec1 = GEO.section_positions([], FIX["monitor_cross_section"],
+                                     FIX["sensor_install"], gf())
+    check(pos_sec1["counts_by_source"]["unavailable"] == 3
+          and pos_sec1["counts_by_source"]["computed_from_station"] == 0,
+          "★ 路段无线形元素时，断面全部 unavailable（不是被跳过）",
+          str(pos_sec1["counts_by_source"]))
+    xs0 = pos_sec1["cross_sections"][0]
+    check("lat_deg" not in xs0 and "unavailable_reason" in xs0,
+          "★ 算不出来时**没有 lat_deg 键**，但有理由",
+          f"有 lat_deg={'lat_deg' in xs0}；理由={xs0.get('unavailable_reason')!r}")
+
+    # ---- 半填（只给纬度）：NULL 的一种，不能补 0 顶上
+    half = [dict(FIX["monitor_cross_section"][2], lat=25.2, lon=None)]
+    h = GEO.section_positions(els6, half, FIX["sensor_install"], gf())
+    check(h["cross_sections"][0]["position_source"] == "unavailable"
+          and "lat_deg" not in h["cross_sections"][0],
+          "★ 经纬度只填一半 → unavailable（不拿 0 补齐另一半）",
+          h["cross_sections"][0].get("unavailable_reason", ""))
+
+    # ---- 桩号越界：不能钳到端点当答案
+    far = [dict(FIX["monitor_cross_section"][2], station_km=99.0)]
+    f2 = GEO.section_positions(els6, far, FIX["sensor_install"], gf())
+    check(f2["cross_sections"][0]["position_source"] == "unavailable",
+          "★ 桩号越界 → unavailable（不钳到端点冒充）",
+          f2["cross_sections"][0].get("unavailable_reason", ""))
+
+    # ---- 库里有坐标时就用它，且**不声称**它来自换算
+    st = [dict(FIX["monitor_cross_section"][2], lat=25.20, lon=117.35)]
+    s2 = GEO.section_positions(els6, st, FIX["sensor_install"], gf())
+    check(s2["cross_sections"][0]["position_source"] == "stored",
+          "库里有经纬度 → stored（不再换算）",
+          s2["cross_sections"][0]["position_source"])
+
+    # ---- 元测试：**注入 NULL→0 的强制转换，上面那条区域帧判据必须红。**
+    #    ★ 这是 FR-010 唯一能真正被证伪的地方：不看来源标签，
+    #      只看**这个坐标在不在本路段自己的区域帧里**。
+    #      (0°,0°) 在几内亚湾外，必然出帧。
+    src = (ROOT / "modules" / "M6-api" / "geo.py").read_text(encoding="utf-8")
+    bugged = src.replace(
+        "        if lat_stored is not None and lon_stored is not None:",
+        "        lat_stored = lat_stored or 0.0\n"
+        "        lon_stored = lon_stored or 0.0\n"
+        "        if True:", 1)
+    check(bugged != src, "元测试：NULL→0 的注入点存在", "已注入")
+    ns = {"__name__": "bugged_geo"}
+    exec(compile(bugged, "bugged_geo.py", "exec"), ns)      # noqa: S102
+    b = ns["section_positions"](els6, FIX["monitor_cross_section"],
+                                FIX["sensor_install"], gf())
+    b0 = b["cross_sections"][2]                             # id=3，K2+900
+    check(b0["position_source"] == "stored"
+          and b0["lat_deg"] == 0.0 and b0["lon_deg"] == 0.0,
+          "元测试：注入后 (0,0) 被当成合法位置（错误确实发生了）",
+          f"{b0.get('lat_deg')},{b0.get('lon_deg')} src={b0['position_source']}")
+    check(not _inside(b0["lat_deg"], b0["lon_deg"]),
+          "★ 元测试：那条区域帧判据**抓得住** NULL→0（这是它存在的理由）",
+          "(0,0) 在区域帧之外 → 判据会红")
+
     print("\n" + "=" * 72)
     if fails:
         print(f"失败 {len(fails)} 项：")

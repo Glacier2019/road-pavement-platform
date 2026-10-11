@@ -2306,5 +2306,49 @@
    "lon": null,
    "remark": "mdsite=simwim01"
   }
+ ],
+ "sensor_install": [
+  {
+   "id": 1,
+   "cross_section_id": 1,
+   "sensor_type_code": "STRAIN_ASPHALT",
+   "sensor_model": "KM-100HAS",
+   "manufacturer": "京都先端/同类",
+   "serial_no": "STRAIN01",
+   "install_mode": "埋入式",
+   "install_depth_cm": 4,
+   "position_desc": "K4635+710 行车道 2 底面",
+   "install_date": "2025-06-01",
+   "status": "active",
+   "remark": "site_id=cs4635_710"
+  },
+  {
+   "id": 2,
+   "cross_section_id": 2,
+   "sensor_type_code": "WIM_QUARTZ",
+   "sensor_model": "ZDG-40-SY-2",
+   "manufacturer": "万集/同类",
+   "serial_no": "WIM01",
+   "install_mode": "表面式",
+   "install_depth_cm": null,
+   "position_desc": "K4640+000 行车道 2 轮迹带",
+   "install_date": "2025-06-01",
+   "status": "active",
+   "remark": "site_id=wim01"
+  },
+  {
+   "id": 3,
+   "cross_section_id": 3,
+   "sensor_type_code": "WIM_QUARTZ",
+   "sensor_model": "Chrono 仿真（无实体）",
+   "manufacturer": "本平台",
+   "serial_no": "SIMWIM01",
+   "install_mode": "仿真",
+   "install_depth_cm": null,
+   "position_desc": "K2+900 行车道 2 轮迹带（Chrono 回放，无实体传感器）",
+   "install_date": "2026-10-11",
+   "status": "active",
+   "remark": "site_id=simwim01"
+  }
  ]
 }

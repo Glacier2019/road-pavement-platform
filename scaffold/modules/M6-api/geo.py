@@ -50,6 +50,7 @@ __all__ = [
     "turn_sign", "as_adapter_element", "as_adapter_elements",
     "inverse", "forward",
     "point_north_east", "station_to_lonlat", "route_lonlat", "reverse_lonlat",
+    "section_positions", "classify_install_mode",
 ]
 
 
@@ -515,4 +516,168 @@ def reverse_lonlat(elements: Sequence[Mapping[str, Any]],
         "central_meridian_deg": cm,
         "zone_number": gf.get("zone_number"),
         "source": "computed_from_station",
+    }
+
+
+# ================================================================ US3 沿线设施
+#
+# ★★★ 这一节解决的是一件事：**一个断面的位置是怎么来的，必须说得出来。**
+#
+# 三种来源，穷尽：
+#   · "stored"                —— 库里有经纬度（实测，比如 GNSS 测量），直接用
+#   · "computed_from_station" —— 库里没有，**由桩号换算**
+#   · "unavailable"           —— 换算不出来，**给出理由**
+#
+# ★ 为什么三种都要有，而不是"能算就算、算不出就跳过"：
+#   跳过 = 缺失变成静默。FR-010 要挡的正是这个形状 ——
+#   NULL 被读成 0 时，断面会一起堆到几内亚湾外的 (0°,0°)，**而不报错**。
+#   「跳过」和「读成 0」是同一个错误的两种表现：都把"没有位置"当成了一个位置。
+#
+# ★ 商用平台上这三种是常态：老路段有实测坐标、新路段只有桩号、
+#   还有的路段连数字化线形都没有。接口能把这三种说清楚，才谈得上通用。
+
+# `monitor_cross_section.station_km` 的单位是**公里**（K2+900 → 2.900000）。
+# ★ 与 `alignment_element.start_station_km` 同病：列名带 km，用的人当米。
+_STATION_KM_TO_M = 1000.0
+
+# ★ 安装方式的分类用**白名单**，不用黑名单。
+#   仿真：本部署实测出现过。
+#   实体：本部署实测出现过（sensor 1 = 埋入式，sensor 2 = 表面式）。
+#   其余一律 `None` = **未分类**，在界面上显式标出来。
+#
+# ★★ 为什么不写成"不是仿真就是实体"：那样新出现一种安装方式（比如
+#    "半实物仿真"）会被**静默当成实体资产** —— 正是 `SIMWIM01` 那条
+#    溯源约定要防的事。白名单的代价是多一行"安装方式未分类"，
+#    黑名单的代价是把仿真数据冒充成实体资产。
+_SIMULATED_INSTALL_MODES = frozenset({"仿真"})
+_PHYSICAL_INSTALL_MODES = frozenset({"埋入式", "表面式"})
+
+
+def classify_install_mode(mode: Any) -> bool | None:
+    """安装方式 → 是不是仿真资产。
+
+    `True` 仿真 / `False` 实体 / `None` **未分类（不猜，界面上标出来）**。
+
+    ★ `test_region_frame.py` 有一条守卫：**夹具里出现过的每一种
+      `install_mode` 都必须被分类**（不得为 `None`）。将来数据里多出一种
+      新的安装方式，那条会红 —— 逼人来把分类写明确。
+    """
+    if mode is None:
+        return None
+    s = str(mode).strip()
+    if not s:
+        return None
+    if s in _SIMULATED_INSTALL_MODES:
+        return True
+    if s in _PHYSICAL_INSTALL_MODES:
+        return False
+    return None
+
+
+def _device_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """一台设备 → 带**溯源**的视图。
+
+    ★ `simulated` 与 `install_mode` **两个都给**：前者是判断，后者是依据。
+      只给判断，读的人没法复核；只给依据，每个读的人都要自己判断一遍。
+    """
+    mode = row.get("install_mode")
+    return {
+        "id": row.get("id"),
+        "serial_no": row.get("serial_no"),
+        "sensor_type_code": row.get("sensor_type_code"),
+        "sensor_model": row.get("sensor_model"),
+        "manufacturer": row.get("manufacturer"),
+        "install_mode": mode,
+        "simulated": classify_install_mode(mode),
+        "simulated_basis": "sensor_install.install_mode",
+    }
+
+
+def section_positions(elements: list[dict[str, Any]],
+                      cross_sections: list[dict[str, Any]],
+                      sensors: list[dict[str, Any]],
+                      gf: Mapping[str, Any]) -> dict[str, Any]:
+    """每个监测断面的位置，**连同它的来源**。
+
+    ★★★ FR-010「不得把 `NULL` 当成 `(0, 0)`」在这里是**结构性**保证的：
+      `lat_deg` / `lon_deg` 两个键**只在真有位置时才出现**。
+      无条件取用的人拿到的是 `KeyError`（Python）/ `undefined`（JS），
+      **而不是 `(0, 0)`** —— 也就是说，这个错误**无法静默发生**。
+      这比"约定大家要判空"强：约定会被绕过，缺键不会。
+
+    ★ 返回顶层还有一个 `counts_by_source`。它让"有几个断面没算出来"成为一个
+      **一眼可见的数**，而不是要靠人数一遍列表才知道。
+    """
+    by_xsec: dict[Any, list[dict[str, Any]]] = {}
+    for s in sensors:
+        by_xsec.setdefault(s.get("cross_section_id"), []).append(s)
+
+    out: list[dict[str, Any]] = []
+    counts = {"stored": 0, "computed_from_station": 0, "unavailable": 0}
+
+    for xs in cross_sections:
+        lat_stored, lon_stored = xs.get("lat"), xs.get("lon")
+        row: dict[str, Any] = {
+            "id": xs.get("id"),
+            "station_text": xs.get("station_text"),
+            "station_m": (None if xs.get("station_km") is None
+                          else float(xs["station_km"]) * _STATION_KM_TO_M),
+            "lane_no": xs.get("lane_no"),
+            "purpose": xs.get("purpose"),
+            "status": xs.get("status"),
+            # ★ 原样回报两列。NULL 就是 None，绝不写成 0.0。
+            "stored_lat": lat_stored,
+            "stored_lon": lon_stored,
+            "devices": [_device_view(d) for d in by_xsec.get(xs.get("id"), [])],
+        }
+
+        # ★ 下面四个分支是**穷尽**的，且各自把 position_source 写死成字面量。
+        #   计数在分支之后统一累加（见 `counts[row["position_source"]] += 1`）——
+        #   散在各分支里写 += 1，迟早会和分支对不上。
+        #
+        # ---- ① 库里有：用它
+        if lat_stored is not None and lon_stored is not None:
+            row["position_source"] = "stored"
+            row["lat_deg"] = float(lat_stored)
+            row["lon_deg"] = float(lon_stored)
+            row["north_m"] = row["east_m"] = None      # 实测坐标没有平面帧分量
+        # ---- ② 只填了一半：NULL 的一种，必须说清楚，不能补 0
+        elif lat_stored is not None or lon_stored is not None:
+            row["position_source"] = "unavailable"
+            row["unavailable_reason"] = (
+                "经纬度只填了一半：经度和纬度必须同时有值才能当位置用")
+        # ---- ③ 全空、且该路段没有线形：位置**不存在**，不是"算出来是空"
+        elif not elements:
+            row["position_source"] = "unavailable"
+            row["unavailable_reason"] = (
+                "该路段没有线形单元（alignment_element 无行），桩号无从换算 —— "
+                "线形是地理坐标的唯一来源")
+        # ---- ④ 全空、有线形：由桩号换算
+        elif row["station_m"] is None:
+            row["position_source"] = "unavailable"
+            row["unavailable_reason"] = "该断面没有桩号（station_km 为空），无从换算"
+        else:
+            try:
+                p = station_to_lonlat(elements, row["station_m"], gf)
+            except StationOutsideAlignment:
+                row["position_source"] = "unavailable"
+                row["unavailable_reason"] = (
+                    f"桩号 {row['station_m']:.3f} m 超出该路段线形范围")
+            else:
+                row["position_source"] = "computed_from_station"
+                row["lat_deg"] = p["lat_deg"]
+                row["lon_deg"] = p["lon_deg"]
+                row["north_m"] = p["north_m"]
+                row["east_m"] = p["east_m"]
+
+        counts[row["position_source"]] += 1
+        out.append(row)
+
+    return {
+        "cross_sections": out,
+        "counts_by_source": counts,
+        "position_rule": "stored > computed_from_station > unavailable",
+        "epsg": gf.get("epsg_after_confirm"),
+        "central_meridian_deg": gf.get("central_meridian_deg"),
+        "zone_number": gf.get("zone_number"),
     }
