@@ -1,0 +1,125 @@
+# ============================================================================
+# M6 统一数据出口 —— 区域帧扩展契约摘要 v0.1
+# ----------------------------------------------------------------------------
+# 本文件是 m6-gateway.v0.3.yaml 的**增量**，只描述 004-region-frame 新增的三条路径。
+# 真源仍是服务运行后自动生成的 /openapi.json；本文件是它的人工摘要，
+# 用于评审与对接，**不参与运行时校验** —— 避免"文档与实现两套真源"。
+#
+# 为什么需要这份契约：宪法 Principle I ——「模块之间唯一的沟通方式是契约」。
+# M9 的新页面要读换算结果，M9 拿不到 PG_DSN，只能经本契约取。
+# 这是模块间的**新接口**，所以必须落成契约，不能靠"两边都知道"。
+#
+# 两侧测试：
+#   M6 侧 —— tests/contract/test_region_frame.py 直接打 rp-api
+#   M9 侧 —— test_console.py 断言新页面只经 /gw/ 取数、自己不碰库
+# ============================================================================
+openapi: 3.1.0
+info:
+  title: M6 统一数据出口 —— 区域帧扩展（桩号 ↔ 经纬度）
+  version: 0.1.0
+  description: >-
+    「桩号 → 经纬度」「经纬度 → 桩号」「整条路线的经纬度折线」三条接口。
+    换算 = 已验证的线元求值（adapters.geom）+ 本 feature 新写的高斯-克吕格投影。
+
+paths:
+  /v1/geometry/sections/{section_id}/geo:
+    get:
+      summary: 桩号 → 经纬度
+      description: >-
+        FR-001。输入必须包含 section_id —— 桩号单独出现是歧义的
+        （毕设 K0+000 与 滨海 K4635+000 是两个不同位置）。
+        同时返回中间量 x/y，让复核者能先只看平面坐标排掉几何错误。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: station_km
+          in: query
+          required: true
+          schema:
+            type: number
+          example: 2.9
+      responses:
+        "200":
+          description: >-
+            lat / lon（十进制度，至少 7 位小数）、x / y（中间量）、
+            epsg（4548，FR-003 要求**不得省略**）、zone_number、
+            central_meridian_deg、assumed（从 crs.yaml 读取，不写死）
+        "400":
+          description: >-
+            FR-004：桩号超出该路段范围。**必须报错** ——
+            不得返回最近点、不得返回原点、不得返回空对象冒充成功。
+        "404":
+          description: section_id 不存在
+        "422":
+          description: 经纬度落在本带之外（3 度带半宽 1.5°）
+
+  /v1/geometry/sections/{section_id}/geo/reverse:
+    get:
+      summary: 经纬度 → 桩号
+      description: >-
+        FR-002。允许输入不在线上（断面有宽度），故返回 distance_m 与 on_route。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+          example: 25.18596
+        - name: lon
+          in: query
+          required: true
+          schema:
+            type: number
+          example: 117.35926
+      responses:
+        "200":
+          description: station_km、on_route、distance_m、epsg、zone_number、assumed
+        "404":
+          description: section_id 不存在
+        "422":
+          description: 经度落在本带之外
+
+  /v1/geometry/sections/{section_id}/geo/route:
+    get:
+      summary: 整条路线的经纬度折线（按段给点列）
+      description: >-
+        US2 用。33 段，**每段必须给点列，不能只给首末点**（FR-006）——
+        圆曲线矢高最大 12.588 m、缓和曲线最大 1.736 m，
+        只连首末点会把曲线变成折线，正是 1 m 判据要挡的东西。
+        同时返回 bbox，它是 SC-002 与 SC-008 的载体。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: step_m
+          in: query
+          schema:
+            type: number
+            default: 10
+          description: 曲线段的取样步长（米）。整段一次取回，不分页。
+      responses:
+        "200":
+          description: >-
+            elements（33 项，各含 element_seq、element_type、桩号区间、长度、
+            半径、方位角、latlon 点列）、bbox（lat_min/lat_max/lon_min/lon_max）、
+            epsg、zone_number、assumed
+        "404":
+          description: section_id 不存在
+
+# ----------------------------------------------------------------------------
+# 本契约不改动的部分（刻意声明，防止"顺手"扩大范围）
+# ----------------------------------------------------------------------------
+# 不新增 MQTT topic    —— topics.yaml 不动
+# 不改 wim_axle.v1     —— 消息契约不动
+# 不改任何表结构        —— 无 DDL，无迁移（宪法 Principle IV）
+# 不改 v0.3 已有路径    —— 只增不改
