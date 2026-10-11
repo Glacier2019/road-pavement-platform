@@ -241,6 +241,110 @@ SRTM 瓦片下载 **3.1 秒**、全图零空洞、山体阴影算得出，
 
 ---
 
+## R9 — 假 DAO 必须复现真 DAO 的**形状**，不只是它的**数据**
+
+★★★★★ 这是本 feature 实施阶段**最贵的一次出错**，也是它最值得记下来的一点。
+发生位置不在几何、不在投影、不在页面 —— 在**测试替身**上。
+
+### 现象
+
+`/geo` 的三条路由写完之后：
+
+| 检查 | 结果 |
+|---|---|
+| `tests/contract/test_region_frame.py`（10 组，含 TestClient 真实请求） | **全部通过** |
+| `./run_contract_tests.sh`（21 套） | **通过 21 ｜ 失败 0** |
+| 容器里 `GET /v1/geometry/sections/6/geo?station_m=300` | ★★ **HTTP 500** |
+
+镜像里的原话：
+
+```
+m2geom.errors.SourceInvalid: 线元 seq=1 缺 azimuth_deg：方位角是起点初值，推不出来，也不能默认成 0
+```
+
+### 根因
+
+假 DAO 从前**原样吐出夹具里的行**，而夹具是用 `select * from alignment_element`
+导出的 —— 那是**原始表行**。但应用从来不直接吃原始表行：它吃的是 M3 的
+`ELEMENTS_SQL` 的**投影结果**，而那条 SQL 改了名：
+
+```sql
+e.azimuth_deg     AS start_azimuth_deg,
+e.end_azimuth_deg AS end_azimuth_deg,
+```
+
+⇒ 容器里键叫 `start_azimuth_deg`，适配层按 `azimuth_deg` 去读，拿到 `None`。
+⇒ 而测试喂的正是那个**生产里不存在的形状**，所以测试全绿。
+
+★ **两条取数路径上，同一个字段有两个名字**：
+
+| 谁 | 吃的是 | 键名叫 |
+|---|---|---|
+| M2 `geometry_solver` | 原始表行 | `azimuth_deg` |
+| M6 `geo` | M3 `ELEMENTS_SQL` 的输出 | **`start_azimuth_deg`** |
+
+### 两处修复（缺一不可）
+
+**① 代码**：`geo.py` 加 `_pick(row, "azimuth_deg", "start_azimuth_deg")`，
+`turn_sign` 与 `as_adapter_element` 都走它。**两个名字都认。**
+
+★★ 这一条不是防御性编程。不认第二个名字时，坏的不只是 `point_at` 会抛错 ——
+**`turn_sign` 会静默返回 `None`**，于是 `turn_flag` 丢失，
+右转曲线朝反方向弯，**和 R3 里那个 98 m 是同一件事，而且不报错**。
+实测注入回归后：**24 条曲线符号全部丢失（0/24）**。
+
+**② 测试**：假 DAO 改成返回 **`ELEMENTS_SQL` 的输出形状**。
+映射表**不写死**，从 `repo.py` 里把那行 SQL 抠出来现场解析：
+
+```python
+def _sql_projection(sql_name):        # 返回 {输出名: 源列名}
+    ...
+ELEMENTS_PROJ = _sql_projection("ELEMENTS_SQL")
+def dao_elements():                   # 夹具原始表行 → DAO 输出形状
+    return [{name: r.get(col) for name, col in ELEMENTS_PROJ.items()} ...]
+```
+
+★ 写死一张映射表等于**手工维护一份"以为和 SQL 一致"的副本** ——
+那正是这次出错的形状本身。
+
+### 新增的守卫（`=== 2b) DAO 形状`，7 条）
+
+- `ELEMENTS_SQL` 确实把 `azimuth_deg` 改名成了 `start_azimuth_deg`（17 列）
+- DAO 形状的行键集合 **=** SQL 的输出列集合
+- ★ DAO 形状里**没有** `azimuth_deg`（有的话这一组就是在测一个假形状）
+- ★ DAO 形状下，**24/24** 曲线线元还原出转向符号
+- 9 条直线元素返回 `None`（不是随便给一个）
+- 同一条线元在两种形状下符号一致
+- ★ 元测试：**只给** `start_azimuth_deg` 与**只给** `azimuth_deg`，符号必须相同
+
+### 这条守卫是**活的**（注入回归实测）
+
+把 `turn_sign` 那一行改回单名 `row.get("azimuth_deg")`：
+
+```
+✗ ★ DAO 形状下，全部曲线线元都还原出转向符号（+1/−1）  0/24
+✗ 同一条线元在两种形状下转向符号一致  不一致 [2,3,4,6,7,8,10,11,12,14,15,16,18,19,20,22,23,24,26,27,28,30,31,32]
+✗ ★ 只给 start_azimuth_deg 与只给 azimuth_deg，还原出的符号完全相同  不一致 [同上 24 个]
+EXIT=1
+```
+
+还原后 `sha256` 逐字节一致（`d1b18ba7d56681e3…`）。
+
+### 镜像内复验（`--build api` 之后）
+
+| 检查 | 结果 |
+|---|---|
+| `…/geo?station_m=300` | **200**，`25.206445459 °N / 117.344425902 °E`，`epsg 4548` |
+| `…/geo/route` | **200**，33 元素 / 337 点，bbox `25.16789..25.20878` × `117.34292..117.37376` |
+| 转向符号分布 | `circular 8` / `transition 16` / `line 0` |
+| `station_m=-50` | **400** |
+| `…/geo/reverse` | **200** |
+
+⇒ ★★★ **「契约测试全绿」和「镜像里能跑」是两件事。**
+差别不在测试跑得够不够多，而在**测试替身复现得够不够真**。
+
+---
+
 ## 本轮实测命令摘录（证据优先级：Principle III）
 
 ```bash

@@ -145,6 +145,7 @@ def main() -> int:
     # 每页各自声明"取数入口在哪里"——geometry 要 M6 的数据，故经 /gw 转发；
     # 首页只打 M9 自己的接口，出现 /gw 反而说明它绕了不该绕的路。
     PAGES = {
+        "geo.html": 'const GW = "/gw"',
         "geometry.html": 'const GW = "/gw"',
         "import.html": 'const GW = "/gw"',      # 读路段列表仍经 /gw → M6
         "sim.html": 'const ENTRY = "/v1/sim/manifest"',   # 交付目录是 M9 自己的资产，不经 /gw
@@ -164,6 +165,67 @@ def main() -> int:
         ok(f"{_name} 的取数入口声明正确（{_gw}）", _gw in html)
         ok(f"{_name} 没有构建产物依赖（无外部 script/link 引入）",
            not re.search(r"<(script|link)[^>]+(src|href)=[\"']https?://", html))
+    # ------------------------------------------------- 3c) 区域帧页的边界
+    # 这一页是**换算**页，不是**判定**页。
+    # 宪法「未标定的阈值不得用于生产判定」：1 m 是换算正确性的判据，
+    # 不是养护阈值。页面上出现"合格/不合格"就等于把一条没标定的线当了生产判据。
+    print("\n=== 3g) 区域帧页：只换算，不判定；也不声称位置 ===")
+    _geo = (M9_DIR / "geo.html").read_text(encoding="utf-8")
+    ok("区域帧页不出现判定字样（合格/不合格/达标/超标）",
+       not any(w in _geo for w in ("合格", "不合格", "达标", "超标")))
+    ok("区域帧页说明了「位置由桩号换算得到」",
+       "位置由桩号换算得到" in _geo)
+    ok("区域帧页说明了库里的 lat/lon 为空（位置没有第二个来源）",
+       "lat" in _geo and "lon" in _geo and "为空" in _geo)
+    ok("区域帧页不引外部底图 / 瓦片服务（不声称地理位置）",
+       not re.search(r"tile|xyz|openstreetmap|amap|gaode|mapbox",
+                     _geo, re.IGNORECASE))
+    # ★ 真实比例与真实方位（FR-007 / SC-005）。
+    # 做法是**横纵共用一个比例**：只要 s 只有一个，"长宽比失真"就不可能发生。
+    # 下面这条钉住那个写法，而不是钉住某个像素数 —— 像素数会随窗口变。
+    ok("区域帧页横纵共用一个比例（真实比例由构造保证，不是靠调参）",
+       re.search(r"const\s+s\s*=\s*Math\.min\(", _geo) is not None)
+    ok("区域帧页北向上（north 越大 y 越小，南北东西没有互换）",
+       re.search(r"const\s+py\s*=\s*n\s*=>\s*[^;]*n1\s*-\s*n", _geo) is not None)
+    ok("区域帧页东向右（east 越大 x 越大）",
+       re.search(r"const\s+px\s*=\s*e\s*=>\s*[^;]*e\s*-\s*e0", _geo) is not None)
+    # ★ 按点列画，不按首末点连直线 —— 否则曲线退化成折线（FR-006 的前提）。
+    ok("区域帧页按点列逐点画（不是首末点连一条直线）",
+       ".forEach(([x, y], i) => i ? CTX.lineTo(x, y) : CTX.moveTo(x, y))" in _geo)
+    # ★ 三类线元用不同画法：颜色三选一 + 虚线只在缓和曲线上。
+    # 判据写成"能从页面里取出三套互不相同的画法"，而不是"页面上有三个名字"——
+    # 后者在把三类改成同一套画法后**照样通过**，那就是空转。
+    def _styles(src):
+        cols = re.findall(r'--c-(line|circular|transition):(#[0-9a-fA-F]{6})', src)
+        dashes = re.findall(r'^const DASH\s*=\s*(\{[^}]*\})', src, re.M)
+        return cols, dashes
+
+    _cols, _dash = _styles(_geo)
+    ok("区域帧页三类线元各有自己的颜色（三个互不相同）",
+       len({c for _, c in _cols}) == 3, str(_cols))
+    ok("区域帧页三类线元的线型不全相同（缓和曲线用虚线区分）",
+       bool(_dash) and "transition: [7, 5]" in _dash[0], str(_dash))
+    # 元测试：把三类颜色改成同一个，上面那条必须红
+    _same = re.sub(r'--c-(line|circular|transition):#[0-9a-fA-F]{6}',
+                   '--c-\\1:#ff9f43', _geo)
+    ok("元测试：三类颜色改成同一个后必须被认出来",
+       len({c for _, c in _styles(_same)[0]}) != 3)
+    # 元测试：把虚线去掉，线型那条必须红
+    _nodash = _geo.replace("transition: [7, 5]", "transition: []")
+    ok("元测试：缓和曲线不用虚线后必须被认出来",
+       "transition: [7, 5]" not in _styles(_nodash)[1][0])
+    # 元测试：塞入判定字样，第一条必须红
+    ok("元测试：塞入「不合格」后必须被认出来",
+       any(w in (_geo + "<p>不合格</p>") for w in ("合格", "不合格", "达标", "超标")))
+    # 元测试：把共用一个比例改成横纵各一个，必须被认出来
+    ok("元测试：横纵各用一个比例时必须被认出来",
+       re.search(r"const\s+s\s*=\s*Math\.min\(",
+                 _geo.replace("const s = Math.min(", "const s = Math.max(",
+                              1)) is None)
+    # 元测试：把指北针方向的式子反过来（南向上），必须被认出来
+    ok("元测试：南北画反后必须被认出来",
+       re.search(r"const\s+py\s*=\s*n\s*=>\s*[^;]*n1\s*-\s*n",
+                 _geo.replace("(n1 - n)", "(n - n1)", 1)) is None)
     # ------------------------------------------------- 3b) 导入页的边界
     # 导入是**写**，而 /gw 的契约是「有边界的只读转发」（下面第 4 组会断言
     # POST /gw/... → 405）。所以导入页必须**另有**入口，不能把写塞进 /gw。

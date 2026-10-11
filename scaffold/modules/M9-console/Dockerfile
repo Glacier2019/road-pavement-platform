@@ -16,6 +16,7 @@ COPY app.py ./
 # ⚠ 新增页面**必须在这里加一行**，否则路由在、页面文件不在 ——
 #   表现是 GET 该页返回 500「页面文件缺失」，而其它页一切正常，
 #   很容易被当成路由写错了去查 app.py。实测踩过一次。
+COPY geo.html ./
 COPY geometry.html ./
 COPY index.html ./
 COPY import.html ./

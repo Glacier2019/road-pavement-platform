@@ -67,6 +67,46 @@ spec 把 **US1（桩号↔经纬度）标为 P1**，与实现顺序一致，无�
 
 ---
 
+## ⚠️ 实施阶段出现的第二条**计划外改动**：假 DAO 必须复现真 DAO 的**形状**
+
+**改动两处**（缺一不可）：
+
+1. `scaffold/modules/M6-api/geo.py`：加 `_pick(row, "azimuth_deg", "start_azimuth_deg")`，
+   `turn_sign` 与 `as_adapter_element` 都走它（**两个名字都认**）；
+2. `scaffold/tests/contract/test_region_frame.py`：假 DAO 改吐
+   **`ELEMENTS_SQL` 的输出形状**，映射表从 `repo.py` 现场解析，不写死。
+
+**为什么计划里没有它**：T010/T011 只说了「适配层要与 `geometry_solver` 等价」，
+没说这两条路径上**同一个字段有两个名字**。
+
+| 谁 | 吃的是 | 键名叫 |
+|---|---|---|
+| M2 `geometry_solver` | 原始表行 | `azimuth_deg` |
+| M6 `geo` | M3 `ELEMENTS_SQL` 的输出 | **`start_azimuth_deg`** |
+
+**怎么发现的**：不是测试发现的 —— 是 **T027 让容器跑起来之后**发现的。
+
+| 检查 | 结果 |
+|---|---|
+| `test_region_frame.py`（10 组） | 全部通过 |
+| `./run_contract_tests.sh`（21 套） | **通过 21 ｜ 失败 0** |
+| 容器里 `GET …/geo?station_m=300` | ★★ **HTTP 500** |
+
+**为什么必须做**：`turn_sign` 只认一个名字时它会**静默返回 `None`**，
+`turn_flag` 丢失，右转曲线朝反方向弯 —— **和 R3 里那个 98 m 是同一件事，
+而且不报错**。这不是"顺手加固"。
+
+★ 新增守卫 7 条（`=== 2b) DAO 形状`），实测**是活的**：
+把那一行改回单名 → 3 条红、EXIT=1、**24 条曲线符号全丢（0/24）**；
+还原后 sha256 逐字节一致。
+
+★★★ **这一条值得单独记：`契约测试全绿` 和 `镜像里能跑` 是两件事。**
+差别不在测试跑得够不够多，在**测试替身复现得够不够真** ——
+假 DAO 替一个生产里不存在的形状背书，测试就替它盖章。
+详见 `research.md` R9。
+
+---
+
 ## Phase 1: Setup
 
 **Purpose**: 前提核实与契约归位
@@ -229,44 +269,44 @@ spec 把 **US1（桩号↔经纬度）标为 P1**，与实现顺序一致，无�
 **Independent Test**: 页面上量取首末点经纬度，与 US1 算出的值一致；
 圆曲线段**是弯的**；3 条 0 路段的 `road_line` 不出现
 
-- [ ] **T020** [US2] 建 `scaffold/modules/M9-console/geo.html`：
+- [x] **T020** [US2] 建 `scaffold/modules/M9-console/geo.html`：
       **自包含 HTML**（内联 `<script>` + `<style>`）、
       **无外部 `script`/`link`**、**无写死端口**
       ★ 这三条**已有契约测试**会验，不是新要求
       ★ 用 CDN 版 CesiumJS 会被既有测试直接判红 ——
       那条断言当初正是为挡它写的（见 research.md R6）
 
-- [ ] **T021** [US2] 在 `geo.html` 里画 33 段：直线 / 圆曲线 / 缓和曲线
+- [x] **T021** [US2] 在 `geo.html` 里画 33 段：直线 / 圆曲线 / 缓和曲线
       **用不同画法区分**（FR-006）
       ★ **按点列画，不按首末点连直线** —— 否则曲线退化成折线
 
-- [ ] **T022** [US2] 保持**真实比例与真实方位**（FR-007）：
+- [x] **T022** [US2] 保持**真实比例与真实方位**（FR-007）：
       南北与东西**不得互换**，长宽比不得失真
       ★ 实测包围盒 **4.552 km（南北）× 3.106 km（东西）**
       ★ SC-005：长宽比相差 ≤ 1%
 
-- [ ] **T023** [US2] 点击任意段弹出桩号区间、长度、半径、方位角（US2 场景 3）
+- [x] **T023** [US2] 点击任意段弹出桩号区间、长度、半径、方位角（US2 场景 3）
 
-- [ ] **T024** [US2] **排除 3 条 0 路段的 `road_line`**（`TEST-PRJ-*`，FR-008）：
+- [x] **T024** [US2] **排除 3 条 0 路段的 `road_line`**（`TEST-PRJ-*`，FR-008）：
       不出现，或明确标为「无几何数据」
       ★ 空壳画出来是**一个永远空的图层**，看起来像 bug、实际是没数据
 
-- [ ] **T025** [US2] 在 `scaffold/modules/M9-console/app.py` 加 `GET /geo`，
+- [x] **T025** [US2] 在 `scaffold/modules/M9-console/app.py` 加 `GET /geo`，
       页面经**既有的只读代理 `/gw/{path}`** 取 M6 的数据
       ★ **M9 不得直连数据库**（宪法 Principle II）。既有 AST 断言守着这条
       ★ `geo.html` 用 `.read_text()` → `HTMLResponse`，延续 003 的五行
 
-- [ ] **T026** [US2] `scaffold/modules/M9-console/index.html` 加一个指向 `/geo` 的入口
+- [x] **T026** [US2] `scaffold/modules/M9-console/index.html` 加一个指向 `/geo` 的入口
 
-- [ ] **T027** [US2] `scaffold/modules/M9-console/Dockerfile` 加 `COPY geo.html`
+- [x] **T027** [US2] `scaffold/modules/M9-console/Dockerfile` 加 `COPY geo.html`
       ★ **容器里有路由、镜像里没文件 = 线上 500、而宿主机测试全绿。**
       这条宪法教训已经踩过一次
 
-- [ ] **T028** [US2] 把 `geo.html` 加进 `test_console.py` 的 `PAGES` 字典
+- [x] **T028** [US2] 把 `geo.html` 加进 `test_console.py` 的 `PAGES` 字典
       ★ 那条一致性检查**本身就是「新增页面必须登记」的守卫** ——
       **不新建重复的守卫**
 
-- [ ] **T029** [US2] 在 `test_console.py` 加本 feature 的新检查：
+- [x] **T029** [US2] 在 `test_console.py` 加本 feature 的新检查：
       `geo.html` 不引用外部资源、不含「合格/不合格」判定字样
       ★ 页面**只换算、不判定**。1 m 是**换算正确性**的判据，不是养护阈值
 

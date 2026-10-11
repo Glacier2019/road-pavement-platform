@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>区域帧 —— 桩号与经纬度</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161c24; --line:#232c38; --fg:#dde3ea;
+    --dim:#8b97a6; --accent:#4da3ff;
+    --c-line:#5a6b7d;        /* 直线 */
+    --c-circular:#ff9f43;    /* 圆曲线 */
+    --c-transition:#4dd6a8;  /* 缓和曲线 */
+    --c-pick:#ff4d6d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  header{padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{margin:0 0 6px;font-size:17px;font-weight:600}
+  .note{color:var(--dim);font-size:12.5px}
+  .note b{color:var(--accent);font-weight:600}
+  main{display:flex;gap:0;height:calc(100vh - 132px);min-height:420px}
+  #left{flex:1 1 auto;position:relative;min-width:0}
+  canvas{display:block;width:100%;height:100%;cursor:crosshair}
+  #side{flex:0 0 336px;border-left:1px solid var(--line);background:var(--panel);
+        overflow:auto;padding:14px 16px}
+  .ctl{margin-bottom:14px}
+  label{display:block;color:var(--dim);font-size:12px;margin-bottom:4px}
+  select,input{width:100%;background:#0c1116;color:var(--fg);
+               border:1px solid var(--line);border-radius:5px;padding:6px 8px;font:inherit}
+  button{background:#0c1116;color:var(--fg);border:1px solid var(--line);
+         border-radius:5px;padding:6px 10px;font:inherit;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  .legend{display:flex;flex-direction:column;gap:7px;margin:14px 0}
+  .lg{display:flex;align-items:center;gap:9px;font-size:12.5px}
+  .sw{width:30px;height:0;border-top-width:3px;border-top-style:solid}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  #pop{position:absolute;pointer-events:none;display:none;z-index:9;
+       background:#0c1116ee;border:1px solid var(--accent);border-radius:6px;
+       padding:9px 11px;font-size:12.5px;max-width:280px;
+       box-shadow:0 6px 22px #0009}
+  #pop h4{margin:0 0 6px;font-size:13px;color:var(--accent)}
+  #pop dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 10px}
+  #pop dt{color:var(--dim)}
+  #pop dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+  #err{display:none;padding:10px 12px;margin:10px 0;border-radius:5px;
+       background:#3a1d22;border:1px solid #7a2f3a;color:#ffc9d1;font-size:12.5px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12.5px}
+  .kv dt{color:var(--dim)}
+  .kv dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+  .sec0{color:var(--dim)}
+  .disclaim{margin-top:14px;padding:9px 11px;border-radius:5px;
+            background:#152230;border:1px solid #23405c;color:#9fc6ea;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>区域帧 —— 桩号与经纬度</h1>
+  <div class="note">
+    平面线形按<b>局部平面帧</b>绘制（北↑ / 东→，横纵同一比例）。
+    桩号与坐标的换算由 M6 提供，本页只取数与显示。
+  </div>
+</header>
+
+<main>
+  <div id="left">
+    <canvas id="cv"></canvas>
+    <div id="pop"></div>
+  </div>
+
+  <aside id="side">
+    <div class="ctl">
+      <label for="sec">路段</label>
+      <select id="sec"></select>
+    </div>
+    <div class="ctl">
+      <label for="step">采样步长（米，线元内）</label>
+      <input id="step" type="number" value="20" min="1" max="1000" step="1">
+    </div>
+    <div class="ctl">
+      <button id="reload">重新取数</button>
+    </div>
+    <div id="err"></div>
+
+    <div class="legend">
+      <div class="lg"><span class="sw" style="border-top-color:var(--c-line)"></span>直线</div>
+      <div class="lg"><span class="sw" style="border-top-color:var(--c-circular)"></span>圆曲线</div>
+      <div class="lg"><span class="sw" style="border-top-color:var(--c-transition);border-top-style:dashed"></span>缓和曲线</div>
+    </div>
+
+    <table id="elist"><thead><tr>
+      <th>序号</th><th>类型</th><th>起点桩号</th><th>长度 m</th>
+    </tr></thead><tbody></tbody></table>
+
+    <dl class="kv" id="meta"></dl>
+
+    <div class="disclaim" id="disclaim">
+      位置由桩号换算得到。库中 <code>monitor_cross_section</code> 的
+      <code>lat</code>/<code>lon</code> 两列为空，位置没有第二个来源。
+    </div>
+  </aside>
+</main>
+
+<script>
+const GW = "/gw";
+const CV = document.getElementById("cv");
+const CTX = CV.getContext("2d");
+const POP = document.getElementById("pop");
+const SEC = document.getElementById("sec");
+const STEP = document.getElementById("step");
+const ERR = document.getElementById("err");
+const META = document.getElementById("meta");
+const TBODY = document.querySelector("#elist tbody");
+
+const COLOR = { line: "#5a6b7d", circular: "#ff9f43", transition: "#4dd6a8" };
+const NAME  = { line: "直线", circular: "圆曲线", transition: "缓和曲线" };
+const DASH  = { line: [], circular: [], transition: [7, 5] };
+const WIDTH = { line: 2.0, circular: 3.0, transition: 2.4 };
+
+let ROUTE = null;      // 最近一次取回的路线
+let GEOM = null;       // 屏幕几何（供点击命中用）
+
+function fail(msg) {
+  ERR.style.display = "block";
+  ERR.textContent = msg;
+}
+function clearFail() { ERR.style.display = "none"; }
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch (e) { detail = ""; }
+    throw new Error(`HTTP ${r.status}${detail ? " —— " + detail : ""}`);
+  }
+  return r.json();
+}
+
+/* ---------------------------------------------------------- 路段列表 */
+async function loadSections() {
+  const d = await getJSON(`${GW}/v1/geometry/sections`);
+  SEC.innerHTML = "";
+  for (const s of d.items) {
+    const o = document.createElement("option");
+    o.value = s.id;
+    const tag = s.line_code ? `${s.line_code} ` : "";
+    if (s.element_count > 0) {
+      o.textContent = `${tag}${s.section_name}（${s.element_count} 段线元）`;
+    } else {
+      // ★ 不列出来，用户会以为"这条路不见了"；列出来但标明没数据，才是实话。
+      // 空壳图层画出来是一个永远空的画面，看起来像 bug、实际是没数据。
+      o.textContent = `${tag}${s.section_name} —— 无几何数据`;
+      o.className = "sec0";
+      o.disabled = true;
+    }
+    SEC.appendChild(o);
+  }
+  const first = d.items.find(s => s.element_count > 0);
+  if (first) SEC.value = String(first.id);
+}
+
+/* ---------------------------------------------------------- 取路线 */
+async function loadRoute() {
+  clearFail();
+  const sid = SEC.value;
+  const step = Math.max(1, Math.min(1000, Number(STEP.value) || 20));
+  const d = await getJSON(
+    `${GW}/v1/geometry/sections/${sid}/geo/route?step_m=${step}`);
+  ROUTE = d;
+  document.getElementById("disclaim").style.display = "block";
+  draw();
+  fillMeta();
+  fillTable();
+}
+
+/* ---------------------------------------------------------- 画 */
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = CV.clientWidth, H = CV.clientHeight;
+  CV.width = Math.round(W * dpr);
+  CV.height = Math.round(H * dpr);
+  CTX.setTransform(dpr, 0, 0, dpr, 0, 0);
+  CTX.clearRect(0, 0, W, H);
+  if (!ROUTE) return;
+
+  // 世界包围盒（局部平面帧：north 向北、east 向东）
+  let n0 = Infinity, n1 = -Infinity, e0 = Infinity, e1 = -Infinity;
+  for (const el of ROUTE.elements) {
+    for (const p of el.points) {
+      if (p.north_m < n0) n0 = p.north_m;
+      if (p.north_m > n1) n1 = p.north_m;
+      if (p.east_m  < e0) e0 = p.east_m;
+      if (p.east_m  > e1) e1 = p.east_m;
+    }
+  }
+  const dn = Math.max(n1 - n0, 1e-6), de = Math.max(e1 - e0, 1e-6);
+  const PAD = 34;
+  // ★ 横纵**共用一个比例**。这就是"真实比例与真实方位"的全部实现：
+  //   只要 s 只有一个，任何长宽比失真都不可能发生。
+  const s = Math.min((W - 2 * PAD) / de, (H - 2 * PAD) / dn);
+  const ox = (W - de * s) / 2, oy = (H - dn * s) / 2;
+  // 北↑：north 越大 y 越小；东→：east 越大 x 越大。
+  const px = e => ox + (e - e0) * s;
+  const py = n => oy + (n1 - n) * s;
+
+  GEOM = { px, py, s, elements: [] };
+
+  // 网格：按整公里画，方便对比例
+  CTX.lineWidth = 1;
+  CTX.strokeStyle = "#1b232d";
+  const kmE0 = Math.ceil(e0 / 1000) * 1000;
+  for (let e = kmE0; e <= e1; e += 1000) {
+    CTX.beginPath(); CTX.moveTo(px(e), 0); CTX.lineTo(px(e), H); CTX.stroke();
+  }
+  const kmN0 = Math.ceil(n0 / 1000) * 1000;
+  for (let n = kmN0; n <= n1; n += 1000) {
+    CTX.beginPath(); CTX.moveTo(0, py(n)); CTX.lineTo(W, py(n)); CTX.stroke();
+  }
+
+  // 线元
+  for (const el of ROUTE.elements) {
+    const t = el.element_type;
+    const pts = el.points.map(p => [px(p.east_m), py(p.north_m)]);
+    GEOM.elements.push({ el, pts });
+    CTX.save();
+    CTX.strokeStyle = COLOR[t] || "#8b97a6";
+    CTX.lineWidth = WIDTH[t] || 2;
+    CTX.setLineDash(DASH[t] || []);
+    CTX.lineJoin = "round";
+    CTX.beginPath();
+    pts.forEach(([x, y], i) => i ? CTX.lineTo(x, y) : CTX.moveTo(x, y));
+    CTX.stroke();
+    CTX.restore();
+  }
+
+  // 起点 / 终点
+  const all = ROUTE.elements;
+  if (all.length) {
+    const a = all[0].points[0], z = all[all.length - 1].points.at(-1);
+    dot(px(a.east_m), py(a.north_m), "#4da3ff", "起点");
+    dot(px(z.east_m), py(z.north_m), "#ff4d6d", "终点");
+  }
+
+  // 指北针：让"南北没有和东西互换"看得见，而不是只能靠信代码
+  CTX.save();
+  CTX.strokeStyle = "#8b97a6"; CTX.fillStyle = "#8b97a6"; CTX.lineWidth = 1.5;
+  const ax = 26, ay = H - 30;
+  CTX.beginPath(); CTX.moveTo(ax, ay); CTX.lineTo(ax, ay - 26); CTX.stroke();
+  CTX.beginPath();
+  CTX.moveTo(ax, ay - 32); CTX.lineTo(ax - 5, ay - 24); CTX.lineTo(ax + 5, ay - 24);
+  CTX.closePath(); CTX.fill();
+  CTX.font = "12px sans-serif"; CTX.textAlign = "center";
+  CTX.fillText("N", ax, ay + 14);
+  CTX.restore();
+
+  // 比例尺（1 km）
+  CTX.save();
+  CTX.strokeStyle = "#8b97a6"; CTX.lineWidth = 1.5;
+  const bx = W - 150, by = H - 22;
+  CTX.beginPath();
+  CTX.moveTo(bx, by - 4); CTX.lineTo(bx, by + 4);
+  CTX.moveTo(bx, by); CTX.lineTo(bx + 1000 * s, by);
+  CTX.moveTo(bx + 1000 * s, by - 4); CTX.lineTo(bx + 1000 * s, by + 4);
+  CTX.stroke();
+  CTX.font = "12px sans-serif"; CTX.textAlign = "left";
+  CTX.fillText("1 km", bx + 1000 * s + 8, by + 4);
+  CTX.restore();
+}
+
+function dot(x, y, c, label) {
+  CTX.save();
+  CTX.fillStyle = c;
+  CTX.beginPath(); CTX.arc(x, y, 4.5, 0, Math.PI * 2); CTX.fill();
+  CTX.font = "12px sans-serif"; CTX.textAlign = "left";
+  CTX.fillText(label, x + 8, y + 4);
+  CTX.restore();
+}
+
+/* ---------------------------------------------------------- 侧栏 */
+function fillMeta() {
+  const b = ROUTE.bbox;
+  const dn = (b.lat_max - b.lat_min) * 111.32;
+  const de = (b.lon_max - b.lon_min) * 111.32 *
+             Math.cos(b.lat_min * Math.PI / 180);
+  META.innerHTML = `
+    <dt>EPSG</dt><dd>${ROUTE.epsg}</dd>
+    <dt>中央子午线</dt><dd>${ROUTE.central_meridian_deg}°E</dd>
+    <dt>带号</dt><dd>${ROUTE.zone_number}</dd>
+    <dt>线元数</dt><dd>${ROUTE.elements.length}</dd>
+    <dt>采样点</dt><dd>${ROUTE.point_count}</dd>
+    <dt>南北跨距</dt><dd>${dn.toFixed(3)} km</dd>
+    <dt>东西跨距</dt><dd>${de.toFixed(3)} km</dd>
+    <dt>纬度范围</dt><dd>${b.lat_min.toFixed(5)} .. ${b.lat_max.toFixed(5)}</dd>
+    <dt>经度范围</dt><dd>${b.lon_min.toFixed(5)} .. ${b.lon_max.toFixed(5)}</dd>
+    <dt>来源</dt><dd>${ROUTE.source}</dd>`;
+}
+
+function fillTable() {
+  TBODY.innerHTML = "";
+  for (const el of ROUTE.elements) {
+    const tr = document.createElement("tr");
+    const len = (el.end_station_m - el.start_station_m);
+    tr.innerHTML =
+      `<td class="n">${el.element_seq ?? ""}</td>` +
+      `<td style="color:${COLOR[el.element_type] || "#dde3ea"}">` +
+      `${NAME[el.element_type] || el.element_type}</td>` +
+      `<td class="n">${(el.start_station_m / 1000).toFixed(3)}</td>` +
+      `<td class="n">${len.toFixed(2)}</td>`;
+    tr.style.cursor = "pointer";
+    tr.onclick = () => {
+      const g = GEOM && GEOM.elements.find(g => g.el === el);
+      if (g) showPop(g.pts[Math.floor(g.pts.length / 2)][0],
+                     g.pts[Math.floor(g.pts.length / 2)][1], el);
+    };
+    TBODY.appendChild(tr);
+  }
+}
+
+/* ---------------------------------------------------------- 点击 */
+function segDist(px0, py0, px1, py1, x, y) {
+  const dx = px1 - px0, dy = py1 - py0;
+  const L2 = dx * dx + dy * dy;
+  let t = L2 ? ((x - px0) * dx + (y - py0) * dy) / L2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(x - (px0 + t * dx), y - (py0 + t * dy));
+}
+
+function showPop(x, y, el) {
+  const r = el.points[0];
+  const len = el.end_station_m - el.start_station_m;
+  POP.innerHTML =
+    `<h4>${NAME[el.element_type] || el.element_type} · 第 ${el.element_seq} 段</h4>` +
+    `<dl>` +
+    `<dt>桩号区间</dt><dd>K${(el.start_station_m / 1000).toFixed(3)}` +
+      ` .. K${(el.end_station_m / 1000).toFixed(3)}</dd>` +
+    `<dt>长度</dt><dd>${len.toFixed(3)} m</dd>` +
+    `<dt>半径</dt><dd>${el.radius_start_m ?? "∞（直线）"}</dd>` +
+    `<dt>起点纬度</dt><dd>${r.lat_deg.toFixed(6)}</dd>` +
+    `<dt>起点经度</dt><dd>${r.lon_deg.toFixed(6)}</dd>` +
+    `</dl>`;
+  POP.style.display = "block";
+  const w = POP.offsetWidth, h = POP.offsetHeight;
+  POP.style.left = Math.min(x + 14, CV.clientWidth - w - 6) + "px";
+  POP.style.top = Math.max(6, Math.min(y - h / 2, CV.clientHeight - h - 6)) + "px";
+}
+
+CV.addEventListener("click", ev => {
+  if (!GEOM) return;
+  const rc = CV.getBoundingClientRect();
+  const x = ev.clientX - rc.left, y = ev.clientY - rc.top;
+  let best = null, bestD = 12;
+  for (const g of GEOM.elements) {
+    for (let i = 1; i < g.pts.length; i++) {
+      const d = segDist(g.pts[i - 1][0], g.pts[i - 1][1],
+                       g.pts[i][0], g.pts[i][1], x, y);
+      if (d < bestD) { bestD = d; best = { g, x: g.pts[i][0], y: g.pts[i][1] }; }
+    }
+  }
+  if (best) showPop(best.x, best.y, best.g.el);
+  else POP.style.display = "none";
+});
+CV.addEventListener("mouseleave", () => { POP.style.display = "none"; });
+
+/* ---------------------------------------------------------- 启动 */
+SEC.addEventListener("change", () => loadRoute().catch(e => fail(e.message)));
+document.getElementById("reload").addEventListener("click",
+  () => loadRoute().catch(e => fail(e.message)));
+window.addEventListener("resize", () => draw());
+
+(async () => {
+  try {
+    await loadSections();
+    await loadRoute();
+  } catch (e) {
+    fail(`取数失败：${e.message}`);
+  }
+})();
+</script>
+</body>
+</html>

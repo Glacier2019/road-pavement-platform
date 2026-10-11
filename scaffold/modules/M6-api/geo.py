@@ -180,6 +180,27 @@ def _f(v: Any) -> float | None:
     return None if v is None else float(v)
 
 
+def _pick(row: Mapping[str, Any], *names: str) -> Any:
+    """按顺序取第一个存在的键。
+
+    ★ **为什么需要这个**：同一个字段在两条取数路径上**叫不同的名字**。
+
+      · 原始表 `alignment_element` 的列名是 `azimuth_deg`；
+      · 而 M3 的 `ELEMENTS_SQL` 把它 `AS start_azimuth_deg` 了。
+
+    M2 的 `geometry_solver` 吃的是前者，M6 的 `geo` 吃的是后者 ——
+    结果就是：**契约测试全绿，容器里 500**。因为夹具记的是原始表行，
+    而真实 DAO 返回的是改过名的形状。
+
+    ⇒ 本函数两条路都认。只认一个名字，就等于把「从哪张表来的」这个
+      实现细节变成了隐式契约，而那正是这次出错的形状。
+    """
+    for n in names:
+        if n in row:
+            return row[n]
+    return None
+
+
 def turn_sign(row: Mapping[str, Any]) -> int | None:
     """还原**转向符号**（+1 左转 / −1 右转）。直线返回 `None`。
 
@@ -195,9 +216,11 @@ def turn_sign(row: Mapping[str, Any]) -> int | None:
 
     ★ 本函数与 `M2-ingest/geometry_solver.py::_turn_sign` 是同一规则。
       `tests/contract/test_region_frame.py` 用**真数据输出相等**守着这一对。
+
+    ★ 入方位角两个名字都认，理由见 `_pick`。
     """
-    az0 = row.get("azimuth_deg")
-    az1 = row.get("end_azimuth_deg")
+    az0 = _pick(row, "azimuth_deg", "start_azimuth_deg")
+    az1 = _pick(row, "end_azimuth_deg")
     if az0 is None or az1 is None:
         return row.get("turn_flag")
     if row.get("element_type") == "line" or row.get("type") == "line":
@@ -219,6 +242,10 @@ def as_adapter_element(row: Mapping[str, Any]) -> dict[str, Any]:
 
     ★ 本函数与 `geometry_solver.py::_as_adapter_element` 是同一规则，
       由契约测试用真数据输出相等守着。
+
+    ★ 入方位角两个名字都认（`azimuth_deg` / `start_azimuth_deg`），
+      理由见 `_pick`。**这一条不是防御性编程**：M3 的 `ELEMENTS_SQL`
+      确实把它改名了，只认一个名字的版本在容器里直接 500。
     """
     if "start_station_m" in row:
         return dict(row)                      # 已经是适配器形状
@@ -232,7 +259,7 @@ def as_adapter_element(row: Mapping[str, Any]) -> dict[str, Any]:
         "length_m": end - start,
         "start_x": _f(row.get("start_x")), "start_y": _f(row.get("start_y")),
         "end_x": _f(row.get("end_x")), "end_y": _f(row.get("end_y")),
-        "azimuth_deg": _f(row.get("azimuth_deg")),
+        "azimuth_deg": _f(_pick(row, "azimuth_deg", "start_azimuth_deg")),
         "end_azimuth_deg": _f(row.get("end_azimuth_deg")),
         "radius_start_m": _f(row.get("radius_start_m")),
         "radius_end_m": _f(row.get("radius_end_m")),

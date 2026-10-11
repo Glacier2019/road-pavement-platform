@@ -97,6 +97,7 @@ CRS_CONFIG = _resolve_crs_config(os.getenv("CRS_CONFIG", "config/crs.yaml"))
 
 TABLES_PAGE = pathlib.Path(__file__).with_name("tables.html")
 GEOMETRY_PAGE = pathlib.Path(__file__).with_name("geometry.html")
+GEO_PAGE = pathlib.Path(__file__).with_name("geo.html")
 IMPORT_PAGE = pathlib.Path(__file__).with_name("import.html")
 SIM_PAGE = pathlib.Path(__file__).with_name("sim.html")
 INDEX_PAGE = pathlib.Path(__file__).with_name("index.html")
@@ -300,6 +301,25 @@ def geometry_page() -> HTMLResponse:
     if not GEOMETRY_PAGE.exists():
         raise HTTPException(500, f"页面文件缺失：{GEOMETRY_PAGE.name}")
     return HTMLResponse(GEOMETRY_PAGE.read_text(encoding="utf-8"))
+
+
+@app.get("/geo", response_class=HTMLResponse, include_in_schema=False)
+def geo_page() -> HTMLResponse:
+    """区域帧页 —— 桩号与经纬度的互算与呈现（自包含 HTML：内联 JS + CSS）。
+
+    取数与 /geometry 同一条链：本页 → ``/gw`` → M6 → M3 rpdao。
+    M9 依旧没有任何 SQL、也没有 PG_DSN。
+
+    ★ **本页只换算，不判定。** 1 m 是**换算正确性**的判据，不是养护阈值 ——
+    页面上不出现"合格/不合格"字样（宪法「未标定的阈值不得用于生产判定」）。
+
+    ★ **本页不声称位置。** 换算出的经纬度是**由桩号算出来的**，不是实测位置；
+    库中 ``monitor_cross_section`` 的 lat/lon 两列为空，位置没有第二个来源。
+    页面把这句话显式写在侧栏，而不是让读图的人自己去猜。
+    """
+    if not GEO_PAGE.exists():
+        raise HTTPException(500, f"页面文件缺失：{GEO_PAGE.name}")
+    return HTMLResponse(GEO_PAGE.read_text(encoding="utf-8"))
 
 
 @app.get("/sim", response_class=HTMLResponse, include_in_schema=False)

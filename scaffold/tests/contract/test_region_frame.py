@@ -37,6 +37,7 @@ import importlib.util
 import json
 import math
 import pathlib
+import re
 import sys
 
 from fastapi.testclient import TestClient
@@ -116,13 +117,66 @@ GEO = load_geo()
 APP = load_app()
 
 
+# ============================================================ DAO 形状
+# ★★★★★ 本轮最贵的一条教训，就记在这里。
+#
+# 夹具记的是**原始表行**（`select * from alignment_element`）。但应用从来不
+# 直接吃原始表行 —— 它吃的是 M3 `ELEMENTS_SQL` 的**投影结果**，而那条 SQL 把
+# `azimuth_deg` 改名成了 `start_azimuth_deg`，并丢掉了几列。
+#
+# 假 DAO 若原样吐夹具行，它复现的就是一个**生产里不存在的形状**：
+# 适配层按 `azimuth_deg` 去读，拿到 None，`geom` 抛「缺方位角」；
+# 而契约测试全绿 —— 因为测试喂的正是那个不存在的形状。
+# 实测：契约测试全部通过，容器里 `/geo` 返回 **500**。
+#
+# ⇒ **假 DAO 必须复现真 DAO 的形状，不只是它的数据。**
+#   下面从 repo.py 里把那条 SQL 的投影抠出来，照着它重塑夹具。
+ROOT_REPO = ROOT / "modules" / "M3-rpdao" / "rpdao" / "repo.py"
+
+
+def _sql_projection(sql_name: str) -> dict[str, str]:
+    """抠出一条 SELECT 的投影，返回 `{输出名: 源列名}`。
+
+    ★ 不写死这张映射表。写死的话，SQL 哪天改了名，测试不会跟着变 ——
+      那正是这次出错的形状：一份**手工维护的、以为和 SQL 一致**的副本。
+    """
+    src = ROOT_REPO.read_text(encoding="utf-8")
+    m = re.search(sql_name + r'\s*=\s*"""(.*?)"""', src, re.S)
+    assert m, f"repo.py 里找不到 {sql_name}"
+    body = m.group(1)
+    sel = body[body.index("SELECT") + len("SELECT"):body.index("FROM")]
+    out: dict[str, str] = {}
+    for raw in sel.split(","):
+        item = " ".join(raw.split())
+        if not item:
+            continue
+        mm = re.match(r"^(\w+)\.(\w+)(?:\s+AS\s+(\w+))?$", item, re.I)
+        assert mm, f"{sql_name} 里这条投影解析不了：{item!r}"
+        out[mm.group(3) or mm.group(2)] = mm.group(2)
+    return out
+
+
+ELEMENTS_PROJ = _sql_projection("ELEMENTS_SQL")
+
+
+def dao_elements() -> list[dict]:
+    """把夹具的**原始表行**投成 M3 `ELEMENTS_SQL` 的**输出形状**。"""
+    return [{name: r.get(col) for name, col in ELEMENTS_PROJ.items()}
+            for r in FIX["alignment_element"]]
+
+
 # ============================================================ 假 DAO（夹具驱动）
 
 class _FakeGe:
-    """返回**真实**的 33 行线元与交点。数据来自夹具，不来自数据库。"""
+    """返回**真实**的 33 行线元与交点。数据来自夹具，不来自数据库。
+
+    ★ 默认吐的是 `dao_elements()` —— **`ELEMENTS_SQL` 的输出形状**，
+      不是夹具里的原始表行。理由见上面那段注释：形状错了，测试就会
+      替一个生产里不存在的形状背书。
+    """
 
     def __init__(self, elements=None):
-        self._elements = elements if elements is not None else FIX["alignment_element"]
+        self._elements = dao_elements() if elements is None else elements
 
     def alignment(self, section_id):
         if section_id != FIX["section_id"]:
@@ -157,7 +211,8 @@ def sha256(p: pathlib.Path) -> str:
 # ============================================================ 工具
 
 def elements():
-    return GEO.as_adapter_elements(FIX["alignment_element"])
+    """生产形状的线元链（`ELEMENTS_SQL` 的输出形状，不是原始表行）。"""
+    return GEO.as_adapter_elements(dao_elements())
 
 
 def gf():
@@ -271,6 +326,56 @@ def main() -> int:
               f"{n_sign} 行")
     except ImportError as exc:
         check(False, f"无法 import geometry_solver：{exc}")
+
+    # ------------------------------------------------- 2b) DAO 形状
+    # ★★★★★ 这一组是**事后补的**，因为不补就漏掉了一个真 bug：
+    # `ELEMENTS_SQL` 把 `azimuth_deg` 改名成 `start_azimuth_deg`。
+    # 假 DAO 从前吐原始表行，于是测试替一个生产里不存在的形状背书 ——
+    # 契约测试全绿，容器里 `/geo` 返回 500。详见本文件顶部的说明。
+    print("\n=== 2b) DAO 形状：假 DAO 必须复现真 DAO 的形状，不只是数据 ===")
+    check(ELEMENTS_PROJ.get("start_azimuth_deg") == "azimuth_deg",
+          "★ ELEMENTS_SQL 确实把 azimuth_deg 改名成了 start_azimuth_deg",
+          f"投影共 {len(ELEMENTS_PROJ)} 列，"
+          f"start_azimuth_deg ← {ELEMENTS_PROJ.get('start_azimuth_deg')}")
+    _dao = dao_elements()
+    _keys = set(_dao[0])
+    check(_keys == set(ELEMENTS_PROJ),
+          "DAO 形状的行键集合 = ELEMENTS_SQL 的输出列集合",
+          f"{len(_keys)} 列")
+    check("azimuth_deg" not in _keys and "start_azimuth_deg" in _keys,
+          "★ DAO 形状里**没有** azimuth_deg（有的话这一组就是在测一个假形状）")
+
+    # 关键回归：只有改过名的那个键，turn_flag 也必须还原出来。
+    _curves_dao = [r for r in _dao if r["element_type"] != "line"]
+    _signed_dao = [r for r in _curves_dao if GEO.turn_sign(r) in (-1, 1)]
+    check(len(_signed_dao) == len(_curves_dao) and _signed_dao,
+          "★ DAO 形状下，全部曲线线元都还原出转向符号（+1/−1）",
+          f"{len(_signed_dao)}/{len(_curves_dao)}")
+    _lines_dao = [r for r in _dao if r["element_type"] == "line"]
+    check(all(GEO.turn_sign(r) is None for r in _lines_dao),
+          "直线线元不还原符号（返回 None，不是随便给一个）",
+          f"{len(_lines_dao)} 行")
+    # 同一个元素，两种形状必须给出同一个符号 —— 否则"两个名字都认"
+    # 只是碰巧在某一侧对了。
+    _raw = {r["element_seq"]: r for r in FIX["alignment_element"]}
+    _diff = [r["element_seq"] for r in _dao
+             if GEO.turn_sign(r) != GEO.turn_sign(_raw[r["element_seq"]])]
+    check(not _diff, "同一条线元在两种形状下转向符号一致", f"不一致 {_diff}")
+    # 元测试（真能红的那种）：把两条路径各自**只留自己那个键**，
+    # 符号必须一致。只认一个名字的实现会在这里立刻现形 ——
+    # 实测：本轮修复前，右半边全是 None。
+    _only_dao = [{"element_type": r["element_type"], "element_seq": r["element_seq"],
+                  "start_azimuth_deg": r["start_azimuth_deg"],
+                  "end_azimuth_deg": r["end_azimuth_deg"]} for r in _dao]
+    _only_raw = [{"element_type": r["element_type"], "element_seq": r["element_seq"],
+                  "azimuth_deg": r["azimuth_deg"],
+                  "end_azimuth_deg": r["end_azimuth_deg"]}
+                 for r in FIX["alignment_element"]]
+    _mismatch = [a["element_seq"] for a, b in zip(_only_dao, _only_raw)
+                 if GEO.turn_sign(a) != GEO.turn_sign(b)]
+    check(not _mismatch,
+          "★ 只给 start_azimuth_deg 与只给 azimuth_deg，还原出的符号完全相同",
+          f"两条路径共 {len(_only_dao)} 行，不一致 {_mismatch}")
 
     # ---------------------------------------------------------------- 3) 投影往返
     print("\n=== 3) 投影往返闭合（正算→反算）===")
