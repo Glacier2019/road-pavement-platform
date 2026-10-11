@@ -139,6 +139,50 @@ def main() -> int:
     if esal <= 0:
         fails.append("ESAL 计算")
 
+    # ============================================ 日志契约：六条出口都要出声
+    # ★ 这一段的由来：成功路径原先只有计数器自增、没有日志。五条失败分支
+    #   全都记，唯独成功这条静默 —— 于是 `docker logs rp-ingest` 只剩
+    #   /healthz 的 200 行，一条通了的链路读起来和从没跑过一样。
+    #   实测据此得出过一次错误结论（详见 modules/M2-ingest/README.md 坑 1）。
+    # ★ 判据落在**结构**上（每条出口后有没有 LOG 调用），不落在措辞上。
+    print("\n日志契约：on_message 的每条出口都必须记日志")
+    _root = pathlib.Path(__file__).resolve().parents[2]        # = scaffold/
+    _src = (_root / "modules" / "M2-ingest" / "app.py").read_text(encoding="utf-8")
+    _body = _src.split("def on_message(", 1)[1].split("\ndef ", 1)[0]
+    # 五条失败分支各以一个裸 `return` 收尾；函数体最后一个 return 之后的
+    # 余下部分就是成功路径 —— 它**没有** return，靠走到函数末尾结束。
+    _parts = _body.split("return")
+    _failing, _success_tail = _parts[:-1], _parts[-1]
+
+    def _exits_ok(segments: list[str]) -> bool:
+        return all("LOG." in s for s in segments)
+
+    def _success_ok(tail: str) -> bool:
+        return "LOG." in tail
+
+    _n_fail_logged = sum(1 for s in _failing if "LOG." in s)
+    print(f"  失败分支 {len(_failing)} 条，其中记了日志的 {_n_fail_logged} 条")
+    if not _exits_ok(_failing):
+        fails.append("有失败分支不记日志")
+    if len(_failing) < 5:
+        fails.append(f"on_message 的出口数变了（{len(_failing)} < 5），判据可能已失效")
+    if not _success_ok(_success_tail):
+        fails.append("成功路径不记日志（坑 1 复现）")
+
+    # ★ 成功日志必须能追到具体的行：带出 record_id。
+    if "LOG.info" not in _success_tail or "record_id" not in _success_tail:
+        fails.append("成功日志没带 record_id")
+    # ★ 而 record_id 得由 insert_event 交出来。
+    if "-> int" not in _src.split("def insert_event(", 1)[1][:200]:
+        fails.append("insert_event 没把 record_id 交出来")
+
+    # ★★ 元测试：判据必须能判不过。把成功路径的日志摘掉，谓词要翻脸。
+    print(f"  成功路径段落 {len(_success_tail)} 字符，含日志：{_success_ok(_success_tail)}")
+    if _success_ok("        STATE.inserted += 1\n        STATE.pending_valid += 1\n"):
+        fails.append("元测试：摘掉成功日志后判据没翻脸（判据是摆设）")
+    if _exits_ok(["    return\n"]):
+        fails.append("元测试：无日志的失败分支没被判不过（判据是摆设）")
+
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
 

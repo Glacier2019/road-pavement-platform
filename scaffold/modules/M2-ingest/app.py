@@ -182,7 +182,7 @@ def write_reject(dev: dict[str, Any] | None, event_ts: datetime, issue: str, des
     }], writer=WRITER)
 
 
-def insert_event(ev: WimEvent, dev: dict[str, Any]) -> None:
+def insert_event(ev: WimEvent, dev: dict[str, Any]) -> int:
     """主记录 ＋ 轴组明细，**同一事务**。
 
     ★ 收口时最容易丢的就是这里的原子性：若改成两次 dao.insert(...)，
@@ -213,6 +213,9 @@ def insert_event(ev: WimEvent, dev: dict[str, Any]) -> None:
             "axle_weight_kg": a.weight_kg, "group_weight_kg": a.group_weight_kg,
             "axle_dist_mm": a.dist_mm,
         } for a in ev.payload.axles], on_conflict=("record_id", "axle_seq"))
+    # ★ 把主键交出来，好让调用方记进日志。
+    #   原先返回 None，于是成功路径的日志里说不出「入了哪一条」。
+    return record_id
 
 
 # ----------------------------------------------------------------- MQTT
@@ -281,7 +284,7 @@ def on_message(client, userdata, msg):  # noqa: ANN001
         return
 
     try:
-        insert_event(ev, dev)
+        record_id = insert_event(ev, dev)
     except Exception as exc:  # noqa: BLE001
         with STATE.lock:
             STATE.db_errors += 1
@@ -292,6 +295,16 @@ def on_message(client, userdata, msg):  # noqa: ANN001
     with STATE.lock:
         STATE.inserted += 1
         STATE.pending_valid += 1
+    # ★★★ 成功路径必须**出声**。
+    #   五条失败分支全都记日志，唯独成功这条一声不响 —— 于是
+    #   `docker logs rp-ingest` 只剩 /healthz 的 200 行，
+    #   一条通了三个月的链路读起来像从没通过。
+    #   实测踩过：曾据此断言「从没消费过一条报文」，而 /healthz 的
+    #   received=3 / inserted=1 反证了它。（见同目录 README.md 坑 1）
+    #   带出 record_id 是为了让这条日志能被追到具体的行，而不只是「又入了一条」。
+    LOG.info("入库 device=%s seq=%s → wim_axle_record#%s plate=%s 总重=%.0fkg",
+             ev.device_code, ev.seq, record_id, ev.payload.plate_no,
+             float(ev.payload.gross_weight_kg))
 
 
 MQTT_CLIENT: mqtt.Client | None = None
