@@ -1,16 +1,36 @@
 # ============================================================================
 # M6 统一数据出口 —— 区域帧扩展契约摘要 v0.1
 # ----------------------------------------------------------------------------
-# 本文件是 m6-gateway.v0.3.yaml 的**增量**，只描述 004-region-frame 新增的三条路径。
+# 本文件是 m6-gateway.v0.3.yaml 的**增量**，只描述 004-region-frame 新增的路径。
 # 真源仍是服务运行后自动生成的 /openapi.json；本文件是它的人工摘要，
-# 用于评审与对接，**不参与运行时校验** —— 避免"文档与实现两套真源"。
+# 用于评审与对接。
+#
+# ★★★ 2026-10-11 更正：原文写「**不参与运行时校验** —— 避免'文档与实现两套真源'」。
+#   前半句是错的，后半句是对的，而两者恰好互相矛盾。
+#
+#   实测（T035 的教训）：本文件的路径**声明得对**，但**字段名**是用
+#   prose 写在 `description:` 里的 —— **没有任何机器能比对它**，
+#   于是它静默漂了很久，直到 quickstart 逐条跑验收才暴露：
+#
+#     · 参数名声明 `station_km`，实现收 `station_m`
+#     · 字段名声明 `x` / `y`，实现返 `north_m` / `east_m`
+#     · 字段名声明 `latlon` 点列，实现返 `points`
+#     · 字段 `distance_m` / `on_route` / `assumed` —— **实现里都不存在**
+#
+#   ⇒ **prose 写的契约不是契约，是注释。**
+#     一份"不参与校验"的摘要可以漂到与实现完全无关而没人发现，
+#     而下游文档（quickstart 第 3 步的 `station_km`、第 4 步的 `latlon`）
+#     **正是从这里抄过去的** —— 契约错了两次，被抄了两次。
+#
+#   ★ 修法不是"以后仔细点"，而是**把字段名变成机器可读的 `schema:`**，
+#     由 tests/contract/test_region_frame.py **§13** 拿真实响应的键逐一比对。
+#     自那以后本文件的字段名**参与校验**；路径的声明==实现仍由 **§9** 守。
 #
 # 为什么需要这份契约：宪法 Principle I ——「模块之间唯一的沟通方式是契约」。
 # M9 的新页面要读换算结果，M9 拿不到 PG_DSN，只能经本契约取。
-# 这是模块间的**新接口**，所以必须落成契约，不能靠"两边都知道"。
 #
 # 两侧测试：
-#   M6 侧 —— tests/contract/test_region_frame.py 直接打 rp-api
+#   M6 侧 —— tests/contract/test_region_frame.py §9（路径）/ §13（字段）直接打 rp-api
 #   M9 侧 —— test_console.py 断言新页面只经 /gw/ 取数、自己不碰库
 # ============================================================================
 openapi: 3.1.0
@@ -18,7 +38,8 @@ info:
   title: M6 统一数据出口 —— 区域帧扩展（桩号 ↔ 经纬度）
   version: 0.1.0
   description: >-
-    「桩号 → 经纬度」「经纬度 → 桩号」「整条路线的经纬度折线」三条接口。
+    「桩号 → 经纬度」「经纬度 → 桩号」「整条路线的经纬度折线」「监测断面位置」
+    四条接口。
     换算 = 已验证的线元求值（adapters.geom）+ 本 feature 新写的高斯-克吕格投影。
 
 paths:
@@ -28,39 +49,78 @@ paths:
       description: >-
         FR-001。输入必须包含 section_id —— 桩号单独出现是歧义的
         （毕设 K0+000 与 滨海 K4635+000 是两个不同位置）。
-        同时返回中间量 x/y，让复核者能先只看平面坐标排掉几何错误。
+        同时返回中间量 north_m / east_m，让复核者能先只看平面坐标排掉几何错误。
       parameters:
         - name: section_id
           in: path
           required: true
           schema:
             type: integer
-        - name: station_km
+        # ★★★ 2026-10-11 更正：本参数原先声明为 `station_km` —— **错的**。
+        #   实现收的是 `station_m`（见 modules/M6-api/app.py）。
+        #   写成 station_km 会得到 422 `Field required: station_m`，
+        #   而 422 看着像"被拒"，所以这个错**活着很久没被发现**。
+        #   ★ quickstart 第 3 步的同一个错就是从这份契约抄过去的。
+        - name: station_m
           in: query
           required: true
           schema:
             type: number
-          example: 2.9
+          description: 路段内里程，**单位米**
+          example: 2900
       responses:
         "200":
-          description: >-
-            lat / lon（十进制度，至少 7 位小数）、x / y（中间量）、
-            epsg（4548，FR-003 要求**不得省略**）、zone_number、
-            central_meridian_deg、assumed（从 crs.yaml 读取，不写死）
+          description: 桩号换算结果。
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  section_id: {type: integer}
+                  station_m: {type: number}
+                  north_m: {type: number}
+                  east_m: {type: number}
+                  lat_deg: {type: number}
+                  lon_deg: {type: number}
+                  epsg: {type: integer}
+                  central_meridian_deg: {type: number}
+                  zone_number: {type: integer}
+                  source: {type: string, const: computed_from_station}
+                required: [section_id, station_m, north_m, east_m,
+                           lat_deg, lon_deg, epsg, central_meridian_deg,
+                           zone_number, source]
         "400":
           description: >-
             FR-004：桩号超出该路段范围。**必须报错** ——
             不得返回最近点、不得返回原点、不得返回空对象冒充成功。
+            （实测报文：「桩号 9999.000 m 落在线元链之外…**不外推。**」）
         "404":
-          description: section_id 不存在
-        "422":
-          description: 经纬度落在本带之外（3 度带半宽 1.5°）
+          description: >-
+            section_id 不存在，**或**该路段没有线形单元。
+            ★ 注意这两种情况目前共用 404，报文会说明是哪一种。
+        # ★★ 更正：本路径原先也声明了 `422 经纬度落在本带之外` ——
+        #   这是从 reverse 块抄过来的，**在这条路由上没有意义**：
+        #   本路由的输入是桩号，根本不涉及经纬度。
+        #   本路由真正会出的 422 是**参数缺失或类型错**（FastAPI 自动生成），
+        #   不属于业务契约。
 
   /v1/geometry/sections/{section_id}/geo/reverse:
     get:
-      summary: 经纬度 → 桩号
+      summary: 经纬度 → 最近的桩号（**最近点，不是精确解**）
       description: >-
-        FR-002。允许输入不在线上（断面有宽度），故返回 distance_m 与 on_route。
+        FR-002。允许输入不在线上（断面有宽度），故返回 offset_m 与 offset_band。
+
+        ★★★ **不按"带外就拒"处理**（平台方 2026-10-11 裁决）：
+        对任何经纬度都返回 200，包括离路线 1 281 km 的点 ——
+        它不拒绝，但如实报出残差与分带。
+
+        ★★ 为什么不按带号拒：实测 lon=117.36°E **完全在 39 带内**
+        （离中央子午线仅 0.36°），残差却已达 **371.7 m** ——
+        这个点根本不在路上，而带号检查会放过它。
+        「带外」只是"点不在路上"的一种成因；offset_m 对成因不敏感。
+
+        ★ 更正：原先声明的 `distance_m` / `on_route` / `station_km` 三个字段
+        **实现里都不存在** —— 实际是 offset_m / offset_band / station_m。
       parameters:
         - name: section_id
           in: path
@@ -81,11 +141,51 @@ paths:
           example: 117.35926
       responses:
         "200":
-          description: station_km、on_route、distance_m、epsg、zone_number、assumed
+          description: >-
+            最近点查询结果。★★ `station_m` 是**最近点**的桩号，
+            只有 offset_band=on_roadbed 时才同时是"这个点的桩号"；
+            `station_is_nearest` 显式说出这个区别，
+            否则 264 km 外的查询会拿到一个看着很正常的桩号。
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  section_id: {type: integer}
+                  lat_deg: {type: number}
+                  lon_deg: {type: number}
+                  north_m: {type: number}
+                  east_m: {type: number}
+                  station_m: {type: number}
+                  station_is_nearest: {type: boolean}
+                  offset_m: {type: number}
+                  offset_band:
+                    type: string
+                    enum: [on_roadbed, in_corridor, off_corridor]
+                  offset_bands_m:
+                    type: object
+                    properties:
+                      on_roadbed: {type: number}
+                      in_corridor: {type: number}
+                  epsg: {type: integer}
+                  central_meridian_deg: {type: number}
+                  zone_number: {type: integer}
+                  source: {type: string, const: computed_from_lonlat}
+                required: [section_id, lat_deg, lon_deg, north_m, east_m,
+                           station_m, station_is_nearest, offset_m,
+                           offset_band, offset_bands_m, epsg,
+                           central_meridian_deg, zone_number, source]
         "404":
-          description: section_id 不存在
-        "422":
-          description: 经度落在本带之外
+          description: section_id 不存在，或该路段没有线形单元
+        # ★★ 更正：本路径原先声明 `422 经度落在本带之外` ——
+        #   **实现里没有这道检查**，那正是本次裁决要改掉的说法。
+        #   本路由真正会出的 422 是**参数缺失或类型错**（FastAPI 自动生成），
+        #   不属于业务契约。
+        #
+        # ★ 边界值（5.000 m / 50.000 m）随每次 200 响应里的
+        #   `offset_bands_m` 一起返回。**刻意不另开一条
+        #   `/geo/reverse/bands` 路由** —— 那只会多一个可以漂移的副本，
+        #   而这份契约文件自己就是"副本会漂移"的现成例子。
 
   /v1/geometry/sections/{section_id}/geo/route:
     get:
@@ -95,6 +195,11 @@ paths:
         圆曲线矢高最大 12.588 m、缓和曲线最大 1.736 m，
         只连首末点会把曲线变成折线，正是 1 m 判据要挡的东西。
         同时返回 bbox，它是 SC-002 与 SC-008 的载体。
+
+        ★ 更正：原先写「latlon 点列」—— **键名是 `points`，不是 `latlon`**
+        （实测 `elements[0]` 的键为 element_seq / element_type /
+        start_station_m / end_station_m / points / turn_flag）。
+        ★★ quickstart 第 4 步的同一个错也是从这里抄过去的。
       parameters:
         - name: section_id
           in: path
@@ -110,11 +215,44 @@ paths:
       responses:
         "200":
           description: >-
-            elements（33 项，各含 element_seq、element_type、桩号区间、长度、
-            半径、方位角、latlon 点列）、bbox（lat_min/lat_max/lon_min/lon_max）、
-            epsg、zone_number、assumed
+            整条路线的折线。★ 更正：原先声明 `assumed` —— 本响应**不含**该字段。
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  section_id: {type: integer}
+                  step_m: {type: number}
+                  point_count: {type: integer}
+                  epsg: {type: integer}
+                  central_meridian_deg: {type: number}
+                  zone_number: {type: integer}
+                  source: {type: string}
+                  bbox:
+                    type: object
+                    properties:
+                      lat_min: {type: number}
+                      lat_max: {type: number}
+                      lon_min: {type: number}
+                      lon_max: {type: number}
+                  elements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        element_seq: {type: integer}
+                        element_type: {type: string}
+                        start_station_m: {type: number}
+                        end_station_m: {type: number}
+                        turn_flag: {type: integer}
+                        points:
+                          type: array
+                          items: {type: array}
+                required: [section_id, step_m, point_count, epsg,
+                           central_meridian_deg, zone_number, source,
+                           bbox, elements]
         "404":
-          description: section_id 不存在
+          description: section_id 不存在，或该路段没有线形单元
 
   /v1/geometry/sections/{section_id}/monitor-sections:
     get:
@@ -136,11 +274,65 @@ paths:
             type: integer
       responses:
         "200":
-          description: >-
-            cross_sections（各含 id、station_text、station_m、stored_lat/lon、
-            position_source、unavailable_reason、有位置时的 lat_deg/lon_deg/
-            north_m/east_m、devices）、counts_by_source、position_rule、
-            epsg、central_meridian_deg、zone_number
+          description: 断面位置列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  section_id: {type: integer}
+                  position_rule: {type: string}
+                  counts_by_source:
+                    type: object
+                    properties:
+                      stored: {type: integer}
+                      computed_from_station: {type: integer}
+                      unavailable: {type: integer}
+                  epsg: {type: integer}
+                  central_meridian_deg: {type: number}
+                  zone_number: {type: integer}
+                  cross_sections:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: integer}
+                        station_text: {type: string}
+                        station_m: {type: number}
+                        lane_no: {type: integer}
+                        purpose: {type: string}
+                        status: {type: string}
+                        stored_lat: {}
+                        stored_lon: {}
+                        position_source:
+                          type: string
+                          enum: [stored, computed_from_station, unavailable]
+                        # ★★ 下面三个键**只在有位置时才出现**（FR-010）。
+                        lat_deg: {type: number}
+                        lon_deg: {type: number}
+                        north_m: {type: number}
+                        east_m: {type: number}
+                        # ★ 只在 unavailable 时出现。
+                        unavailable_reason: {type: string}
+                        devices:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id: {type: integer}
+                              sensor_type_code: {type: string}
+                              sensor_model: {type: string}
+                              manufacturer: {type: string}
+                              serial_no: {type: string}
+                              install_mode: {type: string}
+                              simulated: {}
+                              simulated_basis: {type: string}
+                      required: [id, station_text, station_m, position_source,
+                                 devices]
+                required: [section_id, position_rule, counts_by_source, epsg,
+                           central_meridian_deg, zone_number, cross_sections]
+        "404":
+          description: section_id 不存在。★ 与"路段存在但无线形单元"不同 —— 后者走 200
         "503":
           description: 坐标基准不可用，或取数触到仓储行数上限（拒绝返回不完整结果）
 

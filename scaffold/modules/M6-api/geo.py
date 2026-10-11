@@ -456,6 +456,64 @@ def route_lonlat(elements: Sequence[Mapping[str, Any]],
     }
 
 
+# ================================================================ 残差分带（004 收尾）
+#
+# ★★★ 这一节补的是一道**被设计过、写进 docstring、却从来没实现**的闸。
+#
+# 起因：quickstart 第 3 步的验收动作声称「经纬度落在带外 → 报错」，
+# 实测**任何经度都返回 200**（一路扫到 130°E，离中央子午线 13°）。
+# 于是 `spec.md` 的 Edge Cases、`data-model.md` §5、`reverse_lonlat` 的
+# docstring 三处写着同一句话，代码里一个字都没有。
+#
+# ★★ 为什么最终**不按"带外就拒"**来做（平台方 2026-10-11 裁决，读法 B）：
+#
+#   实测 `lon=117.36°E`（**完全在 39 带内**，离中央子午线只有 0.36°）
+#   得到的 `offset_m = 371.7 m` —— 这个点**根本不在路上**，
+#   但带号检查会**放过它**。
+#
+#   ⇒ 「带外」只是「这个点不在路上」的一种成因。用带号当闸，
+#     管住的是一种成因，放过的是同一类错误的其余全部。
+#     而 `offset_m` 直接量「离路线多远」—— 它对成因不敏感，
+#     所以它才是那道闸。
+#
+# ★ 阈值不是拍出来的，是**数据自己给的**（2026-10-11 实测）：
+#
+#   · 设计路基半宽 = 土路肩 0.750 + 硬路肩 0.750 + 分隔带 0.000 + 车道 3.500
+#                   = **5.000 m**（`roadbed_design_point`，section_id=6；全路幅 10.000 m）
+#   · 实测地面点横向覆盖 = 0.019 .. **50.000 m**（`cross_section_ground_point` 2215 点）
+#                   ⇒ **勘察走廊就是 ±50 m**，整数不是巧合
+#
+#   ⇒ 三带，边界都来自上表，没有一个是估计的。
+#
+_ON_ROADBED_MAX_M = 5.0      # 设计路基半宽
+_IN_CORRIDOR_MAX_M = 50.0    # 实测勘察走廊半宽
+
+BAND_ON_ROADBED = "on_roadbed"    # 在路基范围内 —— 桩号就是这个点的桩号
+BAND_IN_CORRIDOR = "in_corridor"  # 在勘察走廊内 —— 附近，但不是路上
+BAND_OFF_CORRIDOR = "off_corridor"  # 走廊之外 —— 残差就是全部答案
+
+
+def offset_band(offset_m: float) -> str:
+    """把「离路线多远」分到三带之一。**三值且穷尽。**
+
+    ★ 为什么分带而不是一个布尔「在不在路上」：
+      布尔会把 5.1 m 和 264 857 m 归成一类，而这两个答案
+      在工程上的含义差着四个数量级（一个在路肩外，一个在另一个地级市）。
+      调用方需要知道的是**差多远**，不是一个"否"。
+
+    ★ 边界用 `<=`：边界值归**更靠近路线**的那一带。
+      理由与 `geom.locate` 的「共享边界归前一个元素」无关 ——
+      那一条是**位置歧义**（同一个点属于哪个线元），
+      这一条是**分类保守性**（差 5.000 m 整，算路上还是路肩外）。
+      两者恰好都用了含左的写法，但原因不同，不要互相援引。
+    """
+    if offset_m <= _ON_ROADBED_MAX_M:
+        return BAND_ON_ROADBED
+    if offset_m <= _IN_CORRIDOR_MAX_M:
+        return BAND_IN_CORRIDOR
+    return BAND_OFF_CORRIDOR
+
+
 def reverse_lonlat(elements: Sequence[Mapping[str, Any]],
                    lat_deg: float, lon_deg: float,
                    gf: Mapping[str, Any],
@@ -466,9 +524,21 @@ def reverse_lonlat(elements: Sequence[Mapping[str, Any]],
       但从 (经, 纬) 回到**桩号**要在这条折线上找最近点 —— 那是一个搜索，
       没有闭式。本函数先粗扫（`coarse_m` 一档）再在邻域细化。
 
-    ★ 输出带 `offset_m`：最近点与查询点的距离。**不隐藏它** ——
-      调用方拿到一个 500 m 外的"最近桩号"却不知道，是最容易出的事。
-      超过 `max_offset_m` 一律抛错，不给一个远在天边的答案。
+    ★★ `station_m` 是**最近点的桩号**，不是"这个点的桩号" ——
+      当查询点不在路上时（`offset_band != "on_roadbed"`），
+      它只是"离你最近的那个位置在哪"，**不能当成查询点的位置用**。
+      `station_is_nearest` 把这个区别显式说出来。
+
+    ★★★ 回答一句前任 docstring 留下的问题（原文：「超过 `max_offset_m`
+      一律抛错，不给一个远在天边的答案。」）——
+      **`max_offset_m` 这个参数从来没有存在过，代码也没抛过错。**
+
+      平台方 2026-10-11 的裁决是**不抛错**：把残差如实分带报出来。
+      理由是同一道闸要能挡住"带号错"以外的成因 ——
+      实测 `lon=117.36°E`（带内）残差已达 371.7 m，带号检查会放过它。
+      详见本文件上方「残差分带」一节的实测数据。
+
+      ⇒ 现在 docstring 与代码一致：**不拒绝，但绝不隐藏。**
     """
     if coarse_m <= 0:
         raise ValueError(f"coarse_m 必须为正，收到 {coarse_m}")
@@ -505,17 +575,29 @@ def reverse_lonlat(elements: Sequence[Mapping[str, Any]],
     best_d = dist(best_s)
 
     north, east = point_north_east(elements, best_s)
+    band = offset_band(best_d)
     return {
         "lat_deg": lat_deg,
         "lon_deg": lon_deg,
         "north_m": north,
         "east_m": east,
         "station_m": best_s,
+        # ★★ 说清 `station_m` 是什么：它是**最近点**的桩号。
+        #    只有在 on_roadbed 时，它才同时也是"这个点的桩号"。
+        "station_is_nearest": band != BAND_ON_ROADBED,
         "offset_m": best_d,
+        "offset_band": band,
+        "offset_bands_m": {"on_roadbed": _ON_ROADBED_MAX_M,
+                           "in_corridor": _IN_CORRIDOR_MAX_M},
         "epsg": gf.get("epsg_after_confirm"),
         "central_meridian_deg": cm,
         "zone_number": gf.get("zone_number"),
-        "source": "computed_from_station",
+        # ★★★ 原先这里写的是 "computed_from_station" —— **方向说反了**。
+        #     本函数的输入是经纬度，桩号才是推出来的。
+        #     "computed_from_station" 是 station_to_lonlat 的措辞
+        #     （那里桩号是输入）。两个方向共用一个字符串，
+        #     等于一个溯源自称了一件与事实相反的事。
+        "source": "computed_from_lonlat",
     }
 
 

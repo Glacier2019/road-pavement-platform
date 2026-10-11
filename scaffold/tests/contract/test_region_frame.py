@@ -786,6 +786,177 @@ def main() -> int:
           "★ 元测试：那条区域帧判据**抓得住** NULL→0（这是它存在的理由）",
           "(0,0) 在区域帧之外 → 判据会红")
 
+    # ============================================================ 12) 残差分带
+    #
+    # ★★★ 这一节补的是一道**被设计过、写进 docstring、从来没实现**的闸。
+    #   `reverse_lonlat` 的前任 docstring 写着「超过 max_offset_m 一律抛错」，
+    #   而签名里根本没有 max_offset_m —— 文档在，代码没有。
+    #   spec 的 Edge Cases 与 data-model §5 也写着「带外 → 报错」。
+    #   实测：任何经度都返回 200（一路扫到 130°E）。
+    print("\n=== 12) 残差分带：带号管不住的那一类，offset 管得住 ===")
+
+    # ---- 三值且穷尽
+    _bands = {GEO.offset_band(d) for d in
+              (0.0, 1.0, 5.0, 5.001, 12.0, 50.0, 50.001, 371.7, 264857.9)}
+    check(_bands == {"on_roadbed", "in_corridor", "off_corridor"},
+          "offset_band 取值恰好是三带（不多不少）",
+          f"实际 {sorted(_bands)}")
+
+    # ---- 边界来自**实测数据**，不是估计：
+    #     5.0  = roadbed_design_point 的设计路基半宽 0.75+0.75+0+3.5
+    #     50.0 = cross_section_ground_point 实测横向覆盖 0.019..50.000
+    for d, want in ((5.0, "on_roadbed"), (5.001, "in_corridor"),
+                    (50.0, "in_corridor"), (50.001, "off_corridor")):
+        check(GEO.offset_band(d) == want, f"offset_m={d} → {want}",
+              f"实际 {GEO.offset_band(d)}")
+    check(GEO._ON_ROADBED_MAX_M == 5.0 and GEO._IN_CORRIDOR_MAX_M == 50.0,
+          "★ 两条边界等于实测值（设计路基半宽 5.000 / 勘察走廊半宽 50.000）",
+          f"{GEO._ON_ROADBED_MAX_M} / {GEO._IN_CORRIDOR_MAX_M}")
+
+    # ---- ★★★ 本节的核心一条，也是选 B 不选 A 的**实测理由**：
+    #       lon=117.36°E **完全在 39 带内**（离中央子午线只有 0.36°），
+    #       实测残差却是 371.7 m —— 这个点根本不在路上。
+    #       ⇒ 「带外就拒」会**放过它**。
+    check(GEO.offset_band(371.7) == "off_corridor",
+          "★ 带内的远点（371.7 m，实测值）落在 off_corridor —— 带号检查会放过它",
+          "这正是「用 offset 当闸、不用带号当闸」的实测依据")
+
+    # ---- 端到端：真元素 + 真经纬度
+    _rev = GEO.reverse_lonlat(els6, 25.18, 120.0, gf())
+    check(_rev.get("offset_band") == "off_corridor",
+          "★ /geo/reverse 经度 120°E（带外 3°）→ offset_band=off_corridor",
+          f"offset_m={_rev.get('offset_m')} band={_rev.get('offset_band')}")
+    check(_rev.get("station_is_nearest") is True,
+          "★★ 且 station_is_nearest=True（桩号是最近点的，不是这个点的）",
+          f"station_m={_rev.get('station_m')}")
+    check(abs(_rev.get("station_m") - max(e["end_station_m"] for e in els6)) < 1e-4,
+          "★ 桩号确实钳到了链尾（这说明为什么必须给 station_is_nearest）",
+          f"station_m={_rev.get('station_m')} 链尾={max(e['end_station_m'] for e in els6)}")
+    check(_rev.get("offset_bands_m") == {"on_roadbed": 5.0, "in_corridor": 50.0},
+          "响应把两条边界一并报出来（调用方不用猜阈值）",
+          str(_rev.get("offset_bands_m")))
+    check(_rev.get("source") == "computed_from_lonlat",
+          "★★ source 是 computed_from_lonlat —— 输入是经纬度，桩号才是推出来的",
+          f"实际 {_rev.get('source')}")
+
+    # ---- ★★ 反向对照：拿**路线自己的点**回灌，必须回到同一个桩号、残差≈0。
+    #      ★ 一开始我随手猜了一个「近点」(25.19,117.36)，实测残差 294 m ——
+    #      猜的点根本不近。**对照样本不能猜，要从这条路自己身上取。**
+    _fwd = GEO.station_to_lonlat(els6, 2000.0, gf())
+    _back = GEO.reverse_lonlat(els6, _fwd["lat_deg"], _fwd["lon_deg"], gf())
+    check(abs(_back["station_m"] - 2000.0) < 1.0,
+          "★★ 往返闭环：K2+000 正算再反算，回到同一个桩号（±1 m）",
+          f"2000.0 → {_back['station_m']}")
+    check(_back["offset_m"] < 1e-3 and _back["offset_band"] == "on_roadbed",
+          "★★ 且残差 < 1 mm、落在 on_roadbed —— 这就是「在路上」应有的样子",
+          f"offset_m={_back['offset_m']} band={_back['offset_band']}")
+    #
+    # ★★ 容差为什么是 1 mm：`reverse_lonlat` 自己只细化到 1 mm
+    #    （docstring：「在 best_s ± coarse_m 内二分到 1 mm」）。
+    #    实测残差 **0.0398 mm**、往返桩号差 **0.031 mm** —— 远好于它承诺的。
+    #    ★ 我第一版把容差写成 1e-6（1 微米），**比这个函数承诺的分辨率还严**，
+    #    于是断言在一个完全正常的实现上变红。
+    #    **容差不能比被测函数自己声明的精度更紧**，
+    #    否则测的是浮点噪声，不是行为。
+    check(_back["station_is_nearest"] is False,
+          "★ 在路上时 station_is_nearest=False（桩号就是这个点的）",
+          f"{_back['station_is_nearest']}")
+
+    # ---- 元测试 1：把 50 m 那道边界放大到 1000 m，核心断言必须红
+    _src = (ROOT / "modules" / "M6-api" / "geo.py").read_text(encoding="utf-8")
+    _loose = _src.replace("_IN_CORRIDOR_MAX_M = 50.0", "_IN_CORRIDOR_MAX_M = 1000.0", 1)
+    check(_loose != _src, "元测试：走廊边界的注入点存在", "已注入")
+    _ns = {"__name__": "loose_geo"}
+    exec(compile(_loose, "loose_geo.py", "exec"), _ns)       # noqa: S102
+    check(_ns["offset_band"](371.7) != "off_corridor",
+          "★ 元测试：把走廊放大到 1000 m，371.7 m 就**不再是** off_corridor —— "
+          "上面那条断言确实在读这个阈值",
+          f"实际 {_ns['offset_band'](371.7)}")
+
+    # ---- 元测试 2：把 source 改回旧字符串，那条断言必须红
+    _wrong = _src.replace('"source": "computed_from_lonlat"',
+                          '"source": "computed_from_station"', 1)
+    check(_wrong != _src, "元测试：source 的注入点存在", "已注入")
+    _ns2 = {"__name__": "wrong_geo"}
+    exec(compile(_wrong, "wrong_geo.py", "exec"), _ns2)      # noqa: S102
+    check(_ns2["reverse_lonlat"](els6, 25.18, 120.0, gf())["source"]
+          != "computed_from_lonlat",
+          "★ 元测试：改回 computed_from_station，那条断言会红",
+          "方向说反的标签确实能被抓住")
+
+    # ================================================ 13) 契约字段名 ↔ 真实响应
+    #
+    # ★★★★★ 这一节为什么存在：
+    #   §9 比的是**路径**（声明 == 实现），它**看不到字段名**。
+    #   而本契约原先把字段名写在 prose `description:` 里 ——
+    #   **没有任何机器能比对它**，于是它静默漂了很久：
+    #     参数 `station_km`（实现收 station_m）
+    #     字段 `x` / `y`（实现返 north_m / east_m）
+    #     字段 `latlon`（实现返 points）
+    #     字段 `distance_m` / `on_route` / `assumed`（**实现里都不存在**）
+    #   ★★ 更糟的是下游文档正从这份契约抄：quickstart 的 `station_km`
+    #      与 `latlon` 两个错，源头都在这里。**契约错了两次，被抄了两次。**
+    #
+    #   ⇒ 修法不是"以后仔细点"，是**把字段名变成机器可读的 `schema:`**，
+    #     然后在这里逐一比对。**prose 写的契约不是契约，是注释。**
+    print("\n=== 13) 契约字段名 ↔ 真实响应键（m6-gateway.geo.v0.1）===")
+
+    def _declared(path: str) -> set:
+        """契约声明的 200 响应字段名。"""
+        return set(doc["paths"][path]["get"]["responses"]["200"]
+                   ["content"]["application/json"]["schema"]["properties"])
+
+    #    路径模板 → (实际请求 URL, 查参, **允许缺失的条件字段**)
+    #    ★ 条件字段列出来是**声明**，不是放行：FR-010 要求
+    #      lat_deg/lon_deg 在算不出来时**必须缺席**，
+    #      所以它们不能进 required，比对时也就不能要求它们必然出现。
+    _CASES = [
+        ("/v1/geometry/sections/{section_id}/geo",
+         f"/v1/geometry/sections/{sid}/geo", {"station_m": 300.0}, set()),
+        ("/v1/geometry/sections/{section_id}/geo/reverse",
+         f"/v1/geometry/sections/{sid}/geo/reverse",
+         {"lat": 25.19, "lon": 117.36}, set()),
+        ("/v1/geometry/sections/{section_id}/geo/route",
+         f"/v1/geometry/sections/{sid}/geo/route", {"step_m": 20.0}, set()),
+        ("/v1/geometry/sections/{section_id}/monitor-sections",
+         f"/v1/geometry/sections/{sid}/monitor-sections", {},
+         {"unavailable_reason"}),
+    ]
+
+    for tpl, url, params, _opt in _CASES:
+        want_f = _declared(tpl)
+        resp = c.get(url, params=params)
+        check(resp.status_code == 200, f"13 · {tpl} 可请求", f"HTTP {resp.status_code}")
+        got = set(resp.json().keys())
+        # ---- ① 契约声明了、真实响应里没有 → 契约要么写错，要么漏标"条件出现"
+        gone = sorted(want_f - got)
+        check(not gone, f"13 · {tpl} 声明的字段都真的出现",
+              f"★ 声明了但响应里没有：{gone}")
+        # ---- ② 真实响应里有、契约没声明 → 契约漏了字段
+        extra = sorted(got - want_f)
+        check(not extra, f"13 · {tpl} 没有未声明的字段",
+              f"★ 响应里有但契约没声明：{extra}")
+
+    # ---- 元测试：把契约里 `station_m` 改名成 `x`，上面第①条必须红。
+    #    ★ 这是本节存在的**唯一理由** —— 证明它读的真是契约里的名字，
+    #      而不是把实际响应抄了一遍当期望值。
+    _cfg = GEO_CONTRACT.read_text(encoding="utf-8")
+    _broken = _cfg.replace("                  station_m: {type: number}\n"
+                           "                  north_m: {type: number}\n"
+                           "                  east_m: {type: number}\n",
+                           "                  x: {type: number}\n"
+                           "                  y: {type: number}\n", 1)
+    check(_broken != _cfg, "元测试：契约字段名的注入点存在", "已注入")
+    _bdoc = yaml.safe_load(_broken)
+    _bwant = set(_bdoc["paths"]["/v1/geometry/sections/{section_id}/geo"]
+                 ["get"]["responses"]["200"]["content"]["application/json"]
+                 ["schema"]["properties"])
+    _bgot = set(c.get(f"/v1/geometry/sections/{sid}/geo",
+                      params={"station_m": 300.0}).json().keys())
+    check(_bwant - _bgot,
+          "★ 元测试：把契约里的 station_m 改成 x，比对立刻发现「声明了但没有」",
+          f"注入后差集 = {sorted(_bwant - _bgot)}")
+
     print("\n" + "=" * 72)
     if fails:
         print(f"失败 {len(fails)} 项：")
