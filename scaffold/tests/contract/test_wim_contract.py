@@ -183,6 +183,117 @@ def main() -> int:
     if _exits_ok(["    return\n"]):
         fails.append("元测试：无日志的失败分支没被判不过（判据是摆设）")
 
+    # ==================================== 轮载 → 轴载：Chrono 那半边的报文也得合规
+    # ★ 这一段的夹具是**内联**的：不读 wheel_loads.csv（101 MB），也不读宿主上的
+    #   车型 JSON（/home/zhanghe/…）。依赖宿主路径的检查在别处只会变成「跳过」，
+    #   而跳过不是通过。
+    print("\n轮载→轴载：Chrono 仿真导出的轮载要能变成合规报文")
+    _conv_path = ROOT / "simulator" / "crg" / "chrono_to_wim.py"
+    if not _conv_path.exists():
+        fails.append(f"转换器不见了：{_conv_path}")
+    else:
+        _spec = importlib.util.spec_from_file_location("chrono_to_wim", _conv_path)
+        _conv = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_conv)
+
+        # 两轴车，左右各一轮。Fz 单位 kN。
+        _row = {
+            "t_s": "201.75", "s_m": "2899.81", "speed_mps": "14.2807",
+            "heading_deg": "158.878",
+            "a0_L_Fz_kN": "12.6100", "a0_R_Fz_kN": "12.6100",
+            "a1_L_Fz_kN": "12.6700", "a1_R_Fz_kN": "12.6700",
+        }
+        _ax = _conv.parse_wheel_row(_row)
+        print(f"  两轴车解析出 {len(_ax)} 根轴：{sorted(_ax)}")
+        if sorted(_ax) != [0, 1]:
+            fails.append(f"轴号解析不对：{sorted(_ax)}")
+
+        _env = _conv.build_envelope(
+            _row, device_code="SIMWIM01", lane_no=2, direction="up",
+            wheelbase_mm=3378.0, seq=2900, ts="2026-10-11T09:44:21+08:00",
+        )
+        _pl = _env["payload"]
+        _seqs = [a["axle_seq"] for a in _pl["axles"]]
+        print(f"  axle_seq={_seqs}  轴距={[a['dist_mm'] for a in _pl['axles']]}"
+              f"  总重={_pl['gross_weight_kg']}kg")
+
+        if _seqs != [1, 2]:
+            fails.append(f"axle_seq 不是从 1 连续：{_seqs}")
+        if _pl["axles"][1]["dist_mm"] != 3378.0:
+            fails.append("第二轴 dist_mm 没跟着车型轴距走")
+        _sum_kg = round(sum(a["weight_kg"] for a in _pl["axles"]), 1)
+        if abs(_pl["gross_weight_kg"] - _sum_kg) > 1e-9:
+            fails.append(f"总重不是轴重之和：{_pl['gross_weight_kg']} vs {_sum_kg}")
+        # 报告里标的车型代号必须与轴数一致（2 轴 → A2）
+        if _pl["axle_type_code"] != "A2" or _pl["axle_num"] != 2:
+            fails.append(f"轴数/代号不符：{_pl['axle_num']} → {_pl['axle_type_code']}")
+        # 内联夹具也要过真契约
+        try:
+            jsonschema.validate(_env, SCHEMA)
+        except jsonschema.ValidationError as exc:
+            fails.append(f"转换器出的报文过不了契约：{exc.message}")
+
+        # 自检本身得说「通过」
+        _probs = _conv.self_check(_env, _row)
+        if _probs:
+            fails.append(f"转换器自检不通过：{_probs}")
+
+        # ★★★ 元测试的判据必须区分「主动拒绝」与「意外崩溃」。
+        #   第一版只接 SystemExit：守卫摘掉后失败形态变成 KeyError，穿透出去
+        #   把整个文件带崩 —— 报不出是哪条失败，而且崩在前一条上会让后面的
+        #   元测试根本没机会跑，一次破坏掩盖另外两次。
+        #   第二版把 except 放宽到 Exception：崩了也算「被拒」——于是这条元测试
+        #   **无论守卫生死都绿**，成了纯粹的摆设。
+        #   第三版（现在）分开判：SystemExit = 主动拒绝（过）；别的异常 = 点名失败。
+        def _refusal(fn) -> str:
+            """返回 "" 表示主动拒绝了；否则返回「为什么这不算拒绝」。"""
+            try:
+                fn()
+            except SystemExit:
+                return ""
+            except Exception as exc:
+                return (f"崩在 {type(exc).__name__}: {exc}"
+                        f"—— 守卫摘掉后失败形态变了，这不是主动拒绝")
+            return "根本没被拒"
+
+        # ★★ 元测试一：半根轴必须被拒。缺一个轮会让轴载少一半，
+        #    而 gross 也是按缺了轮的和算的 —— 总重一致性检查**照样通过**。
+        _half = {k: v for k, v in _row.items() if k != "a1_R_Fz_kN"}
+        _why = _refusal(lambda: _conv.parse_wheel_row(_half))
+        if _why:
+            fails.append(f"元测试：缺一半轮的轴没被拒 —— {_why}")
+
+        # ★★ 元测试二：轴数在枚举外必须被拒，不许硬凑一个代号。
+        _seven = dict(_row)
+        for _i in range(2, 7):
+            _seven[f"a{_i}_L_Fz_kN"] = "10.0"
+            _seven[f"a{_i}_R_Fz_kN"] = "10.0"
+        _why = _refusal(lambda: _conv.build_envelope(
+            _seven, device_code="X", lane_no=2, direction="up",
+            wheelbase_mm=3378.0, seq=1, ts="2026-10-11T00:00:00+08:00",
+        ))
+        if _why:
+            fails.append(f"元测试：7 轴车没被拒（枚举外硬凑代号）—— {_why}")
+
+        # ★★ 元测试三：总重被改坏时 self_check 必须翻脸。
+        _broken = copy.deepcopy(_env)
+        _broken["payload"]["gross_weight_kg"] = 9999.0
+        if not _conv.self_check(_broken, _row):
+            fails.append("元测试：总重被改坏后自检没翻脸（判据是摆设）")
+
+        # ★★ 元测试四：_refusal 本身要有分辨力 —— 它必须把「崩」和「拒」分开。
+        #    没有这一条，上面两条元测试的正确性就没有东西在守。
+        if _refusal(lambda: (_ for _ in ()).throw(KeyError(7))) == "":
+            fails.append("元测试：_refusal 把崩溃当成了主动拒绝（判据是摆设）")
+        if _refusal(lambda: None) == "":
+            fails.append("元测试：_refusal 把「没被拒」判成了拒绝（判据是摆设）")
+
+        # ★★ 元测试三：总重被改坏时 self_check 必须翻脸。
+        _broken = copy.deepcopy(_env)
+        _broken["payload"]["gross_weight_kg"] = 9999.0
+        if not _conv.self_check(_broken, _row):
+            fails.append("元测试：总重被改坏后自检没翻脸（判据是摆设）")
+
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
 
