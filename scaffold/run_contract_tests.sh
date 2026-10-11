@@ -65,6 +65,12 @@ TESTS=(
   #   一边是"M9 越权了"，一边是"少了一列/少了一个产物"，所以分开成组。
   #   它**不打真库、不起容器**，只读交付目录 + 用 TestClient 走 M9 路由。
   "仿真轨迹|003 US2–US5：轨迹四列位姿、沿程量无数据编码、产物降级、视频 Range、带号假定|M9|CONSOLE|tests/contract/test_sim_track.py"
+  # ★ Node 套件（见上面 NODE 那一档）。它把 sim.html 的**内联脚本原样**跑起来，
+  #   用真实产物喂它，然后读它算出来的数 —— 补的正是 test_sim_track.py 补不上的那一块：
+  #   那一组检查"页面有没有越权、产物在不在"，这一组检查"页面的算术对不对"。
+  #   `node --check` 只证明能被解析；页面里的解网格、算曲率、按里程取轮荷、
+  #   投影求符号位置，是可以拿真实数据独立跑一遍的。
+  "仿真页算术|003 页面内联脚本：网格解码/曲率/按里程取轮荷/投影符号位（真产物，无浏览器）|M9|NODE|tests/integration/sim_inline_script.mjs"
 )
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -104,6 +110,24 @@ for t in "${TESTS[@]}"; do
     CONSOLE) dep_args=("${CONSOLE_DEPS[@]}") ;;
     *)   dep_args=("${PY_DEPS[@]}") ;;
   esac
+
+  # ★ Node 套件走 node 直跑，不过 uv。
+  #   为什么要有这一档：M9 的页面是**自包含 HTML（内联脚本）**，
+  #   而 `node --check` 只证明它能被解析、不证明它算得对。
+  #   sim_inline_script.mjs 把那段内联脚本**原样**跑起来、用真实产物喂它，
+  #   所以它属于契约测试（离线、无 Docker），但不属于 Python。
+  if [[ "$deps" == "NODE" ]]; then
+    if out=$(node "$file" 2>&1); then
+      last=$(echo "$out" | tail -1)
+      printf '%-12s %-8s %s\n' "$name" "$mod" "$last"
+      ((pass++))
+    else
+      last=$(echo "$out" | tail -1)
+      printf '%-12s %-8s %s\n' "$name" "$mod" "${last:-失败}"
+      ((fail++)); failed_names+=("$name")
+    fi
+    continue
+  fi
 
   if out=$(uv run --quiet "${dep_args[@]}" "$file" 2>&1); then
     last=$(echo "$out" | tail -1)
