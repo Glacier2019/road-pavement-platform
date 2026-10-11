@@ -101,3 +101,7 @@ scaffold/work/*
 # answer-me-with-html 的页面缓存。默认落在 ~/.answer-me-with-html，
 # 但本开发沙箱的 $HOME 只读，故用 AM_HOME 指到仓库内。
 .amhome/
+
+# ★ 2026-10-11 补：AM_HOME 若被写成相对路径，页面会落到 artifacts/am-home/。
+#   artifacts/ 是交付物目录，运行期缓存混进来会被当成产物。
+artifacts/am-home/
