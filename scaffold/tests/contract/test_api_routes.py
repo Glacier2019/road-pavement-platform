@@ -40,6 +40,7 @@ from starlette.routing import Match
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_PATH = ROOT / "modules" / "M6-api" / "app.py"
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "m6-gateway.v0.3.yaml"
+OPENAPI_DIR = ROOT / "contracts" / "openapi"
 
 # M3（rpdao）是 api 的依赖。本测试直接从源码路径加载 app.py，故需手动把
 # modules/M3-rpdao/ 放进 sys.path —— **必须在 import rpdao 之前**（容器里由
@@ -136,13 +137,26 @@ def own_method(route) -> str:
 
 
 def contract_paths() -> set[str]:
-    """从 openapi 契约里抽出路径（不引 pyyaml，按缩进解析即可）。"""
+    """从 openapi 契约里抽出路径（不引 pyyaml，按缩进解析即可）。
+
+    ★ 契约是**多份的**：v0.3 是骨架期那一次冻结的正本，此后每个 feature 的
+      扩展各自成一份 `m6-gateway.<feature>.v0.1.yaml`（宪法原则 I 禁止就地改
+      已发布的契约，所以只能加新文件）。声明面 = 这些文件的**并集**。
+    ★ 只看 v0.3 的话，加了路由的实现会被判成「实现缺契约」—— 004 的区域帧
+      就是这么红的。那不是实现错，是这条测试当时只认识一份契约。
+    """
     paths = set()
-    for line in CONTRACT_PATH.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^  (/\S*):\s*$", line)
-        if m:
-            paths.add(m.group(1))
+    files = sorted(OPENAPI_DIR.glob("m6-gateway*.yaml"))
+    for f in files:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"^  (/\S*):\s*$", line)
+            if m:
+                paths.add(m.group(1))
     return paths
+
+
+def contract_files() -> list[pathlib.Path]:
+    return sorted(OPENAPI_DIR.glob("m6-gateway*.yaml"))
 
 
 class _FakeLo:
@@ -277,6 +291,8 @@ def main() -> int:
     only_doc = sorted(doc - impl)
     only_impl = sorted(impl - doc)
     print(f"契约声明 {len(doc)} 条 / 实现 {len(impl)} 条")
+    print(f"  契约来源 {len(contract_files())} 份："
+          + "、".join(f.name for f in contract_files()))
     if only_doc:
         print(f"  ✗ 契约有、实现没有：{only_doc}")
         fails.append(f"契约缺实现：{only_doc}")

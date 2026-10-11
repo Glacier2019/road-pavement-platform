@@ -1,0 +1,516 @@
+"""契约测试：M6 区域帧 —— 桩号 ↔ 经纬度（004-region-frame）。
+
+运行（**不需要数据库、不需要容器、不需要网络**）：
+  cd /data/cy/shujuku/scaffold
+  ./run_contract_tests.sh 区域帧
+  # 或直接：
+  UV_CACHE_DIR="$PWD/../.uvcache" UV_PYTHON_INSTALL_DIR="$PWD/../.uvpython" \\
+    uv run --quiet --with fastapi==0.115.6 --with httpx --with pyyaml --with pyyaml \\
+    python tests/contract/test_region_frame.py
+
+==================== 这条测试为什么存在 ====================
+把桩号变成经纬度是「几何 → 投影 → 经纬度」三步。**两步都可能静默出错**：
+
+  · 几何那步漏掉 `turn_flag` → 右转的曲线朝反方向弯。实测（本文件第 7 组）
+    seq31 号圆曲线的终点差 **98.2664 m**，而 `geom` 自己的 docstring 写着
+    「实测终点差 98 m，**而且不报错**」。98 m 是 1 m 判据的 98 倍。
+  · 投影那步取错带号 → 位置差几百公里，而**路的形状完全正确**。
+
+两件事都不会抛异常。所以本测试不满足于"跑通"，它做三件更难的事：
+  1. **两侧判据**。只判「偏差 < 1 m」是不够的 —— 在直线段上线性插值本来就
+     精确（实测 1e-6 m），这个判据在直线上恒过，属于空转。所以还判**下限**：
+     曲线元素上的偏差必须落在一个由该元素半径算出来的区间内。
+  2. **同向对照**。SC-008 把中央子午线从 117°E 换成 114°E，落点检查**必须失败**；
+     换回来必须通过。一个只在正确参数下通过的检查，不是检查。
+  3. **反向对照**。故意丢掉 `turn_flag`，**右转**元素的终点偏差必须跳到 ~98 m，
+     而**左转**元素必须纹丝不动（因为 `geom` 的缺省 `sgn=+1` 恰好等于左转）。
+     ★ 这一条最容易被写错：随手挑一个曲线元素做对照，有一半概率挑到左转的，
+       于是对照恒过 —— 那不是对照，是装饰。
+
+数据来源：`tests/contract/fixtures/route_geometry.json`（真实数据，自活库导出）。
+用它喂一个假 DAO，于是既不碰数据库，又跑在**真几何**上。
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import math
+import pathlib
+import sys
+
+from fastapi.testclient import TestClient
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+APP_PATH = ROOT / "modules" / "M6-api" / "app.py"
+GEO_PATH = ROOT / "modules" / "M6-api" / "geo.py"
+M2GEOM = ROOT / "modules" / "M6-api" / "m2geom"
+M2_ADAPTERS = ROOT / "modules" / "M2-ingest" / "adapters"
+CRS_PATH = ROOT / "modules" / "M9-console" / "config" / "crs.yaml"
+GEO_CONTRACT = ROOT / "contracts" / "openapi" / "m6-gateway.geo.v0.1.yaml"
+FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "route_geometry.json"
+
+# app.py 用 load_crs() 找配置；测试里把它指到仓库里的那一份。
+# ★ 与容器一致：容器里 Dockerfile 把它 COPY 成 /app/crs.yaml，WORKDIR=/app。
+import os  # noqa: E402
+os.environ.setdefault("RP_CRS_CONFIG", str(CRS_PATH))
+
+for p in (ROOT / "modules" / "M3-rpdao", ROOT / "modules" / "M6-api"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+
+def _ensure_pg_driver():
+    """app.py 在 import 期就 import psycopg。本测试不触库，缺就用桩顶上。"""
+    try:
+        import psycopg  # noqa: F401
+        import psycopg_pool  # noqa: F401
+        return
+    except ImportError:
+        pass
+    import types
+    if "psycopg" not in sys.modules:
+        psycopg = types.ModuleType("psycopg")
+        rows = types.ModuleType("psycopg.rows")
+        rows.dict_row = type("dict_row", (), {})
+        psycopg.rows = rows
+        sys.modules["psycopg"], sys.modules["psycopg.rows"] = psycopg, rows
+    if "psycopg_pool" not in sys.modules:
+        pool = types.ModuleType("psycopg_pool")
+
+        class ConnectionPool:
+            def __init__(self, *a, **k): pass
+            def open(self): pass
+            def close(self): pass
+            def connection(self, *a, **k):
+                raise RuntimeError("本测试不应触达数据库")
+
+        pool.ConnectionPool = ConnectionPool
+        sys.modules["psycopg_pool"] = pool
+    print("⚠ 未检测到 psycopg/psycopg_pool，已用桩替代（本测试不触库）\n")
+
+
+_ensure_pg_driver()
+
+from rpdao import NotFound  # noqa: E402  （须在 sys.path 与 psycopg 桩就位之后）
+
+
+def load_app():
+    spec = importlib.util.spec_from_file_location("geo_api_app", APP_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["geo_api_app"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_geo():
+    spec = importlib.util.spec_from_file_location("geo_mod_under_test", GEO_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["geo_mod_under_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+FIX = json.loads(FIXTURE.read_text(encoding="utf-8"))
+GEO = load_geo()
+APP = load_app()
+
+
+# ============================================================ 假 DAO（夹具驱动）
+
+class _FakeGe:
+    """返回**真实**的 33 行线元与交点。数据来自夹具，不来自数据库。"""
+
+    def __init__(self, elements=None):
+        self._elements = elements if elements is not None else FIX["alignment_element"]
+
+    def alignment(self, section_id):
+        if section_id != FIX["section_id"]:
+            raise NotFound(f"路段 {section_id} 不存在")
+        return {"section_id": section_id,
+                "pis": [],
+                "elements": [dict(r) for r in self._elements]}
+
+    def sections(self):
+        return FIX["road_section"]
+
+    def section(self, section_id):
+        if section_id != FIX["section_id"]:
+            raise NotFound(f"路段 {section_id} 不存在")
+        return FIX["road_section"][0]
+
+
+class _FakeDao:
+    def __init__(self, elements=None):
+        self.ge = _FakeGe(elements)
+
+    def ping(self): return True
+    def pool_stats(self): return {"pool_size": 0, "pool_available": 0}
+    def open(self): return self
+    def close(self): pass
+
+
+def sha256(p: pathlib.Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+# ============================================================ 工具
+
+def elements():
+    return GEO.as_adapter_elements(FIX["alignment_element"])
+
+
+def gf():
+    return GEO.load_crs(CRS_PATH)
+
+
+def grid_points():
+    """`geometry_point` 缓存，键是桩号（米）。"""
+    return {round(r[0] * 1000.0, 6): (r[1], r[2]) for r in FIX["geometry_point"]}
+
+
+def non_grid_station(el, frac=0.37, grid=20.0, seams=None):
+    """在线元 `el` 内部取一个桩号，**同时避开三样东西**：
+       ① 20 m 缓存格点（否则对照退化成读缓存自身）；
+       ② 线元接缝（接缝处 `locate` 归前一个元素，两种归属差 0.69 mm）；
+       ③ 太靠近元素端点（那里 `point_at` 走 `d<=0` 分支，直接返回落库起点）。
+    ★ 这三条都是实测出来的，不是防御性编程。
+    """
+    s0, s1 = el["start_station_m"], el["end_station_m"]
+    s = s0 + (s1 - s0) * frac
+    for _ in range(50):
+        off_grid = abs(s / grid - round(s / grid)) * grid > 2.0
+        far_ends = (s - s0 > 5.0) and (s1 - s > 5.0)
+        far_seams = all(abs(s - x) > 2.0 for x in (seams or []))
+        if off_grid and far_ends and far_seams:
+            return s
+        s += 1.3
+    raise AssertionError(f"seq{el.get('seq')} 找不到合规的非格点桩号")
+
+
+def lin_interp_at(pts, s):
+    """相邻两个 20 m 缓存点之间的线性插值。"""
+    keys = sorted(pts)
+    for lo, hi in zip(keys, keys[1:]):
+        if lo <= s <= hi:
+            t = (s - lo) / (hi - lo)
+            return (pts[lo][0] + t * (pts[hi][0] - pts[lo][0]),
+                    pts[lo][1] + t * (pts[hi][1] - pts[lo][1]))
+    raise AssertionError(f"桩号 {s} 不在缓存覆盖范围内")
+
+
+def sagitta(radius_m, chord_m):
+    """矢高：弦长 chord 的圆弧，**中点**到弦的距离。"""
+    return radius_m - math.sqrt(radius_m ** 2 - (chord_m / 2.0) ** 2)
+
+
+def arc_chord_deviation(radius_m, chord_m, t):
+    """圆曲线上，**弦的 t 分点**到对应弧点的距离（精确闭式）。
+
+    ★ 为什么不能一律用矢高：矢高是 t=0.5 处的值。实测里在弦的 0.685 处取样，
+      真值 0.1660 m 而矢高 0.1923 m，相对差 13.7% —— 第一版判据就是这么红的。
+      那不是代码错，是判据拿错了参考点。
+
+    推导：把圆心放在原点，弦关于 x 轴对称，
+      P0 = R(cos(θ/2), −sin(θ/2))，P1 = R(cos(θ/2), +sin(θ/2))，θ = chord/R
+      弦上 t 分点   P(t) = (R cos(θ/2), R sin(θ/2)(2t−1))
+      对应弧点      A(t) = R(cos α, sin α)，α = −θ/2 + tθ
+      偏差          |P(t) − A(t)|
+    """
+    th = chord_m / radius_m
+    half = th / 2.0
+    alpha = -half + t * th
+    dx = math.cos(half) - math.cos(alpha)
+    dy = math.sin(half) * (2.0 * t - 1.0) - math.sin(alpha)
+    return radius_m * math.hypot(dx, dy)
+
+
+# ============================================================ 主流程
+
+def main() -> int:
+    fails: list[str] = []
+    els = elements()
+    g = gf()
+    pts = grid_points()
+    seams = [e["end_station_m"] for e in els[:-1]]
+
+    def check(ok, msg, detail=""):
+        print(f"  {'✓' if ok else '✗'} {msg}{('  ' + detail) if detail else ''}")
+        if not ok:
+            fails.append(msg)
+
+    # ---------------------------------------------------------------- 1) 几何内核
+    print("=== 1) 几何内核逐字节守卫（m2geom/ 是 M2 的副本，不许漂移）===")
+    for name in ("errors.py", "geom.py"):
+        a, b = sha256(M2_ADAPTERS / name), sha256(M2GEOM / name)
+        check(a == b, f"{name} 与 M2 原件逐字节一致", f"sha256 {a[:16]}…")
+    check((M2GEOM / "__init__.py").exists()
+          and (M2GEOM / "__init__.py").stat().st_size == 0,
+          "m2geom/__init__.py 存在且为空",
+          "★ 空文件是刻意的：M2 的 __init__.py 会 from . import weidi 拖进 19 个解析器")
+
+    # ---------------------------------------------------------------- 2) 适配层
+    print("\n=== 2) 适配层：与 geometry_solver 对同一批真数据输出相等 ===")
+    sys.path.insert(0, str(ROOT / "modules" / "M2-ingest"))
+    try:
+        import geometry_solver as solver  # noqa: E402
+        same = True
+        for row in FIX["alignment_element"]:
+            a = solver._as_adapter_element(row)
+            b = GEO.as_adapter_element(row)
+            if set(a) != set(b) or any(
+                    (a[k] != b[k]) if not isinstance(a[k], float)
+                    else abs(a[k] - b[k]) > 1e-12 for k in a):
+                same = False
+                print(f"    差异在 seq{row['element_seq']}：{a} vs {b}")
+        check(same, f"{len(FIX['alignment_element'])} 行全部等价")
+        # 反面：丢了 turn_flag，右转元素的符号必须真的丢
+        bad = [dict(r, azimuth_deg=None) for r in FIX["alignment_element"]]
+        n_sign = sum(1 for r in bad if GEO.turn_sign(r) is None)
+        check(n_sign > 0, "反面对照：抹掉方位角后 turn_sign 返回 None（说明它真在读）",
+              f"{n_sign} 行")
+    except ImportError as exc:
+        check(False, f"无法 import geometry_solver：{exc}")
+
+    # ---------------------------------------------------------------- 3) 投影往返
+    print("\n=== 3) 投影往返闭合（正算→反算）===")
+    worst = 0.0
+    for lat, lon in [(25.185964, 117.359262), (25.16789, 117.34292),
+                     (25.20878, 117.37376), (0.0, 117.0), (45.0, 117.0)]:
+        n, e = GEO.forward(lat, lon, 117.0)
+        lat2, lon2 = GEO.inverse(n, e, 117.0)
+        dn = (lat2 - lat) * 111320.0
+        de = (lon2 - lon) * 111320.0 * math.cos(math.radians(lat))
+        worst = max(worst, math.hypot(dn, de))
+    check(worst < 0.001, "5 个点往返偏差均小于 1 mm", f"最大 {worst * 1000:.6f} mm")
+
+    # ---------------------------------------------------------------- 4) SC-002
+    print("\n=== 4) SC-002 落点包围盒（39 带 / CM 117°E / EPSG:4548）===")
+    route = GEO.route_lonlat(els, g, 20.0)
+    b = route["bbox"]
+    # 这组数字是 2026-10-11 用五带扫描独立量出来的（research.md R7）。
+    check(25.16 < b["lat_min"] < 25.18 and 25.20 < b["lat_max"] < 25.22,
+          "纬度落在闽中",
+          f"{b['lat_min']:.5f}..{b['lat_max']:.5f} °N")
+    check(117.33 < b["lon_min"] < 117.36 and 117.36 < b["lon_max"] < 117.39,
+          "经度落在闽中",
+          f"{b['lon_min']:.5f}..{b['lon_max']:.5f} °E")
+    dy = (b["lat_max"] - b["lat_min"]) * 111.32
+    dx = (b["lon_max"] - b["lon_min"]) * 111.32 * math.cos(math.radians(b["lat_min"]))
+    check(math.hypot(dx, dy) > 4.0, "包围盒对角线与 5.805 km 的路线长度相称",
+          f"{dx:.3f} × {dy:.3f} km")
+    check(route["epsg"] == 4548, "回带 EPSG:4548",
+          "★ 39 带有两个编码，4547 是 38 带（CM 114°E），取错差 300 km")
+
+    # ---------------------------------------------------------------- 5) SC-001
+    print("\n=== 5) SC-001 非格点对照：point_at vs 相邻缓存点线性插值 ===")
+    print("     ★ 判据是**两侧**的：曲线上要有下限，全线上要有上限。")
+    rows = []
+    for el in els:
+        if el["end_station_m"] - el["start_station_m"] < 40:
+            continue
+        s = non_grid_station(el, seams=seams)
+        n, e = GEO.point_north_east(els, s)
+        xl, yl = lin_interp_at(pts, s)
+        rows.append((el, s, math.hypot(n - xl, e - yl)))
+
+    cur = [r for r in rows if r[0]["type"] in ("circular", "transition")]
+    lin = [r for r in rows if r[0]["type"] == "line"]
+    worst_all = max(r[2] for r in rows)
+    worst_lin = max((r[2] for r in lin), default=0.0)
+
+    check(worst_all < 1.0, "全部非格点偏差小于 1 m（spec 的 SC-001）",
+          f"最大 {worst_all:.6f} m，{len(rows)} 个采样")
+    check(worst_lin < 1e-3,
+          "直线元素上偏差≈0（正面说明：那里插值本来就精确）",
+          f"最大 {worst_lin:.9f} m")
+    check(min(r[2] for r in cur) > 0.005,
+          "★ 曲线元素上偏差有下限（否则这条检查是空转）",
+          f"最小 {min(r[2] for r in cur):.6f} m，{len(cur)} 个采样")
+
+    # 与矢高闭式对齐。
+    # ★ 只对「整个 20 m 缓存区间都落在**同一个圆曲线元素**内」的采样做这个比较。
+    #   否则弦会横跨元素接缝，落在两个不同曲率上，量出来的不是 R 的矢高 ——
+    #   第一版就是漏了这条，于是 8 个圆曲线里最短的那个（74.7 m）报了 81.9% 的
+    #   相对差。那不是代码错，是判据错。
+    checked = 0
+    worst_rel = 0.0
+    for el in els:
+        if el["type"] != "circular":
+            continue
+        s0, s1 = el["start_station_m"], el["end_station_m"]
+        keys = sorted(pts)
+        for lo, hi in zip(keys, keys[1:]):
+            if lo < s0 or hi > s1:
+                continue                     # 区间没完全落在本元素内
+            t = 0.685
+            s = lo + (hi - lo) * t           # 非格点
+            n, e = GEO.point_north_east(els, s)
+            xl, yl = lin_interp_at(pts, s)
+            d = math.hypot(n - xl, e - yl)
+            pred = arc_chord_deviation(el["radius_start_m"], hi - lo, t)
+            checked += 1
+            worst_rel = max(worst_rel, abs(d - pred) / pred)
+        if checked >= 8:
+            break
+    check(checked >= 8 and worst_rel < 0.03,
+          "圆曲线上的偏差与弦−弧闭式相符（区间不跨接缝，且按采样位置取参考点）",
+          f"{checked} 个区间，最大相对差 {worst_rel * 100:.2f}%"
+          f"（余量来自缓存坐标 ~0.7 mm 的量化）")
+
+    # ★ 反面：用**弦中点**的矢高当参考点，必须显式地不吻合 —— 证明这个参考点
+    #   不是随便挑的，也证明上面那条判据真的在区分 t。
+    t = 0.685
+    el0 = next(e for e in els if e["type"] == "circular")
+    s0, s1 = el0["start_station_m"], el0["end_station_m"]
+    keys = sorted(pts)
+    lo, hi = next((a, b) for a, b in zip(keys, keys[1:]) if a >= s0 and b <= s1)
+    dev_t = arc_chord_deviation(el0["radius_start_m"], hi - lo, t)
+    dev_mid = sagitta(el0["radius_start_m"], hi - lo)
+    check(abs(dev_t - dev_mid) / dev_mid > 0.05,
+          "★ 同一区间的 t=0.685 偏差与弦中点矢高**显著不同**"
+          "（说明参考点必须按采样位置取）",
+          f"{dev_t:.6f} m vs {dev_mid:.6f} m，差 "
+          f"{(dev_mid - dev_t) / dev_mid * 100:.2f}%")
+
+    # ---------------------------------------------------------------- 6) SC-008
+    print("\n=== 6) SC-008 控制：把中央子午线换错，落点检查**必须失败** ===")
+    wrong = GEO.route_lonlat(els, dict(g, central_meridian_deg=114.0), 20.0)
+    wb = wrong["bbox"]
+    moved = abs(wb["lon_max"] - b["lon_max"])
+    same_lat = abs(wb["lat_max"] - b["lat_max"])
+    check(moved > 2.0, "换到 38 带后经度整体平移约 3°",
+          f"经度平移 {moved:.4f}°，纬度只动 {same_lat * 111.32:.3f} m")
+    check(not (117.33 < wb["lon_min"] < 117.39),
+          "★ 换错后第 4 组的落点判据**确实会红**（这不是空转的控制）",
+          f"新经度 {wb['lon_min']:.5f}..{wb['lon_max']:.5f} °E")
+
+    # ---------------------------------------------------------------- 7) turn_flag
+    print("\n=== 7) 反向对照：丢掉 turn_flag，右转变大、左转不变 ===")
+    bad_els = [{**e, "turn_flag": None} for e in els]
+    worst_right, worst_left = 0.0, 0.0
+    right_seq = left_seq = None
+    for el in els:
+        if el["type"] != "circular":
+            continue
+        s1 = el["end_station_m"] - 1e-6
+        n0, e0 = GEO.point_north_east(els, s1)
+        n1, e1 = GEO.point_north_east(bad_els, s1)
+        d = math.hypot(n1 - n0, e1 - e0)
+        daz = (el["end_azimuth_deg"] - el["azimuth_deg"] + 180) % 360 - 180
+        if daz < 0:                       # 右转：默认 sgn=+1 是错的
+            if d > worst_right:
+                worst_right, right_seq = d, el["seq"]
+        else:                             # 左转：默认 sgn=+1 恰好是对的
+            worst_left = max(worst_left, d)
+    check(worst_right > 90.0,
+          "★ 右转圆曲线终点偏差跳到 ~98 m（geom 说的「终点差 98 m」）",
+          f"seq{right_seq} → {worst_right:.4f} m")
+    check(worst_left < 1e-6,
+          "★ 左转圆曲线**纹丝不动**（同一方向的对照，说明上面的变化来自转向）",
+          f"最大 {worst_left:.12f} m")
+
+    # 解析校验：2R(1−cosΔ)
+    zhi = next(e for e in els if e["seq"] == right_seq)
+    pred = 2 * zhi["radius_start_m"] * (
+        1 - math.cos(math.radians(abs(
+            (zhi["end_azimuth_deg"] - zhi["azimuth_deg"] + 180) % 360 - 180))))
+    check(abs(pred - worst_right) < 0.01,
+          "偏差与闭式 2R(1−cosΔaz) 相符",
+          f"闭式 {pred:.4f} m vs 实测 {worst_right:.4f} m")
+
+    # ---------------------------------------------------------------- 8) 不变量
+    print("\n=== 8) crs.yaml 的不变量（assumed ↔ epsg_after_confirm）===")
+    check(g["assumed"] is False and g.get("epsg_after_confirm") == 4548,
+          "当前状态：assumed=false 且 epsg_after_confirm=4548")
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        for assumed, epsg, want_err in ((True, 4548, True), (False, None, True),
+                                        (True, None, False)):
+            doc = {"geographic_frame": {"zone_number": 39, "central_meridian_deg": 117,
+                                        "assumed": assumed,
+                                        "epsg_after_confirm": epsg}}
+            p = pathlib.Path(td) / f"c{assumed}{epsg}.yaml"
+            p.write_text(json.dumps(doc), encoding="utf-8")
+            try:
+                GEO.load_crs(p)
+                got_err = False
+            except GEO.CrsError:
+                got_err = True
+            check(got_err == want_err,
+                  f"assumed={assumed}, epsg={epsg} → "
+                  f"{'拒绝' if want_err else '接受'}")
+
+    # ---------------------------------------------------------------- 9) 路由契约
+    print("\n=== 9) 路由契约对齐（m6-gateway.geo.v0.1 ↔ 实现）===")
+    import yaml  # noqa: E402
+    doc = yaml.safe_load(GEO_CONTRACT.read_text(encoding="utf-8"))
+    want = set(doc["paths"])
+    impl = {r.path for r in APP.app.routes if r.path.startswith("/v1/geometry")}
+    missing = sorted(p for p in want if p not in impl)
+    check(not missing, f"契约声明的 {len(want)} 条路径都已实现",
+          f"缺：{missing}" if missing else "")
+
+    # ---------------------------------------------------------------- 10) HTTP
+    print("\n=== 10) 真实请求（TestClient，假 DAO 驱动真实夹具）===")
+    APP.dao = _FakeDao()
+    c = TestClient(APP.app)
+    sid = FIX["section_id"]
+
+    r = c.get(f"/v1/geometry/sections/{sid}/geo", params={"station_m": 300.0})
+    check(r.status_code == 200, "GET …/geo 200", f"HTTP {r.status_code}")
+    j = r.json()
+    check(j.get("epsg") == 4548 and j.get("source") == "computed_from_station",
+          "回带 epsg 与 source",
+          f"epsg={j.get('epsg')} source={j.get('source')}")
+    check(25.16 < j["lat_deg"] < 25.22 and 117.33 < j["lon_deg"] < 117.39,
+          "落点在闽中", f"{j['lat_deg']:.6f} °N / {j['lon_deg']:.6f} °E")
+
+    r_out = c.get(f"/v1/geometry/sections/{sid}/geo", params={"station_m": -50.0})
+    check(r_out.status_code == 400, "桩号越界 → 400（不是 404）",
+          f"HTTP {r_out.status_code}")
+
+    r_nf = c.get("/v1/geometry/sections/999999/geo", params={"station_m": 10.0})
+    check(r_nf.status_code == 404, "路段不存在 → 404", f"HTTP {r_nf.status_code}")
+
+    r_bad = c.get(f"/v1/geometry/sections/{sid}/geo", params={"station_m": "abc"})
+    check(r_bad.status_code == 422, "桩号不是数 → 422", f"HTTP {r_bad.status_code}")
+
+    r_rt = c.get(f"/v1/geometry/sections/{sid}/geo/route", params={"step_m": 20.0})
+    check(r_rt.status_code == 200, "GET …/geo/route 200", f"HTTP {r_rt.status_code}")
+    jr = r_rt.json()
+    check(jr.get("point_count", 0) > 300 and len(jr.get("elements", [])) == 33,
+          "折线覆盖 33 个线元",
+          f"{jr.get('point_count')} 点 / {len(jr.get('elements', []))} 元素")
+
+    lat0, lon0 = j["lat_deg"], j["lon_deg"]
+    r_rev = c.get(f"/v1/geometry/sections/{sid}/geo/reverse",
+                  params={"lat": lat0, "lon": lon0})
+    check(r_rev.status_code == 200, "GET …/geo/reverse 200", f"HTTP {r_rev.status_code}")
+    jv = r_rev.json()
+    check(abs(jv["station_m"] - 300.0) < 5.0 and jv["offset_m"] < 5.0,
+          "反算回到原桩号附近并回带 offset_m",
+          f"桩号 {jv['station_m']:.3f} m（原 300.0），偏移 {jv['offset_m']:.6f} m")
+
+    # ★ 反面：把 x/y 读反（这是库里真实存在的坑），落点必须跑到太平洋
+    n_sw, e_sw = GEO.point_north_east(els, 300.0)
+    lat_sw, lon_sw = GEO.inverse(e_sw, n_sw, 117.0)
+    check(not (25.0 < lat_sw < 26.0),
+          "★ 把北/东读反 → 落点跑到太平洋（说明这一层真的在区分）",
+          f"读反后 {lat_sw:.4f} °N / {lon_sw:.4f} °E")
+
+    # ---------------------------------------------------------------- 汇总
+    print("\n" + "=" * 72)
+    if fails:
+        print(f"失败 {len(fails)} 项：")
+        for f in fails:
+            print(f"  · {f}")
+        print("=" * 72)
+        return 1
+    print("全部通过")
+    print("=" * 72)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

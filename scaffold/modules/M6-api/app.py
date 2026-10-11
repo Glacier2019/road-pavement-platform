@@ -463,6 +463,100 @@ def get_samples_by_station(
     return {"section_id": section_id, "segment": segment,
             "from_km": from_km, "to_km": to_km, "count": len(rows), "items": rows}
 
+# ------------------------------------------------- 区域帧：桩号 ↔ 经纬度（004）
+import geo as geo_mod   # noqa: E402  （与 app.py 同目录，容器里由 WORKDIR /app 提供）
+
+
+def _geo_crs() -> dict[str, Any]:
+    """读坐标基准。读不到 → 503，**不猜默认带号**。"""
+    try:
+        return geo_mod.load_crs()
+    except geo_mod.CrsError as exc:
+        raise HTTPException(503, f"坐标基准不可用：{exc}") from exc
+
+
+def _geo_elements(section_id: int) -> list[dict[str, Any]]:
+    """取某路段的线元链，转成 `geom` 要的形状。
+
+    ⚠ 这里**必须**走适配层（`as_adapter_elements`）。直接把手里的落库行喂给
+      `geom` 会少一个 `turn_flag`，而 `geom` 对它的缺失是**静默**的：
+      默认按左转处理，右转的曲线朝反方向弯，实测终点差 98 m。
+    """
+    try:
+        raw = dao.ge.alignment(section_id)["elements"]
+    except DaoError as exc:
+        raise _http(exc) from exc
+    if not raw:
+        raise HTTPException(
+            404, f"路段 {section_id} 没有线形单元（alignment_element 无行）")
+    return geo_mod.as_adapter_elements(raw)
+
+
+@app.get("/v1/geometry/sections/{section_id}/geo", tags=["区域帧"],
+         summary="桩号 → 经纬度（单点）")
+def get_geo_point(
+    section_id: int,
+    station_m: float = Query(..., description="路段内里程，**米**"),
+) -> dict[str, Any]:
+    """把一个桩号换算成经纬度。
+
+    ★ 返回里**必须**有 `epsg`。39 带有两个 EPSG 编码（4548 无带号前缀 /
+      4527 有），差别是东坐标 39,000,000 m。只回经纬度的接口让调用方
+      无法判断自己拿到的是哪一种，也就无法发现取错。
+
+    ★ `source` 固定为 `"computed_from_station"`：这是**换算**，不是**定位**。
+      本平台不声称这条路真的在这个经纬度上（理由见 research.md 的 R7）。
+    """
+    gf = _geo_crs()
+    els = _geo_elements(section_id)
+    try:
+        out = geo_mod.station_to_lonlat(els, station_m, gf)
+    except geo_mod.StationOutsideAlignment as exc:
+        # 桩号越界是**调用方**的问题，用 400 而不是 404：
+        # 404 会被读成「这个桩号没有数据」，而实际是「这个桩号不在链上」。
+        raise HTTPException(400, str(exc)) from exc
+    return {"section_id": section_id, **out}
+
+
+@app.get("/v1/geometry/sections/{section_id}/geo/reverse", tags=["区域帧"],
+         summary="经纬度 → 最近的桩号（单点）")
+def get_geo_reverse(
+    section_id: int,
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+) -> dict[str, Any]:
+    """把经纬度换回最近的桩号。
+
+    ★ 回带 `offset_m`（查询点与最近点的距离）。**不隐藏它** ——
+      一个 500 m 外的"最近桩号"和一个 2 m 外的，含义完全不同。
+      调用方要能自己判断这个答案有多近。
+    """
+    gf = _geo_crs()
+    els = _geo_elements(section_id)
+    return {"section_id": section_id,
+            **geo_mod.reverse_lonlat(els, lat, lon, gf)}
+
+
+@app.get("/v1/geometry/sections/{section_id}/geo/route", tags=["区域帧"],
+         summary="整条路线 → 经纬度折线 + 包围盒")
+def get_geo_route(
+    section_id: int,
+    step_m: float = Query(20.0, gt=0, le=1000,
+                          description="线元内的采样步长（米）"),
+) -> dict[str, Any]:
+    """整条路线换算成经纬度折线，附包围盒。
+
+    ★ 采样是**逐个线元**做的，不是"从 0 开始每 step_m 一个"。
+      后者的样点密度与曲率无关，而「曲线是弯的」这条判据恰恰要看
+      曲率大处的折线够不够密。
+
+    ★ 包围盒是本 feature 落点检查（SC-002）所用的量。
+    """
+    gf = _geo_crs()
+    els = _geo_elements(section_id)
+    return {"section_id": section_id, **geo_mod.route_lonlat(els, gf, step_m)}
+
+
 # ----------------------------------------------------------------- 指标查询
 @app.get("/v1/metrics/wim_hourly", tags=["指标查询"],
          summary="小时级过车量/超载数/ESAL/均速")

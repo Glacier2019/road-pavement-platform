@@ -42,6 +42,7 @@ TESTS=(
   "m2-造数器|造数器产出的报文必须过契约|M2|PY|tests/contract/test_simulator_contract.py"
   "m3-dao|DAO 契约（7 域 repository、越域拦截）|M3|DAO|tests/contract/test_dao_contract.py"
   "m6-路由|M6 HTTP 路由契约|M6|API|tests/contract/test_api_routes.py"
+  "区域帧|004 桩号↔经纬度：几何内核不漂移 + 投影往返 + 落点 + 两侧非格点判据 + 换带/丢转向两个对照|M6/M9|CONSOLE|tests/contract/test_region_frame.py"
   "m2-违约分类|违约分类码 + M2/M4 跨层命名一致性|M2|PY|tests/contract/test_violation_codes.py"
   "m4-治理|质量规则契约 + 真值晋升契约 + 配置↔契约一致性|M4|PY|tests/contract/test_governance_contract.py"
   "m5-m10|M5–M10 模块产出契约（诊断/映射/养护/登记/工单）|M5–M10|PY|tests/contract/test_module_contracts.py"

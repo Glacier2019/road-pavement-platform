@@ -1,0 +1,491 @@
+"""M6 区域帧 —— 桩号 ↔ 经纬度。
+
+本模块做三件事，别的都不做：
+
+    1. **适配层**：把落库形状的 `alignment_element` 转成 `geom` 要的形状。
+       这一步不是改名，是三个会静默出错的坑（见下面「三条纪律」）。
+    2. **投影**：CGCS2000 高斯-克吕格正算与反算。手写，不引 pyproj。
+    3. **业务**：单个桩号 / 整条路线的换算，带包围盒。
+
+==================== 这一层为什么值得单独写 ====================
+`geom.point_at` 能把桩号算成平面坐标，**但它算出来的不是经纬度**。
+平面坐标是设计坐标系，与大地基准无关；把它放到地球上需要投影带号。
+带号错了位置差几百公里，而在任何一个局部视图里都看不出来 —— 它只在
+把模型放到地球上那一刻暴露。所以这一步被单独拎出来，并有独立判据。
+
+★ 本模块**不含任何线形数学**。桩号落在哪个线元、方位角、坐标，全部委托
+  `m2geom`（M2 的 `adapters.geom` 的逐字节副本）。复算一遍必然漂移。
+
+==================== 三条纪律（违反会静默出错）====================
+1. `turn_flag` **不是落库列**。`geom.curvature_at` 靠它决定曲率正负；
+   丢了它，右转的曲线会朝反方向弯。`geom` 的原话是
+   「**实测终点差 98 m，而且不报错**」。本模块从**方位角变化方向**还原它
+   （`:func:`turn_sign`），与 `geometry_solver` 同一规则。
+
+2. `radius_start_m = None` 表示**无穷大半径**（κ=0），**不是缺值**。
+   缓和曲线起点正是这样。不要"帮忙"把它当 0。
+
+3. `x` 是**北坐标**、`y` 是**东坐标**（库约定）。读反了会把路放到
+   太平洋上（实测 4.54°N / 137.16°E）。所以本模块的投影函数参数叫
+   `north` / `east`，**不叫 x / y** —— 让读反这件事在调用点就写不出来。
+
+==================== 为什么手写投影而不引 pyproj ====================
+三条独立证据（见 specs/004-region-frame/research.md 的 R1）：
+往返闭合 **0.457 mm**；东偏推算 **+34.55 km** 对上 evidence 里的 +34.6 km；
+落点包围盒 4.552 × 3.106 km 与 5.805 km 的路线长度相称。
+再加一条对照：把中央子午线改成 114°E，落点检查**必须**失败（SC-008）。
+"""
+from __future__ import annotations
+
+import math
+import os
+import pathlib
+from typing import Any, Mapping, Sequence
+
+from m2geom import geom
+
+__all__ = [
+    "CrsError", "StationOutsideAlignment",
+    "load_crs", "crs_path",
+    "turn_sign", "as_adapter_element", "as_adapter_elements",
+    "inverse", "forward",
+    "point_north_east", "station_to_lonlat", "route_lonlat", "reverse_lonlat",
+]
+
+
+# ============================================================ 异常
+
+class CrsError(RuntimeError):
+    """坐标基准配置不可用。**显式失败**，不猜默认值。
+
+    ★ 为什么强调这一点：一个「找不到配置就用 117°E」的兜底会让 99% 的
+      调用方正常工作，只在换基准时静默算错。错带号的特征是纬度不变、
+      经度整体平移一个带宽 —— 谁也不会觉得奇怪。
+    """
+
+
+class StationOutsideAlignment(ValueError):
+    """桩号落在线元链之外。
+
+    `geom.locate` 对链外桩号返回 `None`，**不外推**。本模块遇到 `None`
+    一律抛这个异常并**指名桩号** —— 悄悄外推出一段路上没有的坐标，
+    比报错危险得多。
+    """
+
+
+# ============================================================ 椭球与投影常数
+
+# CGCS2000 椭球。与 crs.yaml 的 `ellipsoid: CGCS2000` 对应。
+_A = 6378137.0                      # 长半轴 m
+_INV_F = 298.257222101              # 扁率倒数
+_F = 1.0 / _INV_F
+_E2 = _F * (2.0 - _F)               # 第一偏心率平方
+_EP2 = _E2 / (1.0 - _E2)            # 第二偏心率平方
+_FALSE_EASTING = 500000.0           # 假东偏（Y 无带号前缀 ⇒ 500000，不是 39500000）
+_K0 = 1.0                           # 尺度因子。3 度带不带尺度改正。
+
+
+def _meridian_arc(phi: float) -> float:
+    """子午线弧长 M(φ)。"""
+    e2 = _E2
+    return _A * (
+        (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * phi
+        - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * math.sin(2 * phi)
+        + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * math.sin(4 * phi)
+        - (35 * e2 ** 3 / 3072) * math.sin(6 * phi)
+    )
+
+
+def inverse(north: float, east: float, central_meridian_deg: float) -> tuple[float, float]:
+    """高斯-克吕格反算：平面 (北, 东) → (纬度, 经度)，单位度。
+
+    ★ 参数名是 `north` / `east`，不是 x / y。库把北坐标存在 `x` 列、
+      东坐标存在 `y` 列 —— 这是设计坐标系的历史约定，与测量学的
+      (x=东, y=北) **正好相反**。用 x/y 命名会让"读反"在调用点看不出来。
+
+    实测往返闭合 ≤ 0.457 mm。
+    """
+    lam0 = math.radians(central_meridian_deg)
+    e2, ep2, a = _E2, _EP2, _A
+
+    # 1) 底点纬度：由子午线弧长反解
+    mu = north / (a * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
+    e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+    phi1 = (mu
+            + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * math.sin(2 * mu)
+            + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * math.sin(4 * mu)
+            + (151 * e1 ** 3 / 96) * math.sin(6 * mu)
+            + (1097 * e1 ** 4 / 512) * math.sin(8 * mu))
+
+    sin1, cos1, tan1 = math.sin(phi1), math.cos(phi1), math.tan(phi1)
+    c1 = ep2 * cos1 ** 2
+    t1 = tan1 ** 2
+    n1 = a / math.sqrt(1 - e2 * sin1 ** 2)
+    r1 = a * (1 - e2) / (1 - e2 * sin1 ** 2) ** 1.5
+    d = (east - _FALSE_EASTING) / (n1 * _K0)
+
+    phi = phi1 - (n1 * tan1 / r1) * (
+        d ** 2 / 2
+        - (5 + 3 * t1 + 10 * c1 - 4 * c1 ** 2 - 9 * ep2) * d ** 4 / 24
+        + (61 + 90 * t1 + 298 * c1 + 45 * t1 ** 2 - 252 * ep2 - 3 * c1 ** 2) * d ** 6 / 720
+    )
+    lam = lam0 + (
+        d
+        - (1 + 2 * t1 + c1) * d ** 3 / 6
+        + (5 - 2 * c1 + 28 * t1 - 3 * c1 ** 2 + 8 * ep2 + 24 * t1 ** 2) * d ** 5 / 120
+    ) / cos1
+    return math.degrees(phi), math.degrees(lam)
+
+
+def forward(lat_deg: float, lon_deg: float,
+            central_meridian_deg: float) -> tuple[float, float]:
+    """高斯-克吕格正算：(纬度, 经度) → 平面 (北, 东)，单位 m。
+
+    与 :func:`inverse` 共用同一套椭球常数与假东偏。
+    """
+    phi = math.radians(lat_deg)
+    dlam = math.radians(lon_deg - central_meridian_deg)
+    e2, ep2, a = _E2, _EP2, _A
+
+    sin_p, cos_p, tan_p = math.sin(phi), math.cos(phi), math.tan(phi)
+    n = a / math.sqrt(1 - e2 * sin_p ** 2)
+    t = tan_p ** 2
+    c = ep2 * cos_p ** 2
+    aa = dlam * cos_p
+
+    m = _meridian_arc(phi)
+    north = m + _K0 * n * tan_p * (
+        aa ** 2 / 2
+        + (5 - t + 9 * c + 4 * c ** 2) * aa ** 4 / 24
+        + (61 - 58 * t + t ** 2 + 600 * c - 330 * ep2) * aa ** 6 / 720
+    )
+    east = _FALSE_EASTING + _K0 * n * (
+        aa
+        + (1 - t + c) * aa ** 3 / 6
+        + (5 - 18 * t + t ** 2 + 72 * c - 58 * ep2) * aa ** 5 / 120
+    )
+    return north, east
+
+
+# ============================================================ 适配层
+
+def _f(v: Any) -> float | None:
+    """`Decimal`/`int`/`None` → `float`/`None`。
+
+    psycopg 对 `numeric` 列返回 `Decimal`，对 `double precision` 返回 `float`。
+    本模块的输入同时来自这两种列，而投影是纯 float 运算 ——
+    `Decimal + float` 直接抛 `TypeError`。在这里一次性收口，
+    而不是在每个用点各转一次。
+    """
+    return None if v is None else float(v)
+
+
+def turn_sign(row: Mapping[str, Any]) -> int | None:
+    """还原**转向符号**（+1 左转 / −1 右转）。直线返回 `None`。
+
+    ★ 为什么必须还原：`turn_flag` **不是落库列**（`.PM` 的转符号没进 DDL），
+      而 `geom.curvature_at` 靠它决定 κ 的正负。丢了它，右转的曲线会朝
+      反方向弯 —— `geom` 的原话是「**实测终点差 98 m，而且不报错**」。
+
+    还原依据：**方位角的变化方向**。Δaz = 出方位角 − 入方位角，归一化到
+    (−180, 180] 后，正即左转、负即右转。实测本工程 24 个曲线单元 24/24 正确。
+
+    ★ 为什么用方位角而不用圆心叉积：24 个曲线单元里只有 16 个有圆心
+      （`center_x/center_y` 允许为 NULL）。方位角两列则总是有值。
+
+    ★ 本函数与 `M2-ingest/geometry_solver.py::_turn_sign` 是同一规则。
+      `tests/contract/test_region_frame.py` 用**真数据输出相等**守着这一对。
+    """
+    az0 = row.get("azimuth_deg")
+    az1 = row.get("end_azimuth_deg")
+    if az0 is None or az1 is None:
+        return row.get("turn_flag")
+    if row.get("element_type") == "line" or row.get("type") == "line":
+        return None
+    delta = (float(az1) - float(az0) + 180.0) % 360.0 - 180.0
+    return 1 if delta > 0 else -1
+
+
+def as_adapter_element(row: Mapping[str, Any]) -> dict[str, Any]:
+    """落库形状的 `alignment_element` 行 → `geom` 要的形状。
+
+    ★ `length_m` 用**桩号差重算**，不读列：该列是导出产物，而 `geom` 的
+      曲率线性插值要用它做分母。两者若不一致（比如库里的列被改过），
+      读列会得到一条与桩号链对不上的曲率。
+
+    ★ 单位：落库是**千米**，适配器是**米**。混单位会得到一个数值上像模像样
+      但完全错误的结果 —— 这一点在 `geometry_solver` 里已经踩过
+      （`np.interp` 拿公里当米插值，结果是一串常数）。
+
+    ★ 本函数与 `geometry_solver.py::_as_adapter_element` 是同一规则，
+      由契约测试用真数据输出相等守着。
+    """
+    if "start_station_m" in row:
+        return dict(row)                      # 已经是适配器形状
+    start = float(row["start_station_km"]) * 1000.0
+    end = float(row["end_station_km"]) * 1000.0
+    return {
+        "seq": row.get("element_seq"),
+        "type": row.get("element_type"),
+        "start_station_m": start,
+        "end_station_m": end,
+        "length_m": end - start,
+        "start_x": _f(row.get("start_x")), "start_y": _f(row.get("start_y")),
+        "end_x": _f(row.get("end_x")), "end_y": _f(row.get("end_y")),
+        "azimuth_deg": _f(row.get("azimuth_deg")),
+        "end_azimuth_deg": _f(row.get("end_azimuth_deg")),
+        "radius_start_m": _f(row.get("radius_start_m")),
+        "radius_end_m": _f(row.get("radius_end_m")),
+        "turn_flag": turn_sign(row),
+    }
+
+
+def as_adapter_elements(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """整链转换，并按 `element_seq` **排序**。
+
+    ★ 排序不是修饰：`geom.locate` 按顺序找第一个覆盖桩号的线元，
+      顺序错了会命中错误的那一段，而且**不报错**。
+    """
+    ordered = sorted(rows, key=lambda r: (r.get("element_seq") is None,
+                                          r.get("element_seq")))
+    return [as_adapter_element(r) for r in ordered]
+
+
+# ============================================================ 基准配置
+
+def crs_path() -> pathlib.Path:
+    """`crs.yaml` 的位置。
+
+    ★ 默认值 `crs.yaml` 是**相对路径**，与 M6 的 Dockerfile 一致：
+      容器里 `WORKDIR /app`，配置被 COPY 成 `/app/crs.yaml`。
+      可用环境变量 `RP_CRS_CONFIG` 覆盖（测试就是这么指的）。
+
+    ⚠ 这个默认值意味着「只有从 /app 启动才对」。它不是 bug，是一个
+      必须与 Dockerfile 同步的耦合 —— 见 `tests/contract/test_region_frame.py`
+      里那一条"配置真的能被容器读到"的守卫。
+    """
+    return pathlib.Path(os.getenv("RP_CRS_CONFIG", "crs.yaml"))
+
+
+def load_crs(path: str | pathlib.Path | None = None) -> dict[str, Any]:
+    """读坐标基准配置，并**校验两条不变量**。
+
+    不变量（`crs.yaml` 自己声明过，这里把它变成机器可查的）：
+      · `assumed: false` ⇒ `epsg_after_confirm` 必须非空，且与 `zone_number` 对应
+      · `assumed: true`  ⇒ `epsg_after_confirm` 必须为空
+
+    ★ 为什么要校验：`assumed` 与 `epsg_after_confirm` 是两个字段，
+      分开写就会分开漂。一个"猜的值配上已确认的 EPSG"是最坏的状态 ——
+      它看起来是确认过的。
+
+    读不到文件一律抛 :class:`CrsError`，**不返回默认值**。
+    """
+    import yaml
+
+    p = pathlib.Path(path) if path is not None else crs_path()
+    if not p.is_file():
+        raise CrsError(
+            f"读不到坐标基准配置：{p}（绝对路径 {p.resolve()}）。"
+            "区域帧不猜默认带号 —— 猜错的代价是位置差几百公里，"
+            "而且在局部视图里看不出来。"
+        )
+    doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    gf = doc.get("geographic_frame")
+    if not isinstance(gf, dict):
+        raise CrsError(f"{p} 里没有 geographic_frame 段。")
+
+    missing = [k for k in ("zone_number", "central_meridian_deg", "assumed")
+               if k not in gf]
+    if missing:
+        raise CrsError(f"{p} 的 geographic_frame 缺少字段：{missing}")
+
+    assumed = bool(gf["assumed"])
+    epsg = gf.get("epsg_after_confirm")
+    if assumed and epsg is not None:
+        raise CrsError(
+            f"{p}：assumed 为 true（值是猜的）却填了 epsg_after_confirm={epsg}。"
+            "猜的时候不许填 EPSG —— 那会让一个未确认的值看起来已经确认。"
+        )
+    if not assumed and not epsg:
+        raise CrsError(
+            f"{p}：assumed 为 false（值已确认）却没填 epsg_after_confirm。"
+            "已确认就该能说出是哪个 EPSG 编码。"
+        )
+    return gf
+
+
+# ============================================================ 业务
+
+def point_north_east(elements: Sequence[Mapping[str, Any]],
+                     station_m: float) -> tuple[float, float]:
+    """桩号 → 平面 **(北坐标, 东坐标)**，单位 m。
+
+    ★ 两件事必须一起做，少一件就错：
+      ① `geom.locate` 先定位线元。`geom.point_at` **只认单个线元**，
+         直接把它喂给整条链会 `KeyError`；
+      ② `locate` 返回 `None`（桩号在链外）时**抛异常，不外推**。
+         `point_at` 对 `d <= 0` 的桩号直接返回该线元的起点坐标 ——
+         那不是"这段路上有这个点"，那是"这个点在这段路的起点旁边"。
+         两者在链内桩号上数值相同，在链外桩号上差一整段路。
+    """
+    e = geom.locate(list(elements), station_m)
+    if e is None:
+        lo = min(x["start_station_m"] for x in elements)
+        hi = max(x["end_station_m"] for x in elements)
+        raise StationOutsideAlignment(
+            f"桩号 {station_m:.3f} m 落在线元链之外"
+            f"（链覆盖 {lo:.3f} .. {hi:.3f} m）。不外推。"
+        )
+    north, east = geom.point_at(e, station_m)
+    return north, east
+
+
+def station_to_lonlat(elements: Sequence[Mapping[str, Any]],
+                      station_m: float,
+                      gf: Mapping[str, Any]) -> dict[str, Any]:
+    """桩号 → 经纬度，含来源标记与所用基准。
+
+    ★ 输出**必须回带 `epsg`**：39 带有两个 EPSG 编码（4548 无带号前缀 /
+      4527 有），取错东坐标差 39,000,000 m。只回经纬度的接口让调用方
+      无法判断自己拿到的东坐标是哪一种，也就无法发现错误。
+
+    ★ `source` 固定为 `"computed_from_station"`。这是**刻意的措辞**：
+      本平台把桩号换算成经纬度，**不声称**这条路真的在这里。
+      理由见 specs/004-region-frame/research.md 的 R7 —— 实测五带扫描里
+      没有一个带的落点与设计方地面线形状相关（r 全部接近 0），
+      坐标是学生自定的局部坐标、还是地形被学生生成过，两种读法都还开着。
+      所以这里只用「换算」这个词，不用「定位」。
+    """
+    north, east = point_north_east(elements, station_m)
+    cm = float(gf["central_meridian_deg"])
+    lat, lon = inverse(north, east, cm)
+    return {
+        "station_m": station_m,
+        "north_m": north,
+        "east_m": east,
+        "lat_deg": lat,
+        "lon_deg": lon,
+        "epsg": gf.get("epsg_after_confirm"),
+        "central_meridian_deg": cm,
+        "zone_number": gf.get("zone_number"),
+        "source": "computed_from_station",
+    }
+
+
+def route_lonlat(elements: Sequence[Mapping[str, Any]],
+                 gf: Mapping[str, Any],
+                 step_m: float = 20.0) -> dict[str, Any]:
+    """整条路线 → 经纬度折线 + 包围盒。
+
+    ★ 采样点取自**每个线元的端点加等分内点**，不是"从 0 开始每 step_m 一个"。
+      后者在缓和曲线里会让样点密度与曲率无关，而本 feature 的判据之一
+      （SC-003「曲线是弯的」）正是要看曲率大处的折线是否够密。
+
+    包围盒是 SC-002 的落点检查所用的量。
+    """
+    if step_m <= 0:
+        raise ValueError(f"step_m 必须为正，收到 {step_m}")
+    cm = float(gf["central_meridian_deg"])
+    epsg = gf.get("epsg_after_confirm")
+
+    per_element: list[dict[str, Any]] = []
+    all_pts: list[tuple[float, float, float]] = []      # (station, lat, lon)
+
+    for e in elements:
+        s0 = float(e["start_station_m"])
+        s1 = float(e["end_station_m"])
+        span = s1 - s0
+        n = max(2, int(math.ceil(span / step_m)) + 1)
+        pts = []
+        for i in range(n):
+            s = s0 + span * i / (n - 1)
+            north, east = point_north_east(elements, s)
+            lat, lon = inverse(north, east, cm)
+            pts.append({"station_m": s, "lat_deg": lat, "lon_deg": lon,
+                        "north_m": north, "east_m": east})
+            all_pts.append((s, lat, lon))
+        per_element.append({
+            "element_seq": e.get("seq"),
+            "element_type": e.get("type"),
+            "start_station_m": s0,
+            "end_station_m": s1,
+            "turn_flag": e.get("turn_flag"),
+            "points": pts,
+        })
+
+    lats = [p[1] for p in all_pts]
+    lons = [p[2] for p in all_pts]
+    return {
+        "epsg": epsg,
+        "central_meridian_deg": cm,
+        "zone_number": gf.get("zone_number"),
+        "source": "computed_from_station",
+        "step_m": step_m,
+        "point_count": len(all_pts),
+        "bbox": {"lat_min": min(lats), "lat_max": max(lats),
+                 "lon_min": min(lons), "lon_max": max(lons)},
+        "elements": per_element,
+    }
+
+
+def reverse_lonlat(elements: Sequence[Mapping[str, Any]],
+                   lat_deg: float, lon_deg: float,
+                   gf: Mapping[str, Any],
+                   *, coarse_m: float = 10.0) -> dict[str, Any]:
+    """经纬度 → 最近的桩号。**最近点，不是精确解。**
+
+    ★ 为什么是"最近"而不是"解出来"：把平面坐标反投影成经纬度是闭式的，
+      但从 (经, 纬) 回到**桩号**要在这条折线上找最近点 —— 那是一个搜索，
+      没有闭式。本函数先粗扫（`coarse_m` 一档）再在邻域细化。
+
+    ★ 输出带 `offset_m`：最近点与查询点的距离。**不隐藏它** ——
+      调用方拿到一个 500 m 外的"最近桩号"却不知道，是最容易出的事。
+      超过 `max_offset_m` 一律抛错，不给一个远在天边的答案。
+    """
+    if coarse_m <= 0:
+        raise ValueError(f"coarse_m 必须为正，收到 {coarse_m}")
+    cm = float(gf["central_meridian_deg"])
+    north_q, east_q = forward(lat_deg, lon_deg, cm)
+
+    lo = min(e["start_station_m"] for e in elements)
+    hi = max(e["end_station_m"] for e in elements)
+
+    def dist(s: float) -> float:
+        n, e = point_north_east(elements, s)
+        return math.hypot(n - north_q, e - east_q)
+
+    best_s, best_d = lo, dist(lo)
+    s = lo
+    while s <= hi:
+        d = dist(s)
+        if d < best_d:
+            best_s, best_d = s, d
+        s += coarse_m
+    if dist(hi) < best_d:
+        best_s, best_d = hi, dist(hi)
+
+    # 细化：在 best_s ± coarse_m 内二分到 1 mm
+    a, b = max(lo, best_s - coarse_m), min(hi, best_s + coarse_m)
+    for _ in range(40):
+        m1 = a + (b - a) / 3.0
+        m2 = b - (b - a) / 3.0
+        if dist(m1) <= dist(m2):
+            b = m2
+        else:
+            a = m1
+    best_s = (a + b) / 2.0
+    best_d = dist(best_s)
+
+    north, east = point_north_east(elements, best_s)
+    return {
+        "lat_deg": lat_deg,
+        "lon_deg": lon_deg,
+        "north_m": north,
+        "east_m": east,
+        "station_m": best_s,
+        "offset_m": best_d,
+        "epsg": gf.get("epsg_after_confirm"),
+        "central_meridian_deg": cm,
+        "zone_number": gf.get("zone_number"),
+        "source": "computed_from_station",
+    }
