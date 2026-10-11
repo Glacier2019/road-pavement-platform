@@ -86,15 +86,49 @@ curl -s 'http://localhost:8001/v1/geometry/sections/6/geo/route' \
 **期望**：**包围盒检查必须失败。**
 
 ```bash
-# 改完必须重启 api 让它重读配置
-docker compose -f docker-compose.skeleton.yml --env-file .env restart api
-# …跑 2a，应当失败…
-# ★ 验证完立刻改回 117，并再 restart 一次
+cd scaffold
+CRS=modules/M9-console/config/crs.yaml
+cp "$CRS" /tmp/crs.bak                       # 先备份，后面要用
+sed -i 's/central_meridian_deg: 117/central_meridian_deg: 114/' "$CRS"
+
+# ★★★ 必须 **rebuild**，不是 restart
+docker compose -f docker-compose.skeleton.yml --env-file .env \
+  --profile m6 up -d --build api
+sleep 8
+curl -s 'http://localhost:8001/v1/geometry/sections/6/geo/route' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['bbox'])"   # 必须失败
+
+# ★ 验证完立刻改回并**再 rebuild 一次**
+cp /tmp/crs.bak "$CRS"
+docker compose -f docker-compose.skeleton.yml --env-file .env \
+  --profile m6 up -d --build api
 ```
 
-★★ **这一步是本 feature 最要紧的验收动作。**
-如果改错了带号它**照样通过**，那说明 SC-002 量不到它声称在量的东西 ——
-而本 feature 的原始 SC-001 正是栽在这个坑里（见 `research.md` R5）。
+> #### ⚠️ 本条原写作 `docker compose restart api` —— **那是错的，会静默空转**
+>
+> `crs.yaml` 是**构建时** `COPY` 进镜像的（`modules/M6-api/Dockerfile` 第 46 行），
+> `restart` 只是把同一个容器重开，**不会重新 COPY**。
+>
+> 2026-10-11 实测（三条都记下来，因为差别的形状本身是证据）：
+>
+> | 做法 | 容器里 `central_meridian_deg` | 包围盒经度 | SC-002 |
+> |---|---|---|---|
+> | 基线 | 117 | 117.34292..117.37376 | 通过 |
+> | 改宿主 → **restart** | **117（没变）** | **逐位相同** | **通过** ← 什么都没做 |
+> | 改宿主 → **rebuild** | **114** | 114.34292..114.37376 | **失败** ✓ |
+>
+> ★★ 危险在于它**静默**：2c 期望"检查失败"，
+> 而空转的结果是"检查通过"—— 操作者会据此认为
+> **SC-002 量不到错带号**，从而误判整个 feature 坏了。
+> **一个不改变参数就报结论的对照，比没有对照更容易骗人。**
+>
+> ★ 顺带一条正面证据：错一整带后经度**正好平移 3.000°**
+> （114.34292 − 117.34292），即一个带宽；纬度 25.16789..25.20878 不变。
+> 这正是 3 度带应有的行为。
+>
+> ★★ **这一步是本 feature 最要紧的验收动作。**
+> 如果改错了带号它**照样通过**，那说明 SC-002 量不到它声称在量的东西 ——
+> 而本 feature 的原始 SC-001 正是栽在这个坑里（见 `research.md` R5）。
 
 ---
 
@@ -102,20 +136,66 @@ docker compose -f docker-compose.skeleton.yml --env-file .env restart api
 
 ```bash
 # 超范围桩号：必须报错，不得返回最近点、不得返回原点、不得返回空对象
-curl -s -o /dev/null -w '%{http_code}\n' \
-  'http://localhost:8001/v1/geometry/sections/6/geo?station_km=9.999'
+curl -s -w '\n%{http_code}\n' \
+  'http://localhost:8001/v1/geometry/sections/6/geo?station_m=9999'
 # 期望 400
 
 # 不存在的路段
-curl -s -o /dev/null -w '%{http_code}\n' \
-  'http://localhost:8001/v1/geometry/sections/999/geo?station_km=1.0'
+curl -s -w '\n%{http_code}\n' \
+  'http://localhost:8001/v1/geometry/sections/999/geo?station_m=1000'
 # 期望 404
-
-# 经纬度落在带外（把经度挪到 120°E，超出 3 度带半宽 1.5°）
-curl -s -o /dev/null -w '%{http_code}\n' \
-  'http://localhost:8001/v1/geometry/sections/6/geo/reverse?lat=25.18&lon=120.0'
-# 期望 422
 ```
+
+**2026-10-11 实测**：
+
+```
+station_m=9999  → 400  {"detail":"桩号 9999.000 m 落在线元链之外
+                        （链覆盖 0.000 .. 5805.421 m）。不外推。"}
+sections/999    → 404  {"detail":"路段 999 没有线形单元（alignment_element 无行）"}
+```
+
+> #### ⚠️ 参数名原本写作 `station_km` —— **那是错的**
+>
+> `/geo` 收的是 **`station_m`（米）**（`app.py:499`）。
+> 写成 `station_km` 会得到 **422 `Field required: station_m`**。
+>
+> ★★ 这个错**特别容易蒙混过去**：422 也是 4xx，看上去"被拒了"。
+> 但它拒的理由是**参数没给**，跟桩号越界毫无关系 ——
+> **两条命令其实从来没测到它们要测的东西。**
+>
+> ★ 教训：一个期望 400 的检查，拿到 422 时**必须看响应体**，
+> 不能只看"是不是 4xx"。**同一个状态码区间里的两个原因不能互相顶替。**
+
+### 3b. ★★ 带外经度：**spec 说报错，实现返回 200 —— 两边不一致，尚未裁决**
+
+spec 的 Edge Cases 与 `data-model.md` §5 都写着
+「经纬度落在带外 → **报错，不硬算**」。实测**没有这道检查**：
+
+```bash
+curl -s 'http://localhost:8001/v1/geometry/sections/6/geo/reverse?lat=25.18&lon=120.0'
+# 期望（按 spec）422；实测 200
+```
+
+| 传入经度 | 离中央子午线 | HTTP | `station_m` | `offset_m` |
+|---|---|---|---|---|
+| 117.36 | 0.36° | 200 | 3671.3 | 371.7 |
+| 118.5 | 1.5° | 200 | 5805.4（钳到终点） | 113 555.4 |
+| 119.0 | 2.0° | 200 | 5805.4 | 163 975.6 |
+| **120.0** | **3.0°** | **200** | 5805.4 | **264 857.9** |
+| 125.0 | 8.0° | 200 | 5805.4 | 770 844.5 |
+| 130.0 | 13.0° | 200 | 5805.4 | 1 281 679.4 |
+
+⇒ **任何经度都不报错**，一律把桩号钳到路线端点，
+再用 `offset_m`（到线形的垂距）把"这个点其实不在路上"**如实报出来**。
+
+★ 两种读法都能自圆其说，**需要平台方裁决**：
+- **(A) 实现补上检查**：带外直接拒。
+- **(B) 改 spec**：`offset_m` 就是那道闸，带外允许但要报残差。
+
+★★ 目前 `offset_m` **是准确的但没有阈值** ——
+`371.7 m` 与 `1 281 679 m` 都是"一个数"，没有任何一句话说多大算太大。
+**一个没标定的残差不是判据**（宪法：未标定的阈值不得用于生产判定）。
+所以无论选 (A) 还是 (B)，**都要补一句"多大算越界"**。
 
 ★ **最后一条特别要紧**：`monitor_cross_section.lat/lon` 全空（0/3 行有值）。
 若实现把 `NULL` 读成 `0`，3 个断面会一起堆在几内亚湾外的 `(0°,0°)`
@@ -131,12 +211,23 @@ curl -s 'http://localhost:8001/v1/geometry/sections/6/geo/route' \
 import sys,json
 d=json.load(sys.stdin)
 for e in d['elements']:
-    print(e['element_seq'], e['element_type'], len(e['latlon']))
+    print(e['element_seq'], e['element_type'], len(e['points']))
 "
 ```
 
-**期望**：`element_type` 为 `circular` 与 `transition` 的段，`latlon` 点列**长度 > 2**
+**期望**：`element_type` 为 `circular` 与 `transition` 的段，`points` 点列**长度 > 2**
 （即给了中间点），直线段可以为 2。
+
+**2026-10-11 实测**（`step_m=20`，点总数 337）：
+
+```
+circular    中间点有 : 8 段     ★ 曲线段缺中间点的: 无 ✓
+transition  中间点有 : 16 段
+line        中间点有 : 9 段
+```
+
+★ 字段名原本写作 `latlon` —— 实际是 **`points`**（`app.py` 的 `/geo/route`）。
+写错会直接 `KeyError` 崩掉，**不会静默**，所以是良性错误。
 
 ★ 理由：圆曲线的矢高最大 **12.588 m**、缓和曲线最大 **1.736 m**。
 只连首末点会让曲线变成折线 —— 这正是 1 m 判据要挡的东西。
@@ -175,7 +266,7 @@ export DOCKER_CONFIG=/data/cy/shujuku/.dockerhome
 ./run_contract_tests.sh
 ```
 
-**期望**：全部套件绿（当前基线 20 个套件）。
+**期望**：全部套件绿（2026-10-11 实测 **通过 21 ｜ 失败 0 ｜ 跳过 0**）。
 本 feature 新增的是 `test_region_frame.py`，并扩充 `test_console.py`。
 
 ★ 注意：`test_region_frame.py` 里**每条检查都要配一条元测试** ——
@@ -184,12 +275,23 @@ export DOCKER_CONFIG=/data/cy/shujuku/.dockerhome
 
 ---
 
-## 7. 两条"不许漂移"的守卫
+## 7. 三条"不许漂移"的守卫
 
 | 守卫 | 怎么验 |
 |---|---|
 | 搬进 M6 的 `geom.py` / `errors.py` 与 M2 原件**逐字节相同** | 改原件一个字节，测试必须红 |
 | `crs.yaml` 的 `assumed` / `epsg_after_confirm` 一致 | 既有契约测试已强制（两个方向） |
+| **镜像不读那份被跟踪的副本**（`M6-api/m2geom/`） | `Dockerfile` 里不许出现 `COPY … M6-api/m2geom` |
 
 ★ 第一条是本 feature 唯一的结构性风险：**同一份数学存在于两个位置**。
 不靠"记得同步"，靠"忘了会红"。
+
+★★ 第三条容易被忽略，但它是第一条的前提：
+`M6-api/m2geom/` 里那份副本**镜像是完全不用的**
+（镜像由 `Dockerfile` 第 39–41 行从 M2 现场生成），
+它只服务于**宿主机上跑的契约测试**。
+
+⇒ 所以：**改那份副本不会改变容器里跑的任何东西。**
+而且**不能在那两个 `.py` 里写注释** ——
+加一行注释就破坏了正在被比对的逐字节相等。
+说明只能放在旁边的 `m2geom/README.md`（测试也盯着它）。

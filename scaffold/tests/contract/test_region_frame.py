@@ -326,6 +326,19 @@ def main() -> int:
           and (M2GEOM / "__init__.py").stat().st_size == 0,
           "m2geom/__init__.py 存在且为空",
           "★ 空文件是刻意的：M2 的 __init__.py 会 from . import weidi 拖进 19 个解析器")
+    # ★★ 上面那条"逐字节一致"是**硬约束**，它顺手禁止了一件事：
+    #    不能在这两个 .py 里写注释（注释会破坏相等）。
+    #    所以说明必须放在旁边 —— 这是那个 README 存在的理由。
+    check((M2GEOM / "README.md").exists(),
+          "m2geom/README.md 存在（说明为什么有副本、以及镜像不用它）",
+          "★ 见下一条：守卫禁止在副本里写注释，说明只能另放")
+    # ★★★ README 里最要紧的那句断言：「容器不用这一份」。
+    #     若哪天有人在 Dockerfile 里改成 COPY modules/M6-api/m2geom，
+    #     这句话就变成了假的 —— 那时这条必须红。
+    _m6df = (ROOT / "modules" / "M6-api" / "Dockerfile").read_text(encoding="utf-8")
+    check("M6-api/m2geom" not in _m6df,
+          "★ M6 Dockerfile 不 COPY M6-api/m2geom（镜像从 M2 自己生成，不读这份副本）",
+          "★ 若改成 COPY 这份副本，README 的结论就不成立了 —— 两处必须同时改")
 
     # ---------------------------------------------------------------- 2) 适配层
     print("\n=== 2) 适配层：与 geometry_solver 对同一批真数据输出相等 ===")
