@@ -100,3 +100,44 @@ docker compose --profile default up -d --build ingest       # 容器（容器内
 
 FastAPI 输出的是紧凑 JSON，Grafana 的 `/api/health` 输出是美化过的。
 同一个 `grep` 在一处能命中、在另一处命不中。**一律 `json.loads`。**
+
+### 5. 「设备未注册」有**两个**原因，而第二个不报错
+
+`device_code` 就是 `sensor_install.serial_no`。但映射不是查一张表就够的：
+
+```sql
+SELECT si.serial_no, si.cross_section_id, sc.id, sc.quantity_code, sc.channel_no
+FROM sensor_install si
+JOIN sensor_channel sc ON sc.install_id = si.id      -- ★ JOIN，不是 LEFT JOIN
+WHERE si.status = 'active'
+```
+
+★★ **只登记设备、不登记通道，这台设备根本进不了映射表** —— 而它看起来
+登记得好好的。`sensor_channel` 那一行不是可选的附加信息，它是**让设备可见的那一行**。
+排查「设备未注册」时先跑上面这条 SQL，而不是先怀疑报文格式。
+
+好消息：`device_of()` 遇到未知设备会**立刻重载一次**映射表（新设备接入场景），
+所以登记完**不必重启** ingest。实测日志里
+「设备映射已加载：3 台」正是第一条新设备报文到达的那一刻打出来的。
+
+★ 登记脚本见 `scaffold/sql/98_seed_sim_device.sql`。它**不挂**
+`docker-entrypoint-initdb.d` —— 它要挂靠的路段是导入流程建的，
+容器初始化时还不存在，挂上去只会静默插零条。
+
+### 6. 记录落在**哪条路**上，由设备决定 —— 而记录自己不会反驳
+
+`wim_axle_record` 的位置来自**设备映射**（`cross_section_id`），
+**不是**来自报文：`wim_axle.v1` 里没有桩号字段。
+
+后果是一条位置错得离谱的记录，和一条正确的记录**长得一模一样** ——
+`data_source`、轴重、车速、`quality_code` 全都对，没有任何字段会与之矛盾。
+
+★ 规则：把数据挂到共享表上之前，先问「**这条记录会声称自己在哪**」，
+再核对那个位置是不是真的。位置由外键（设备 / 断面 / 标段）带进来时，
+校验必须发生在**写入之前**。
+
+★★ 报文契约的三层（信封 / payload / axles[]）都是 `additionalProperties: false`，
+**没有**任何位置可以标注「这是仿真数据」。所以 `device_code` 是唯一的溯源通道 ——
+给仿真数据一个自己的设备（`SIMWIM01`），不要占用真设备（`WIM01`）。
+详见 `scaffold/simulator/crg/README.md` 坑二十四。
+
