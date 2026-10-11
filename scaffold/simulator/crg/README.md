@@ -69,6 +69,9 @@ python3 gen_crg.py                 # 生成 route_0p1m.crg（可用 CRG_OUT=... 
 python3 validate_crg.py            # 按官方 loader 源码规则校验（16 条）
 python3 export_mesh.py             # 导出网格 / 中心线 / 边界
 
+# 轮荷 CSV → 一条合规的 wim_axle.v1 报文（详见「轮荷变轴载」一节）
+python3 chrono_to_wim.py ../../../artifacts/sim/wheel_loads.csv --station-m 2900
+
 # 用官方 OpenCRG 库实读验证
 gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
     $OPENCRG/lib/libOpenCRG.a -lm
@@ -77,6 +80,7 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
 
 三个 Python 脚本都接受可选的 `.crg` 路径参数（默认 `route_0p1m.crg`），
 且只依赖 Python 标准库（`export_mesh.py` 亦然），可在任意目录直接运行。
+`chrono_to_wim.py` 是例外：它吃的是轮荷 CSV，且校验报文 schema 需要 `jsonschema`。
 
 ### 给前端的抽稀网格（`export_viewer_mesh.py` → 交付目录）
 
@@ -232,6 +236,58 @@ demo_vehicle_on_crg route_0p1m.crg --speed 15 --duration 600 \
 > 「没有接触」和「载荷为零」——Chrono 的 `TerrainForce` 没有接触标志位，
 > 唯一能区分的办法就是看 `pz`：**同时为 0 ⇒ 没有接触**。
 > 详见「坑十三」。
+
+### 轮荷变轴载、再变成真报文（`chrono_to_wim.py`）
+
+```bash
+# 只看（dry run）：合成一条 wim_axle.v1 报文并自检，不联网
+uv run --with jsonschema python3 chrono_to_wim.py \
+  ../../../artifacts/sim/wheel_loads.csv --station-m 2900
+
+# 真发到 MQTT（ingest 在监听 g228/+/+/axle）
+uv run --with jsonschema --with paho-mqtt python3 chrono_to_wim.py \
+  ../../../artifacts/sim/wheel_loads.csv --station-m 2900 \
+  --publish --host localhost --port 18883
+```
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `<csv>` | 必填 | `--csv` 导出的轮荷表 |
+| `--station-m` | 必填 | 取哪一桩号的过车（就近取行） |
+| `--device-code` | `SIMWIM01` | 报文里的 `device_code`，也是落库的 `data_source` |
+| `--lane` / `--direction` | 2 / `up` | 车道号与行驶方向 |
+| `--vehicle-json` | HMMWV 车型文件 | 轴距从这里读，**不写死** |
+| `--seq` | `int(round(s_m))` | 报文序号；同一桩号重发不会造重复记录 |
+| `--publish` | 关 | 不开就是 dry run |
+
+★★ **核心不是格式转换，是物理量换算。** Chrono 导出**轮**载（每轴左右各一轮），
+WIM 设备报**轴**载（一根轴一个数）。「左右两轮相加」是**定义**不是近似，
+所以它只在一处写明白。kN → kg 过 **9.80665**；改用 9.8，40 t 上就差 80 kg ——
+恰好落在 `models.py` 那条 2% 总重一致性检查的量级上。
+
+★ **轴距读自车型文件**（`HMMWV_Vehicle.json` 的 `Wheelbase: 3.378`），不写死。
+写死的数换车之后没人会记得改，而它看起来完全合理。
+
+★★ **`device_code` 是唯一的溯源通道。** `wim_axle.v1` 契约的**三层**
+（信封 / payload / axles[]）都是 `additionalProperties: false` ——
+报文里里外外**没有**标注「这是仿真」的位置。ingest 把 `device_code`
+写成 `data_source = 'mqtt:<device_code>'`，所以设备名里的 `SIM` 承载语义。
+
+★ 取**稳态**行，不取第一行。`t = 0.02 s` 那行四轮合计 46.4 kN 是落地 settling
+的瞬态，稳态约 25.3 kN —— 取错行，轴载大约差一倍，而且照样解析得过去。
+
+实测（`s = 2899.81 m`，即 `--station-m 2900`）：
+
+| 量 | 值 |
+|---|---|
+| 轴1 / 轴2 | 1285.8 kg / 1292.0 kg |
+| 总重 | 2577.8 kg（25.3 kN） |
+| 车速 | 51.41 km/h |
+| 轴距 | 0 mm / 3378 mm |
+
+> 落库结果逐数一致：`axle_weight_kg` 1285.8 / 1292.0，`axle_dist_mm` 0.0 / 3378.0，
+> `gross_weight_kg` 2577.8，`speed_kmh` 51.4，
+> `data_source` = `mqtt:SIMWIM01` → 断面 K2+900 → `road_section`「毕设」。
 
 ### 做视频
 
@@ -1343,3 +1399,86 @@ CRG 网格之外，`crgEvalxy2uv`（逆变换、**迭代**搜索）在那里反�
 - **一个字段名不是它的语义。** 从 `elev_diff` 推出"路拱 2.53%"，
   自检立刻报 111 mm 偏差；实测路拱高差是 **0.0002 mm**，路面就是平的（坑二十二）。
   把它算出来的东西**拿去做自检**，比"看起来合理就发布"便宜得多。
+
+**这一轮新增的两条**（都来自"把仿真载荷送进平台"这件事）：
+
+- **一条记录落在哪条路上，取决于设备登记在哪条路上 —— 而记录本身不会反驳。**
+  Chrono 跑的是「毕设」K0+000→K5+805，而全库两个监测断面都在「滨海大通道」上。
+  把仿真载荷发到 `WIM01` 名下，库里会多一条"车在 K4640+000 过车"的记录，
+  而车从没去过那条路。★ `wim_axle_record` 只带 `cross_section_id`、**不带桩号**，
+  所以一条位置错得离谱的记录，和一条正确的记录长得一模一样（坑二十四）。
+- **"这个脚本跑通了"和"仓库能重建出这个结果"是两件事。** 我先把登记直接写进活库，
+  联表一查三台设备齐了；可换成**全新数据库**只跑仓库里的 SQL，
+  `SIMWIM01` 一条都没长出来。活库上的"通过"是因为活库里那条路段是**别处导入**的。
+  ★ 种子/迁移脚本的正确性，只能靠在空库上跑一遍来证明（坑二十四）。
+
+### 坑二十四：设备登记在**另一条路**上，而记录不会说话
+
+**症状**：仿真载荷成功入库，`data_source`、轴重、车速全都对，看不出任何异常。
+唯一的问题是**这条记录声称的位置是错的**，而且没有任何字段会与之矛盾。
+
+**根因**：`wim_axle_record` 的位置来自**设备**，不是来自报文。
+`cross_section_id` 由 ingest 的 `sensor_install → monitor_cross_section` 映射给出，
+报文里没有桩号。所以"车在哪过的"这件事完全由**你挑哪台设备**决定。
+
+**这个仓库里的具体形状**：
+
+| 表 | 内容 |
+|---|---|
+| `road_section`「毕设」 | K0+000.000 → K5+805.421 ← **Chrono 跑的就是这条** |
+| `road_section`「滨海大通道试验段」 | K4635+000 → K4654+701 |
+| `monitor_cross_section` 两条 | **都**挂在「滨海大通道」上 |
+| `sensor_install` `WIM01` | 也挂在「滨海大通道」上 |
+
+**做法**：给仿真路单独登记一个设备（`SIMWIM01`），不在既有设备上落数据。
+
+**为什么 `device_code` 是唯一的溯源通道**：`wim_axle.v1` 契约的**三层**
+（信封 / payload / axles[]）都是 `additionalProperties: false` ——
+**没有**任何位置可以标注"这是仿真"。ingest 把 `device_code`
+写成 `data_source = 'mqtt:SIMWIM01'`，这是唯一能追回来源的字段。
+所以设备名里的 `SIM` 不是命名习惯，它是**承载语义的**。
+
+**登记要三张表，少一张就静默变成"设备未注册"**：
+
+```sql
+-- ingest 的 MAP_SQL 是 JOIN，不是 LEFT JOIN：
+SELECT si.serial_no, si.cross_section_id, sc.id, sc.quantity_code, sc.channel_no
+FROM sensor_install si
+JOIN sensor_channel sc ON sc.install_id = si.id
+WHERE si.status = 'active';
+```
+
+`device_code` 就是 `sensor_install.serial_no`。只登记 `sensor_install`、
+不登记 `sensor_channel`，JOIN 不到就**根本进不了映射表**，
+报文被计入 `rejected` 并在 `/healthz` 报「设备未注册」。
+★ 好消息是 `device_of()` 遇到未知设备会**立刻重载一次**映射表
+（新设备接入场景），所以登记完不必重启 ingest —— 实测日志里
+「设备映射已加载：3 台」就出现在第一条 `SIMWIM01` 报文到达的那一刻。
+
+**登记脚本不能放进 `docker-entrypoint-initdb.d`**：
+
+`sql/98_seed_sim_device.sql` 要挂靠的「毕设」路段是 **`design_import`
+从学生的设计文件里建出来的**，容器初始化那一刻它还不存在。
+我先把这段依赖写进 `90_seed_skeleton.sql`，在全新库上它匹配到**零行**、
+一声不响地插了 0 条 —— 而活库上看起来"通过"，因为活库里那条路段是别处导入的。
+★ 所以它改成一个**独立脚本**，并且找不到「毕设」时 `RAISE EXCEPTION`
+（实测退出码 **3**），而不是静默跳过。
+「静默的零条」比「报错」难查得多 —— 报错至少告诉你哪里不对。
+
+**判据**：`sql/98_seed_sim_device.sql` 的自检应当满足
+
+```
+设备：STRAIN01, WIM01, SIMWIM01
+SIMWIM01 → 断面 K2+900 → section「毕设」     ← 不是「滨海大通道试验段」
+MAP_SQL 里 SIMWIM01 带 axle_load 通道
+```
+
+**通用化**：把数据挂到共享表上之前，先问"**这条记录会声称自己在哪**"，
+再核对那个位置是不是真的。如果位置是由**外键**（设备、断面、标段）带进来的，
+那么数据本身永远不会暴露位置错误 —— 校验必须发生在**写入之前**。
+
+★★ **活库上验证通过 ≠ 仓库能重建。** 这条坑的证明方式不是"再看一眼活库"，
+而是在**空数据库**上只跑仓库里的 SQL。种子/迁移脚本的依赖如果指向
+一个由别的流程创建的实体（这里是 `design_import` 建的路段），
+那么它在空库上必然静默失效，而在开发机上永远看不出来。
+
