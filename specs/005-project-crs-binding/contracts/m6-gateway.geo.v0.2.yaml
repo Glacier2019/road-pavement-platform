@@ -1,0 +1,400 @@
+# ============================================================================
+# M6 统一数据出口 —— 坐标基准两级绑定契约 v0.2
+# ----------------------------------------------------------------------------
+# 本文件是 m6-gateway.geo.v0.1.yaml 的**增量**，只描述 005-project-crs-binding
+# 新增与变化的部分。真源仍是服务运行后自动生成的 /openapi.json；
+# 本文件是它的人工摘要，用于评审与对接。
+#
+# ★★★ 本文件与 v0.1 的头号区别：**所有字段名都写在 `schema:` 块里。**
+#
+#   v0.1 的头部记着这条教训，逐字引用：
+#     「prose 写的契约不是契约，是注释。」
+#   它漂了很久没人发现，直到 quickstart 逐条跑验收才暴露 ——
+#   参数名声明 `station_km`（实现收 `station_m`）、字段名声明 `x`/`y`
+#   （实现返 `north_m`/`east_m`）、声明了 `latlon`（实现返 `points`）。
+#   **而下游文档正是从这里抄错的，错一次传染一次。**
+#
+#   ⇒ 所以 v0.2 里每一个新增字段都带 `type`；每一个 `200` 都带
+#     `properties` + `required`，**没有任何一个字段名只活在 `description:` 里**。
+#
+# ★ 本文件的字段名全部来自**活体实测**（2026-10-11，容器内 rp-api，端口 8001）：
+#     /v1/geometry/sections                    → {count, items[]}
+#     /v1/geometry/sections/{id}/geo           → 10 键
+#     /v1/geometry/sections/{id}/geo/reverse   → 14 键
+#     /v1/geometry/sections/{id}/geo/route     → 9 键 + bbox + elements[]
+#     /v1/geometry/sections/{id}/monitor-sections → 7 键 + cross_sections[] + counts_by_source
+#
+# ★ 本文件只声明**实现里存在的东西**。004 犯过一次：在修「声明了但不存在」
+#   的缺陷时，又声明了一条没有实现的路径。**修一条谎的时候最容易再说一条谎。**
+# ============================================================================
+
+openapi: 3.0.3
+info:
+  title: M6 统一数据出口 —— 坐标基准两级绑定（增量契约）
+  version: 0.2.0
+  description: |
+    v0.1 → v0.2 的增量。变更凭据：`specs/005-project-crs-binding/contracts/契约变更工单-005.md`。
+
+    ## 这一版解决什么
+
+    v0.1 时，全平台**一份**坐标基准。它来自一个进程级环境变量：
+
+    ```python
+    # geo.py:284-295
+    return pathlib.Path(os.getenv("RP_CRS_CONFIG", "crs.yaml"))
+    ```
+
+    ⇒ 两个不同中央子午线的项目**无法共存**：后一个的桩号会被前一个的带号
+    投影到几百公里外，**而路的形状完全正确、不报任何错**。
+
+    v0.2 让基准**跟着主体走**：项目级 + 路段级，存在数据库里。
+
+    ## 本版新增的两个字段
+
+    | 字段 | 含义 |
+    |---|---|
+    | `crs_source` | ★ **这个基准是在哪一级被写下的**（`project` / `section`） |
+    | `crs_assumed` | ★ **值可不可信**（继承 004 的语义：`ready` 说能不能用，`assumed` 说值可不可信） |
+
+    ★★ **`crs_source` 是溯源，不是优先级。** 两级必须一致（不等即拒），
+    所以级别不决定谁赢 —— 它只回答「这个值从哪儿读到的」，这样人要改它时
+    知道去改哪一行。
+
+    ## 本版的一处行为收紧
+
+    两级都配了基准、且**取值不同**时，系统**拒绝**并报错，
+    错误信息 MUST 说出**两级的取值各是什么**。
+
+    ★ **兼容性**：加列前两级都是 NULL，所以**不存在任何可比较的两级配置**，
+    **没有现存数据会因此变红**。
+
+paths:
+
+  # ==========================================================================
+  # 1. 路段列表 —— 新增基准字段（原来一个都没有）
+  # ==========================================================================
+  /v1/geometry/sections:
+    get:
+      summary: 所有路段（含所属路线／项目／分段属性／三类几何计数／坐标基准）
+      responses:
+        '200':
+          description: 路段列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: {type: integer}
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                        - section_name
+                        - line_code
+                        - crs_source
+                        - crs_assumed
+                      properties:
+                        # ---- 原有（v0.1 已存在，此处列举以保证可比对）----
+                        id: {type: integer}
+                        section_name: {type: string}
+                        start_station_text: {type: string}
+                        end_station_text: {type: string}
+                        start_station_km: {type: number}
+                        end_station_km: {type: number}
+                        length_m: {type: number}
+                        pavement_type: {type: string, nullable: true}
+                        climate_zone: {type: string, nullable: true}
+                        line_id: {type: integer}
+                        line_code: {type: string}
+                        line_name: {type: string, nullable: true}
+                        road_class: {type: string, nullable: true}
+                        design_speed: {type: number, nullable: true}
+                        lane_count: {type: integer, nullable: true}
+                        project_id: {type: integer, nullable: true}
+                        project_name: {type: string, nullable: true}
+                        project_uid: {type: string, nullable: true}
+                        designer: {type: string, nullable: true}
+                        road_grade: {type: string, nullable: true}
+                        design_speed_kmh: {type: number, nullable: true}
+                        cross_section_form: {type: string, nullable: true}
+                        roadway_width_m: {type: number, nullable: true}
+                        station_count: {type: integer}
+                        pi_count: {type: integer}
+                        element_count: {type: integer}
+                        # ---- ★ v0.2 新增 ----
+                        # ★★ 2026-10-12 按宪法原则 VI 定权：crs_epsg 是唯一权威字段；
+                        #    下面三个习惯记法是可空注释 —— 有则与 crs_epsg 自洽，无则不报错。
+                        #    理由：UTM 与 Lambert 没有「带号」这个概念（research.md R11 补记）。
+                        #    这四项都 NOT required：本接口只如实报出库里有什么，不替客户端判必填。
+                        crs_source:
+                          type: string
+                          nullable: true
+                          enum: [project, section]
+                        crs_assumed: {type: boolean, nullable: true}
+                        crs_zone_number: {type: integer, nullable: true}
+                        crs_central_meridian_deg: {type: number, nullable: true}
+                        crs_epsg: {type: integer, nullable: true}
+
+  # ==========================================================================
+  # 2. 桩号 → 经纬度 —— 增 crs_source / crs_assumed
+  # ==========================================================================
+  /v1/geometry/sections/{section_id}/geo:
+    get:
+      summary: 桩号 → 经纬度
+      parameters:
+        - {name: section_id, in: path, required: true, schema: {type: integer}}
+        - {name: station_m, in: query, required: true, schema: {type: number}}
+      responses:
+        '200':
+          description: 算出来了
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - section_id
+                  - lat_deg
+                  - lon_deg
+                  - north_m
+                  - east_m
+                  - station_m
+                  - zone_number
+                  - central_meridian_deg
+                  - epsg
+                  - source
+                  - crs_source
+                  - crs_assumed
+                properties:
+                  section_id: {type: integer}
+                  lat_deg: {type: number}
+                  lon_deg: {type: number}
+                  north_m: {type: number}
+                  east_m: {type: number}
+                  station_m: {type: number}
+                  zone_number: {type: integer}
+                  central_meridian_deg: {type: number}
+                  epsg: {type: integer}
+                  source:
+                    type: string
+                    enum: [computed_from_station]
+                  # ---- ★ v0.2 新增 ----
+                  crs_source:
+                    type: string
+                    enum: [project, section]
+                  crs_assumed: {type: boolean}
+        '404':
+          description: 路段不存在，或该路段没有线形单元
+        '503':
+          description: ★ 该主体没有配坐标基准 —— **有类型的「没有」，不是回落到 39 带**
+
+  # ==========================================================================
+  # 3. 经纬度 → 桩号（反查）—— 满 14 键 + 两个溯源字段
+  # ==========================================================================
+  /v1/geometry/sections/{section_id}/geo/reverse:
+    get:
+      summary: 经纬度 → 桩号（含残差与分带）
+      parameters:
+        - {name: section_id, in: path, required: true, schema: {type: integer}}
+        - {name: lat, in: query, required: true, schema: {type: number}}
+        - {name: lon, in: query, required: true, schema: {type: number}}
+      responses:
+        '200':
+          description: ★ 带外也返 200（如实报残差，比拒绝更有用）
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - section_id
+                  - lat_deg
+                  - lon_deg
+                  - north_m
+                  - east_m
+                  - station_m
+                  - station_is_nearest
+                  - offset_m
+                  - offset_band
+                  - offset_bands_m
+                  - epsg
+                  - central_meridian_deg
+                  - zone_number
+                  - source
+                  - crs_source
+                  - crs_assumed
+                properties:
+                  section_id: {type: integer}
+                  lat_deg: {type: number}
+                  lon_deg: {type: number}
+                  north_m: {type: number}
+                  east_m: {type: number}
+                  station_m: {type: number}
+                  station_is_nearest: {type: boolean}
+                  offset_m: {type: number}
+                  offset_band:
+                    type: string
+                    enum: [on_roadbed, in_corridor, off_corridor]
+                  offset_bands_m:
+                    type: object
+                    required: [on_roadbed, in_corridor]
+                    properties:
+                      on_roadbed: {type: number}
+                      in_corridor: {type: number}
+                  epsg: {type: integer}
+                  central_meridian_deg: {type: number}
+                  zone_number: {type: integer}
+                  source:
+                    type: string
+                    enum: [computed_from_lonlat]
+                  # ---- ★ v0.2 新增 ----
+                  crs_source:
+                    type: string
+                    enum: [project, section]
+                  crs_assumed: {type: boolean}
+
+  # ==========================================================================
+  # 4. 全路线 —— 增 crs_source / crs_assumed
+  # ==========================================================================
+  /v1/geometry/sections/{section_id}/geo/route:
+    get:
+      summary: 整条路线的点列（含包围盒）
+      parameters:
+        - {name: section_id, in: path, required: true, schema: {type: integer}}
+      responses:
+        '200':
+          description: 路线点列
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - section_id
+                  - point_count
+                  - step_m
+                  - bbox
+                  - elements
+                  - zone_number
+                  - central_meridian_deg
+                  - epsg
+                  - source
+                  - crs_source
+                  - crs_assumed
+                properties:
+                  section_id: {type: integer}
+                  point_count: {type: integer}
+                  step_m: {type: number}
+                  bbox:
+                    type: object
+                    required: [lat_min, lat_max, lon_min, lon_max]
+                    properties:
+                      lat_min: {type: number}
+                      lat_max: {type: number}
+                      lon_min: {type: number}
+                      lon_max: {type: number}
+                  elements:
+                    type: array
+                    items:
+                      type: object
+                      required: [element_seq, element_type, start_station_m, end_station_m, turn_flag, points]
+                      properties:
+                        element_seq: {type: integer}
+                        element_type: {type: string}
+                        start_station_m: {type: number}
+                        end_station_m: {type: number}
+                        turn_flag: {type: string, nullable: true}
+                        points: {type: array}
+                  zone_number: {type: integer}
+                  central_meridian_deg: {type: number}
+                  epsg: {type: integer}
+                  source: {type: string}
+                  # ---- ★ v0.2 新增 ----
+                  crs_source:
+                    type: string
+                    enum: [project, section]
+                  crs_assumed: {type: boolean}
+
+  # ==========================================================================
+  # 5. 监测断面位置 —— 七键 + 断面表 + 两个溯源字段
+  # ==========================================================================
+  /v1/geometry/sections/{section_id}/monitor-sections:
+    get:
+      summary: 监测断面的经纬度（三种来源如实分开）
+      parameters:
+        - {name: section_id, in: path, required: true, schema: {type: integer}}
+      responses:
+        '200':
+          description: ★ 路段存在但一个断面都没有时，也返 200 + 空表（不返 404）
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - section_id
+                  - position_rule
+                  - counts_by_source
+                  - cross_sections
+                  - zone_number
+                  - central_meridian_deg
+                  - epsg
+                  - crs_source
+                  - crs_assumed
+                properties:
+                  section_id: {type: integer}
+                  position_rule: {type: string}
+                  counts_by_source:
+                    type: object
+                    required: [stored, computed_from_station, unavailable]
+                    properties:
+                      stored: {type: integer}
+                      computed_from_station: {type: integer}
+                      unavailable: {type: integer}
+                  cross_sections:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                        - station_text
+                        - station_m
+                        - lane_no
+                        - purpose
+                        - status
+                        - position_source
+                        - devices
+                      properties:
+                        id: {type: integer}
+                        station_text: {type: string}
+                        station_m: {type: number}
+                        lane_no: {type: integer}
+                        purpose: {type: string, nullable: true}
+                        status: {type: string, nullable: true}
+                        position_source:
+                          type: string
+                          enum: [stored, computed_from_station, unavailable]
+                        stored_lat: {type: number, nullable: true}
+                        stored_lon: {type: number, nullable: true}
+                        lat_deg: {type: number, nullable: true}
+                        lon_deg: {type: number, nullable: true}
+                        north_m: {type: number, nullable: true}
+                        east_m: {type: number, nullable: true}
+                        devices: {type: array}
+                  zone_number: {type: integer}
+                  central_meridian_deg: {type: number}
+                  epsg: {type: integer}
+                  # ---- ★ v0.2 新增 ----
+                  crs_source:
+                    type: string
+                    enum: [project, section]
+                  crs_assumed: {type: boolean}
+        '404':
+          description: 路段不存在
+
+# ============================================================================
+# ★ 本版**不新增任何路径**。v0.1 有四条路径，v0.2 还是那四条。
+#
+#   004 犯过一次：在修「声明了但不存在」的缺陷时，顺手加了一条
+#   `/geo/reverse/bands` —— 而它没有实现。**在修谎的时候又说了一条谎。**
+#   所以这一版的规矩是：**只加字段，不加路径。**
+# ============================================================================
