@@ -362,6 +362,39 @@ def main() -> int:
     check("元测试：某张表的 side 列行被删掉（只剩 7 张）时也必须变红 —— 防扫描静默失效",
           _short != txt and not _side_vocab_ok(_short))
 
+    # ── 10) 声明过的列，字典必须登记 ────────────────────────────────────────
+    # ★ 2026-10-12（005 T007）为什么加这一条：
+    #   本测试的**其余部分只比表的集合**。表的集合没变，所以给一张已有的表加列、
+    #   却忘了往字典里写 —— 上面 39 条断言**一条都不会响**。实测：加 `crs_` 十二列
+    #   前后跑本测试，结果逐字相同（通过 39 ｜ 失败 0）。
+    #   「声明了没断言 = 没声明」（宪法原则 VI）。这一条把「加列要同步字典」钉住。
+    #
+    #   作用域是**窄的、但不是空的**：它只认 DDL 里声明了、且带注释头的这一类列族
+    #   （`crs_`）。给全库 901 个列做逐列对账是另一件事，会先撞上历史欠账，
+    #   不在 005 范围内 —— 但至少**这一族**从此不会被静默漏掉。
+    def _crs_cols_covered(ddl_text: str, dict_text: str) -> tuple[bool, str]:
+        declared = sorted(set(re.findall(
+            r"^\s+(crs_\w+)\s+(?:integer|smallint|numeric|boolean|text)", ddl_text, re.M)))
+        if not declared:
+            # 一个都提取不到 ⇒ 谓词恒真 ⇒ 正是「永远不会失败的检查」。
+            # 报红而不是报绿：扫描失效必须能被看见。
+            return False, "★ DDL 里一个 crs_ 列都没扫到 —— 扫描失效，不是「没有」"
+        missing = [c for c in declared if c not in dict_text]
+        return (not missing), f"DDL 声明 {len(declared)} 个：{', '.join(declared)}" + (
+            f"；★ 字典缺：{', '.join(missing)}" if missing else "；字典全部登记 ✓")
+
+    dict_txt = DICT_PATH.read_text(encoding="utf-8")
+    _cov_ok, _cov_detail = _crs_cols_covered(txt, dict_txt)
+    check("★ v0.6 的 crs_ 列：DDL 声明了的，数据字典必须登记（防「加列忘写手册」静默）",
+          _cov_ok, _cov_detail)
+    check("★ 非空转：crs_ 列确实扫到了（证明上面那条不是恒真）",
+          "DDL 里一个 crs_ 列都没扫到" not in _cov_detail)
+    # 元测试：把字典里的一列删掉，**同一个谓词**必须变红。
+    _dict_bad = dict_txt.replace("crs_evidence", "crs_XXXXXX")
+    _bad_ok, _bad_detail = _crs_cols_covered(txt, _dict_bad)
+    check("元测试：字典里少登记一列后必须变红（证明比对真的在看字典内容）",
+          _dict_bad != dict_txt and not _bad_ok and "crs_evidence" in _bad_detail)
+
     print("\n" + "=" * 74)
     print(f"通过 {PASS} ｜ 失败 {FAIL}")
     print("=" * 74)
