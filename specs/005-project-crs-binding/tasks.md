@@ -30,9 +30,9 @@ description: "Task list for 005-project-crs-binding"
 
 **Purpose**: 把两处会串味的既有约定先固定下来，避免后面对不上。
 
-- [ ] T001 复核实测基线：跑 `cd scaffold && export DOCKER_CONFIG=/data/cy/shujuku/.dockerhome && ./run_contract_tests.sh`，记录 **通过 / 失败 / 跳过** 三个数（期望 21｜0｜0），把它写进 `specs/005-project-crs-binding/tasks.md` 末尾的备注，作为「改之前」的快照
-- [ ] T002 [P] 读 `scaffold/run_contract_tests.sh` 第 41–74 行的**套件注册表**（格式 `"名字|说明|模块|桶|路径"`），确认五个桶（`PY` / `PYDAO` / `DAO` / `API` / `CONSOLE` / `NODE`）各自的依赖集，写进备注供 T0xx 用
-- [ ] T003 [P] 实测确认 M6 的 `geo.py` 当前**零数据库**：`grep -c 'psycopg\|connect\|PG_DSN\|cursor\|execute' scaffold/modules/M6-api/geo.py`（期望只有 1 处、且是 `geo.py:176` 的 docstring 提到 `numeric`→`Decimal`），把这条命令和结果写进备注作为「改之前」的证据
+- [x] T001 复核实测基线：跑 `cd scaffold && export DOCKER_CONFIG=/data/cy/shujuku/.dockerhome && ./run_contract_tests.sh`，记录 **通过 / 失败 / 跳过** 三个数（期望 21｜0｜0），把它写进 `specs/005-project-crs-binding/tasks.md` 末尾的备注，作为「改之前」的快照
+- [x] T002 [P] 读 `scaffold/run_contract_tests.sh` 第 41–74 行的**套件注册表**（格式 `"名字|说明|模块|桶|路径"`），确认五个桶（`PY` / `PYDAO` / `DAO` / `API` / `CONSOLE` / `NODE`）各自的依赖集，写进备注供 T0xx 用
+- [x] T003 [P] 实测确认 M6 的 `geo.py` 当前**零数据库**：`grep -c 'psycopg\|connect\|PG_DSN\|cursor\|execute' scaffold/modules/M6-api/geo.py`（期望只有 1 处、且是 `geo.py:176` 的 docstring 提到 `numeric`→`Decimal`），把这条命令和结果写进备注作为「改之前」的证据
 
 ---
 
@@ -44,9 +44,9 @@ description: "Task list for 005-project-crs-binding"
 
 ### 表结构（契约②）
 
-- [ ] T004 在 `scaffold/sql/10_ddl_v0.6.sql` 的 `design_project` 表定义里加六个列，**逐字按 data-model.md E1**（★ 2026-10-12 按宪法原则 VI 定权：`crs_epsg` 是**唯一权威字段**，`crs_zone_number` / `crs_central_meridian_deg` / `crs_zone_width_deg` 是**可空注释**）：`crs_zone_number smallint`、`crs_central_meridian_deg numeric(9,6)`、`crs_epsg integer`、`crs_zone_width_deg numeric(4,2)`、`crs_assumed boolean`、`crs_evidence text`。**六列全部可空**（现有两行路段、一行项目都不带基准，加列后必须依然合法）
-- [ ] T005 在 `scaffold/sql/10_ddl_v0.6.sql` 的 `road_section` 表定义里加**同样的六个列**（同名同类型，逐字同上）
-- [ ] T006 新建 `scaffold/sql/98_migrate_v06_crs_binding.sql`，对已有库做 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，**六个列 × 两张表**。★ 必须与 T004/T005 得到等价 schema —— 套件 `m1-装库一致`（`tests/contract/test_ddl_migration_parity.py`）会验这一点
+- [x] T004 在 `scaffold/sql/10_ddl_v0.6.sql` 的 `design_project` 表定义里加六个列，**逐字按 data-model.md E1**（★ 2026-10-12 按宪法原则 VI 定权：`crs_epsg` 是**唯一权威字段**，`crs_zone_number` / `crs_central_meridian_deg` / `crs_zone_width_deg` 是**可空注释**）：`crs_zone_number smallint`、`crs_central_meridian_deg numeric(9,6)`、`crs_epsg integer`、`crs_zone_width_deg numeric(4,2)`、`crs_assumed boolean`、`crs_evidence text`。**六列全部可空**（现有两行路段、一行项目都不带基准，加列后必须依然合法）
+- [x] T005 在 `scaffold/sql/10_ddl_v0.6.sql` 的 `road_section` 表定义里加**同样的六个列**（同名同类型，逐字同上）
+- [x] T006 新建 `scaffold/sql/98_migrate_v06_crs_binding.sql`，对已有库做 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，**六个列 × 两张表**。★ 必须与 T004/T005 得到等价 schema —— 套件 `m1-装库一致`（`tests/contract/test_ddl_migration_parity.py`）会验这一点
 - [ ] T007 在 `scaffold/sql/数据字典-v0.6.md` 里登记这十二个列（两张表各六个）。★ 套件 `m1-表数`（`tests/contract/test_ddl_dict_catalog.py`）会比对 DDL ↔ 数据字典 ↔ catalog 三处
 
 ### 读列（契约③，M3-rpdao）

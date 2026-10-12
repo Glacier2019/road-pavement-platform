@@ -239,10 +239,31 @@ CREATE TABLE IF NOT EXISTS design_project (
     design_org         varchar(128),                      -- 设计单位
     design_stage       varchar(64),                       -- 设计阶段（初步设计/施工图…）
     source_file        varchar(255),                      -- 来源 .PRJ 文件名
+    -- ★ 坐标系绑定（v0.6 迁移 98，契约变更工单 005）
+    --   权威字段是 crs_epsg；其余三个是**可空的人类可读注释**。
+    --   为什么不把「带号 + 中央子午线」当权威（宪法原则 VI）：
+    --     UTM 有另一套带号；Lambert / 阿尔伯斯 / 地理坐标**根本没有「带号」**
+    --     这个概念。把带号做成必填，数据模型就被钉死在中国高斯-克吕格上 ——
+    --     而这是产品要卖到国外时第一个要拆掉的东西。
+    --   ★ 外键不是装饰：实测 `insert ... values (999999)` 会被数据库直接拒绝
+    --     （Key (srid)=(999999) is not present in table "spatial_ref_sys"）。
+    --     于是 FR-005「查不到当场拒绝」是**结构上做不到**，不是一句约定。
+    crs_epsg           integer REFERENCES spatial_ref_sys(srid),  -- ★权威：EPSG/SRID（4548）
+    crs_zone_number    smallint,                          -- 注释：带号（39）
+    crs_central_meridian_deg numeric(9,6),                -- 注释：中央子午线（117）
+    crs_zone_width_deg numeric(4,2),                      -- 注释：带宽（3.00）
+    crs_assumed        boolean,                           -- 值可不可信（与 ready 分开两问）
+    crs_evidence       text,                              -- ★推断依据，MUST 与基准同存（FR-015）
     remark             text
 );
 COMMENT ON TABLE design_project IS '设计项目台账（设计期数据血缘起点）；一个项目对应一套纬地工程文件';
 COMMENT ON COLUMN design_project.station_interval_m IS '桩号间隔，决定逐桩数据的默认密度';
+COMMENT ON COLUMN design_project.crs_epsg IS '★权威坐标系：EPSG/SRID。外键指向 spatial_ref_sys，查不到即存不进去';
+COMMENT ON COLUMN design_project.crs_zone_number IS '可空注释：带号。只在分带投影族里有意义，没有不得报错';
+COMMENT ON COLUMN design_project.crs_central_meridian_deg IS '可空注释：中央子午线。手写换算路径需要它';
+COMMENT ON COLUMN design_project.crs_zone_width_deg IS '可空注释：带宽。只在分带投影族里有意义';
+COMMENT ON COLUMN design_project.crs_assumed IS '值可不可信：true＝猜的，false＝已确认';
+COMMENT ON COLUMN design_project.crs_evidence IS '推断依据。MUST 与基准同存，否则依据会与值分开漂（FR-015）';
 
 -- A7. 设计文件台账 design_file
 CREATE TABLE IF NOT EXISTS design_file (
@@ -326,10 +347,28 @@ CREATE TABLE IF NOT EXISTS road_section (
     direction     varchar(16),                           -- 方向（上行/下行）
     pavement_type varchar(64),                           -- 路面结构类型（沥青混凝土）
     climate_zone  varchar(64),                           -- 气候分区（南方湿热滨海）
+    -- ★ 坐标系绑定（v0.6 迁移 98，契约变更工单 005）—— 与 design_project 同名同类型
+    --   路段级与项目级**两份**：项目级定基准，路段级是可选覆盖。
+    --   两级都有且 crs_epsg 不等时，由写入侧拒绝（见 data-model.md I3 / research.md R6）。
+    --   ★ 为什么路段级也要有：长线状工程跨越两个投影带时，规范上按**整条线一个
+    --     中央子午线**处理，而不是在某个桩号处拼接。所以「路段级不等于项目级」
+    --     几乎总是录入错误 —— 但要能表达它，才能拒绝它（Q1b = B）。
+    crs_epsg           integer REFERENCES spatial_ref_sys(srid),  -- ★权威：EPSG/SRID
+    crs_zone_number    smallint,                          -- 注释：带号
+    crs_central_meridian_deg numeric(9,6),                -- 注释：中央子午线
+    crs_zone_width_deg numeric(4,2),                      -- 注释：带宽
+    crs_assumed        boolean,
+    crs_evidence       text,
     remark        text
 );
 COMMENT ON TABLE  road_section IS '路段档案（路线→路段）';
 COMMENT ON COLUMN road_section.start_station_km IS '数值桩号便于区间排序检索';
+COMMENT ON COLUMN road_section.crs_epsg IS '★权威坐标系：EPSG/SRID。外键指向 spatial_ref_sys；与所属项目不等时写入侧报错';
+COMMENT ON COLUMN road_section.crs_zone_number IS '可空注释：带号。只在分带投影族里有意义，没有不得报错';
+COMMENT ON COLUMN road_section.crs_central_meridian_deg IS '可空注释：中央子午线。手写换算路径需要它';
+COMMENT ON COLUMN road_section.crs_zone_width_deg IS '可空注释：带宽。只在分带投影族里有意义';
+COMMENT ON COLUMN road_section.crs_assumed IS '值可不可信：true＝猜的，false＝已确认';
+COMMENT ON COLUMN road_section.crs_evidence IS '推断依据。MUST 与基准同存（FR-015）';
 CREATE INDEX IF NOT EXISTS idx_section_line ON road_section(line_id);
 
 -- A3. 路面结构层表（断面分层结构，支撑数字孪生分层可视化）
