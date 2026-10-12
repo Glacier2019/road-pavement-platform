@@ -47,7 +47,7 @@ description: "Task list for 005-project-crs-binding"
 - [x] T004 在 `scaffold/sql/10_ddl_v0.6.sql` 的 `design_project` 表定义里加六个列，**逐字按 data-model.md E1**（★ 2026-10-12 按宪法原则 VI 定权：`crs_epsg` 是**唯一权威字段**，`crs_zone_number` / `crs_central_meridian_deg` / `crs_zone_width_deg` 是**可空注释**）：`crs_zone_number smallint`、`crs_central_meridian_deg numeric(9,6)`、`crs_epsg integer`、`crs_zone_width_deg numeric(4,2)`、`crs_assumed boolean`、`crs_evidence text`。**六列全部可空**（现有两行路段、一行项目都不带基准，加列后必须依然合法）
 - [x] T005 在 `scaffold/sql/10_ddl_v0.6.sql` 的 `road_section` 表定义里加**同样的六个列**（同名同类型，逐字同上）
 - [x] T006 新建 `scaffold/sql/98_migrate_v06_crs_binding.sql`，对已有库做 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，**六个列 × 两张表**。★ 必须与 T004/T005 得到等价 schema —— 套件 `m1-装库一致`（`tests/contract/test_ddl_migration_parity.py`）会验这一点
-- [ ] T007 在 `scaffold/sql/数据字典-v0.6.md` 里登记这十二个列（两张表各六个）。★ 套件 `m1-表数`（`tests/contract/test_ddl_dict_catalog.py`）会比对 DDL ↔ 数据字典 ↔ catalog 三处
+- [x] T007 在 `scaffold/sql/数据字典-v0.6.md` 里登记这十二个列（两张表各六个）。★ 套件 `m1-表数`（`tests/contract/test_ddl_dict_catalog.py`）会比对 DDL ↔ 数据字典 ↔ catalog 三处
 
 ### 读列（契约③，M3-rpdao）
 

@@ -200,6 +200,15 @@ class GeRepository(DomainRepository):
 
     #: 路段列表。以 road_section 为根，挂上所属路线、设计项目、分段属性和三类几何计数。
     #: 等级不在这里算（见 completeness()），避免"列表页"被迫扫全表。
+    #:
+    #: ★ v0.6（契约变更工单 005）新增两套 crs_ 列：`s.crs_*` 与 `p.crs_*`。
+    #:  **不新增连接** —— `LEFT JOIN design_project p` 本来就在（同一张表的既有连接，
+    #:  只是从前没查这几列）。`LEFT` 而非 `INNER` 意味着**项目级基准天然可空**，
+    #:  这正是一级路段的正常状态：路段有、项目没有 ⇒ 应当取路段的。
+    #:
+    #:  别名带层级前缀（section_ / project_），因为**同一个名字要出现两次**。
+    #:  取哪一级、两级冲突怎么办，是 `effective_crs()` 的判断，不是 SQL 的判断 ——
+    #:  SQL 只如实把两级都取出来（宪法 II：读只经 M3；判断留给能同时看到两级的地方）。
     SECTIONS_SQL = """
     SELECT s.id, s.section_name, s.start_station_text, s.end_station_text,
            s.start_station_km, s.end_station_km, s.length_m,
@@ -208,6 +217,18 @@ class GeRepository(DomainRepository):
            l.design_speed, l.lane_count,
            p.id   AS project_id, p.project_name, p.project_uid, p.designer,
            a.road_grade, a.design_speed_kmh, a.cross_section_form, a.roadway_width_m,
+           s.crs_epsg                 AS section_crs_epsg,
+           s.crs_zone_number          AS section_crs_zone_number,
+           s.crs_central_meridian_deg AS section_crs_central_meridian_deg,
+           s.crs_zone_width_deg       AS section_crs_zone_width_deg,
+           s.crs_assumed              AS section_crs_assumed,
+           s.crs_evidence             AS section_crs_evidence,
+           p.crs_epsg                 AS project_crs_epsg,
+           p.crs_zone_number          AS project_crs_zone_number,
+           p.crs_central_meridian_deg AS project_crs_central_meridian_deg,
+           p.crs_zone_width_deg       AS project_crs_zone_width_deg,
+           p.crs_assumed              AS project_crs_assumed,
+           p.crs_evidence             AS project_crs_evidence,
            (SELECT count(*) FROM station_sequence  t WHERE t.section_id = s.id) AS station_count,
            (SELECT count(*) FROM alignment_pi      t WHERE t.section_id = s.id) AS pi_count,
            (SELECT count(*) FROM alignment_element t WHERE t.section_id = s.id) AS element_count
@@ -227,7 +248,19 @@ class GeRepository(DomainRepository):
            a.road_grade, a.cross_section_form, a.roadway_width_m,
            a.carriageway_crossfall_pct, a.shoulder_crossfall_pct,
            a.max_superelev_pct, a.superelev_rotate_mode, a.widening_mode,
-           a.source_file AS attr_source_file
+           a.source_file AS attr_source_file,
+           s.crs_epsg                 AS section_crs_epsg,
+           s.crs_zone_number          AS section_crs_zone_number,
+           s.crs_central_meridian_deg AS section_crs_central_meridian_deg,
+           s.crs_zone_width_deg       AS section_crs_zone_width_deg,
+           s.crs_assumed              AS section_crs_assumed,
+           s.crs_evidence             AS section_crs_evidence,
+           p.crs_epsg                 AS project_crs_epsg,
+           p.crs_zone_number          AS project_crs_zone_number,
+           p.crs_central_meridian_deg AS project_crs_central_meridian_deg,
+           p.crs_zone_width_deg       AS project_crs_zone_width_deg,
+           p.crs_assumed              AS project_crs_assumed,
+           p.crs_evidence             AS project_crs_evidence
     FROM road_section s
     JOIN road_line l        ON l.id = s.line_id
     LEFT JOIN design_project p      ON p.id = s.design_project_id
