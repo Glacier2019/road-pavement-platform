@@ -210,9 +210,17 @@ _CRS_FILL = {
 }
 
 
-def section_row():
-    """夹具那行路段 + 12 个 crs 列 = **真 ONE_SECTION_SQL 的形状**。"""
-    return {**FIX["road_section"][0], **_CRS_FILL}
+def section_row(crs=None):
+    """夹具那行路段 + 12 个 crs 列 = **真 ONE_SECTION_SQL 的形状**。
+
+    ★ `crs` 用来换一套基准（T013 要造「两个不同基准的项目共存」）。
+      不传就是夹具那行的 39 带。参数是**覆盖**，不是替换 ——
+      只想改项目级时，只给 `project_crs_*` 几个键就够。
+    """
+    row = {**FIX["road_section"][0], **_CRS_FILL}
+    if crs is not None:
+        row.update(crs)
+    return row
 
 
 class _FakeGe:
@@ -229,25 +237,41 @@ class _FakeGe:
       未知表名**抛错**，与真仓储的 `_check` 一致。
     """
 
-    def __init__(self, elements=None, monitors=None):
+    def __init__(self, elements=None, monitors=None, crs=None, row=None):
         self._elements = dao_elements() if elements is None else elements
         self._monitors = (FIX["monitor_cross_section"]
                           if monitors is None else monitors)
+        # ★ 换一套基准（T013）。默认 None = 夹具那行的 39 带。
+        self._crs = crs
+        # ★★ 整行覆盖（T018 要造「两级都没配」的路段）。
+        #    给了它，就**同时决定这个假仓储服务哪一个 section_id** ——
+        #    否则 `section(1)` 会先撞上「路段 1 不存在」那条守卫，
+        #    那时测到的其实是守卫，而不是「没有基准」这件事。
+        self._row = row
+
+    @property
+    def _served_id(self):
+        if self._row is not None and "id" in self._row:
+            return self._row["id"]
+        return FIX["section_id"]
+
+    def _one(self):
+        return dict(self._row) if self._row is not None else section_row(self._crs)
 
     def alignment(self, section_id):
-        if section_id != FIX["section_id"]:
+        if section_id != self._served_id:
             raise NotFound(f"路段 {section_id} 不存在")
         return {"section_id": section_id,
                 "pis": [],
                 "elements": [dict(r) for r in self._elements]}
 
     def sections(self):
-        return [section_row() for _ in FIX["road_section"]]
+        return [self._one()]
 
     def section(self, section_id):
-        if section_id != FIX["section_id"]:
+        if section_id != self._served_id:
             raise NotFound(f"路段 {section_id} 不存在")
-        return section_row()
+        return self._one()
 
     # ★★ 委派给**真的**实现，而不是在这里再抄一遍五态表。
     #    抄一遍 = 让测试替另一份规则背书，于是五态表有了两份会各自漂的实现，
@@ -272,8 +296,8 @@ class _FakeRe:
 
 
 class _FakeDao:
-    def __init__(self, elements=None, monitors=None):
-        self.ge = _FakeGe(elements, monitors)
+    def __init__(self, elements=None, monitors=None, crs=None, row=None):
+        self.ge = _FakeGe(elements, monitors, crs, row)
         self.re = _FakeRe()
 
     def ping(self): return True
@@ -1340,6 +1364,161 @@ def main() -> int:
     check(isinstance(_bad, str),
           "★★★ 元测试：摘掉 `_num` 之后，那个值**确实**变成字符串",
           f"实际 {_bad!r} —— 若仍是数字，说明 16c 测的不是它声称要测的东西")
+
+    # ================================================================ 17) T013/T014/T018
+    # ★ 上一段（§16）测的是「形状对不对」，这一段测的是「行为对不对」——
+    #   三个判据分别对应 SC-002 / SC-009 / FR-003，全部**带对照**。
+    print("\n=== 17) 两个基准共存（SC-002）/ 系统层报错（SC-009）/ 有类型的「没有」（FR-003）===")
+
+    # ---- 17a) SC-002：经度之差 MUST 等于中央子午线之差 ---------------------
+    # ★★ SC-002 是一条**对照判据**，不是「两条都算出来了」。
+    #    它要的是：两个**设计坐标逐位相同**的点，分属两条中央子午线，
+    #    经度必须不同，且差值**恰好等于**两条中央子午线之差（容差 1e-9 度）。
+    #    ★ 这个等式真的能成立，因为高斯-克吕格的经差只由 (N, E) 决定，
+    #      与 λ0 无关：λ = λ0 + f(N, E)。所以它是一条**闭合**判据 ——
+    #      不需要外部真值，也不需要数据库。
+    _N_, _E_ = 2786941.4940090827, 536050.8231566962   # 实测路段 6 上的一个点
+    _lon117 = GEO.inverse(_N_, _E_, 117.0)[1]
+    _lon108 = GEO.inverse(_N_, _E_, 108.0)[1]
+    check(abs((_lon108 - _lon117) - (108.0 - 117.0)) < 1e-9,
+          "★★ SC-002 · 同一设计坐标在两个基准下，经度之差 = 中央子午线之差（1e-9°）",
+          f"实测 {_lon108 - _lon117:.12f}°，应为 -9.0°")
+    # ★★ 对照组：把基准改回「全平台一份」（两条都用 117），两个经度**必须变回相同**。
+    #    没有这一步，SC-001/002 可以被「两边其实用了同一个基准」通过 ——
+    #    而那正是 004 的老样子。
+    _lon117b = GEO.inverse(_N_, _E_, 117.0)[1]
+    check(_lon117b == _lon117 and abs(_lon108 - _lon117) > 8.9,
+          "★★ SC-002 对照组 · 基准退回全平台一份时，两边经度变回相同",
+          f"同基准 {_lon117b!r} == {_lon117!r}；差 {abs(_lon108 - _lon117):.4f}°")
+
+    # ---- 17b) T013：第二个基准真的走得通整条路（load_crs → forward）--------
+    # ★ 上面那一小段只用了 `inverse`。这里把**另一条路**也走一遍：
+    #   造第二个项目（36 带 / 中央子午线 108° / EPSG 4545），用同一份线元，
+    #   断言桩号换算出来的带号与中央子午线就是那个项目的。
+    _DOC_36 = {"geographic_frame": {
+        "ready": True, "ellipsoid": "CGCS2000", "projection": "高斯-克吕格",
+        "zone_width_deg": 3, "zone_number": 36, "central_meridian_deg": 108,
+        "assumed": False, "epsg_after_confirm": 4545,
+        "evidence": ["T013 造的第二个项目：36 带，中央子午线 108°"],
+    }}
+    _gf36 = GEO.load_crs(_DOC_36, origin="T013 造的第二个项目")
+    check(_gf36["zone_number"] == 36 and _gf36["central_meridian_deg"] == 108.0,
+          "17b · 第二个项目的基准文档读得进来（zone 36 / CM 108）",
+          f"zone={_gf36['zone_number']} cm={_gf36['central_meridian_deg']}")
+    _els = elements()
+    _p39 = GEO.station_to_lonlat(_els, 2900.0, gf())
+    _p36 = GEO.station_to_lonlat(_els, 2900.0, _gf36)
+    check(_p39["zone_number"] == 39 and _p36["zone_number"] == 36,
+          "★ 17b · 同一份线元，两个基准各自报出自己的带号",
+          f"39 带给 {_p39['zone_number']}；36 带给 {_p36['zone_number']}")
+    check(abs((_p36["lon_deg"] - _p39["lon_deg"]) - (108.0 - 117.0)) < 1e-9,
+          "★★ 17b · 两个项目共存时，同一桩号的经度差仍 = 中央子午线之差",
+          f"实测 {_p36['lon_deg'] - _p39['lon_deg']:.12f}°")
+    check(_p39["lat_deg"] == _p36["lat_deg"] and _p39["north_m"] == _p36["north_m"],
+          "★ 17b · 北坐标不受中央子午线影响（差值只出在经度上）",
+          f"lat {_p39['lat_deg']!r} / north {_p39['north_m']!r}")
+
+    # ---- 17c) T014 + SC-009：两级不等 MUST 报错，且说出两级各是什么 --------
+    # ★★ §14 已经在**纯函数**层测过这一条。这里测的是**系统层** ——
+    #    SC-009 说的是「系统 MUST 报错」，一个只在单元测试里抛的异常
+    #    可能被某个 except 吞掉，而用户看到的是一个静默回退的坐标。
+    _orig_dao = APP.dao
+    try:
+        APP.dao = _FakeDao(crs={"project_crs_epsg": 4548,
+                                "project_crs_zone_number": 39,
+                                "project_crs_central_meridian_deg": Decimal("117.000000"),
+                                "section_crs_epsg": 4545,
+                                "section_crs_zone_number": 36,
+                                "section_crs_central_meridian_deg": Decimal("108.000000")})
+        _r = c.get(f"/v1/geometry/sections/{sid}/geo", params={"station_m": 2900.0})
+        check(_r.status_code == 503,
+              "★★ 17c · 两级基准不一致 → HTTP 503（不是 200、不是 400）",
+              f"HTTP {_r.status_code}：{str(_r.text)[:90]}")
+        _d = str(_r.json().get("detail", ""))
+        check("4548" in _d and "4545" in _d,
+              "★★ 17c · 错误信息说出了两级**各自的取值**（SC-009）",
+              f"原话：{_d[:130]}")
+
+        # ★ 应通过的一侧（宪法 §I：「契约测试必须覆盖应通过／应拒绝两侧」）：
+        #   把两级改成相等，同一个请求必须回到 200。
+        APP.dao = _FakeDao(crs={"project_crs_epsg": 4548,
+                                "section_crs_epsg": 4548,
+                                "section_crs_zone_number": 39,
+                                "section_crs_central_meridian_deg": Decimal("117.000000")})
+        _r2 = c.get(f"/v1/geometry/sections/{sid}/geo", params={"station_m": 2900.0})
+        # ⚠ 这里是 `epsg` / `zone_number`，**不是** `crs_epsg` ——
+        #   四个 `crs_*` 前缀字段是 `/sections` 的（那是把 DAO 的内部列名
+        #   投影成契约名）；单主体路径上的基准字段仍叫 `epsg` / `zone_number`。
+        check(_r2.status_code == 200 and _r2.json().get("epsg") == 4548
+              and _r2.json().get("crs_source") == "project",
+              "★ 17c 应通过侧 · 两级相等 → 200，并入取到 epsg=4548",
+              f"HTTP {_r2.status_code} epsg={_r2.json().get('epsg')!r}")
+
+        # ---- 17d) T018 + FR-003 / E5：有类型的「没有」 -------------------
+        # ★ 真实用例：路段 1「滨海大通道试验段」，design_project_id 为 NULL，
+        #   自身也没配。这是**平台里真实存在的数据**，不是造的。
+        _sec1 = {**FIX["road_section"][0], "id": 1, "design_project_id": None,
+                 "section_name": "滨海大通道试验段",
+                 **{k: None for k in _CRS_FILL}}
+        APP.dao = _FakeDao(row=_sec1)
+        _r3 = c.get("/v1/geometry/sections/1/geo", params={"station_m": 5000.0})
+        check(_r3.status_code == 503, "★★ 17d · 路段 1 两级都没配 → 503（E5 的「有类型的没有」）",
+              f"HTTP {_r3.status_code}：{str(_r3.text)[:90]}")
+        _body3 = _r3.json()
+        _banned = {"lat_deg", "lon_deg", "north_m", "east_m",
+                   "zone_number", "central_meridian_deg", "epsg", "crs_epsg"}
+        check(not (_banned & set(_body3)),
+              "★★ 17d · 响应里 MUST NOT 出现任何经纬度/平面坐标字段",
+              f"★ 出现了：{sorted(_banned & set(_body3))}")
+        _d3 = str(_body3.get("detail", ""))
+        check("路段 1" in _d3 and "没有所属项目" in _d3,
+              "★★ 17d · 那句话**点名了是哪条路段**、并说清是「没有所属项目」",
+              f"原话：{_d3[:140]}")
+        # ★★ MUST NOT 回落到 39 带（FR-003 / E5、SC-007）。
+        #    这里断的是**信息层面**：那个响应里不该出现任何带号或 EPSG 取值。
+        #    它是一条弱判据（字符串比对），所以下面 17e 还配了行为判据。
+        _leak = [v for v in ("4548", "4545", "117", "36", "39") if v in _d3]
+        check(not _leak,
+              "★★ 17d · 那句解释里没有夹带任何带号 / EPSG 取值（不回落）",
+              f"★ 夹带了：{_leak}" if _leak else "干净")
+
+        # ---- 17e) 元测试：给它配上一个基准，同一个请求必须变得可用 --------
+        # ★★ 这是 17d 的**对照**。没有它，17d 可以通过，而真实原因是
+        #    「路段 1 恰好没有线元」或「这个假仓储根本不服务路段 1」——
+        #    那样测到的就不是「没有基准」这件事。
+        _sec1_ok = {**_sec1,
+                    "project_crs_epsg": 4548, "project_crs_zone_number": 39,
+                    "project_crs_central_meridian_deg": Decimal("117.000000"),
+                    "project_crs_zone_width_deg": Decimal("3.00"),
+                    "project_crs_assumed": False,
+                    "project_crs_evidence": "T018 元测试补挂的"}
+        APP.dao = _FakeDao(row=_sec1_ok)
+        _r4 = c.get("/v1/geometry/sections/1/geo", params={"station_m": 5000.0})
+        check(_r4.status_code == 200 and _r4.json().get("crs_source") == "project",
+              "★★★ 17e 元测试 · 给路段 1 挂上项目级基准后，同一个请求变成 200",
+              f"HTTP {_r4.status_code}：{str(_r4.text)[:90]}")
+        check(_r4.json().get("lat_deg") is not None,
+              "★ 17e · 而且它真的算出了经纬度（不是「返回 200 但什么也没有」）",
+              f"lat_deg={_r4.json().get('lat_deg')!r}")
+        if _r4.status_code == 200:
+            check(_r4.json().get("zone_number") == 39,
+                  "★ 17e · 挂上的是 39 带，它就报 39 —— 没有偷偷用别的默认值",
+                  f"zone_number={_r4.json().get('zone_number')!r}")
+
+        # ---- 17f) 「不存在」与「没有基准」MUST 是两个不同的答复 ----------
+        # ★★ 404 = 这个主体不存在；503 = 主体在，但它没有基准。
+        #    两者合并的话，运维会照着提示去**改一个不存在的路段**。
+        #    实测线上：路段 9 → 404，路段 1 → 503。
+        APP.dao = _FakeDao()
+        _r5 = c.get("/v1/geometry/sections/9/geo", params={"station_m": 100.0})
+        check(_r5.status_code == 404,
+              "★★ 17f · 不存在的路段 → 404，与「没有基准」的 503 区分开",
+              f"HTTP {_r5.status_code}：{str(_r5.text)[:70]}")
+        check(_r5.status_code != _r3.status_code,
+              "★★ 17f · 这两个码**确实不同**（同一段代码里两个 if 挨着写，很容易塌成一个）",
+              f"不存在={_r5.status_code} vs 没基准={_r3.status_code}")
+    finally:
+        APP.dao = _orig_dao
 
     print("\n" + "=" * 72)
     if fails:

@@ -240,7 +240,8 @@ class GeRepository(DomainRepository):
     """
 
     ONE_SECTION_SQL = """
-    SELECT s.id, s.section_name, s.start_station_text, s.end_station_text,
+    SELECT s.id, s.design_project_id,
+           s.section_name, s.start_station_text, s.end_station_text,
            s.start_station_km, s.end_station_km, s.length_m,
            s.pavement_type, s.climate_zone, s.direction,
            l.line_code, l.line_name, l.road_class, l.design_speed, l.lane_count,
@@ -507,11 +508,27 @@ class GeRepository(DomainRepository):
         # ---- 第 5 条：两级都没有 --------------------------------------------
         # 放在最前面，因为它不是「比较失败」，是「没有什么可比」。
         if s_epsg is None and p_epsg is None:
+            # ★ E5 要求这不只是「有类型的没有」，还要**说清为什么**。
+            #   于是这里必须指出**是谁**没配 —— 面对上千条路段时，
+            #   「两级都没有」不告诉运维该去改哪一行。
+            #   ★★ 而「根本没有所属项目」与「项目在、但项目自己没配」
+            #     是两件要改不同地方的事，所以 `design_project_id`
+            #     为此在 `ONE_SECTION_SQL` 里补了一列。
+            _sid = row.get("id")
+            _pid = row.get("design_project_id")
+            _who = f"路段 {_sid}" if _sid is not None else "这条路段"
+            if _pid is None:
+                _why = "它没有所属项目（design_project_id 为空），路段自身也没配 crs_epsg"
+            else:
+                _why = f"它和所属项目（id={_pid}）都没有配 crs_epsg"
             raise CrsBindingError(
-                "没有可用坐标基准：项目级与路段级都没有配 crs_epsg。"
+                f"{_who} 没有配坐标基准：{_why}。"
                 "区域帧不猜默认带号 —— 猜错的代价是位置差几百公里，"
                 "而且在局部视图里看不出来。请给这条路段或它所属的项目配一个 EPSG。",
-                two_levels_note="project_crs_epsg=NULL；section_crs_epsg=NULL",
+                two_levels_note=(
+                    f"section_id={_sid}；"
+                    f"design_project_id={_pid if _pid is not None else 'NULL'}；"
+                    "section_crs_epsg=NULL；project_crs_epsg=NULL"),
             )
 
         # ---- 第 2 条：两级都有且不等 ----------------------------------------

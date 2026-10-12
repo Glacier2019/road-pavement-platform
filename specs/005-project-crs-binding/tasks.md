@@ -74,15 +74,15 @@ description: "Task list for 005-project-crs-binding"
 
 ### Tests for User Story 1 ⚠️ 先写，先看它红
 
-- [ ] T013 [P] [US1] 在 `scaffold/tests/contract/test_region_frame.py` 加「**两个不同基准的项目共存**」判据（SC-001/SC-002/SC-008）：造第二个项目 + 其路段，断言两条路径各自算出正确的 `zone_number` / `central_meridian_deg` / `epsg`，且 `crs_source` 都是 `"project"`
-- [ ] T014 [P] [US1] 在 `scaffold/tests/contract/test_region_frame.py` 加「**两级不一致必须报错**」判据（SC-009）：写一个不一致的配置，断言**抛错**，且错误信息里**同时出现两级各自的取值**。★ 宪法 §I 要求「应通过／应拒绝两侧」——这一条就是「应拒绝」侧
+- [x] T013 [P] [US1] 在 `scaffold/tests/contract/test_region_frame.py` 加「**两个不同基准的项目共存**」判据（SC-001/SC-002/SC-008）：造第二个项目 + 其路段，断言两条路径各自算出正确的 `zone_number` / `central_meridian_deg` / `epsg`，且 `crs_source` 都是 `"project"`
+- [x] T014 [P] [US1] 在 `scaffold/tests/contract/test_region_frame.py` 加「**两级不一致必须报错**」判据（SC-009）：写一个不一致的配置，断言**抛错**，且错误信息里**同时出现两级各自的取值**。★ 宪法 §I 要求「应通过／应拒绝两侧」——这一条就是「应拒绝」侧
 
 ### Implementation for User Story 1
 
 - [x] T015 [US1] 改 `scaffold/modules/M6-api/geo.py` 的 `load_crs`（L298）：由「收一个路径、自己去读文件」改为「**收一个已经解析好的 dict**」。★ 校验逻辑（`assumed` ↔ `evidence` 的不变量、必填键、`geographic_frame` 必须存在）**逐字保留** —— 那是 004 立下的、被 `test_region_frame.py` §8 守着的性质
 - [x] T016 [US1] 改 `scaffold/modules/M6-api/app.py` 的 `_geo_crs()`（L466-474）：**去掉空参调用**，改为按主体取 —— 经 `dao.ge.section(section_id)`（该行的 `SECTIONS_SQL`/`ONE_SECTION_SQL` 已带两组 `crs_*` 列），调 `effective_crs()`，再把结果传给 `geo.load_crs()`。★ **`geo.py` 里不许出现任何数据库调用**
 - [x] T017 [US1] 让 `app.py` 的**五条** `/v1/geometry/*` 路径都把 `crs_source` 与 `crs_assumed` 带进响应：`/sections`（L329）、`/sections/{id}/geo`（L345 一带）、`/geo/reverse`、`/geo/route`、`/monitor-sections`。★ 字段名**逐字按** `specs/005-project-crs-binding/contracts/m6-gateway.geo.v0.2.yaml` 的 `schema:` 块
-- [ ] T018 [US1] 在 `scaffold/modules/M6-api/app.py` 里让两级都没配时按 FR-003 返回**有类型的「没有」**：响应里 MUST NOT 出现任何经纬度字段，且 MUST 有一句说清为什么。★★ **MUST NOT 回落到 39 带、MUST NOT 回落到任何全局默认**。真实用例 = 路段 1（`design_project_id` 为 NULL）
+- [x] T018 [US1] 在 `scaffold/modules/M6-api/app.py` 里让两级都没配时按 FR-003 返回**有类型的「没有」**：响应里 MUST NOT 出现任何经纬度字段，且 MUST 有一句说清为什么。★★ **MUST NOT 回落到 39 带、MUST NOT 回落到任何全局默认**。真实用例 = 路段 1（`design_project_id` 为 NULL）
 - [x] T019 [US1] 把 `crs.yaml` 的值装载进库：把 `scaffold/modules/M9-console/config/crs.yaml` 现有的值（`zone 39 / CM 117 / EPSG 4548 / assumed false` + 那 8 条 `evidence`）写进 `design_project` 第 2 行（`project_name='毕设'`）的六个 `crs_*` 列
 
 **Checkpoint**: US1 独立可测。**这就是 MVP。**

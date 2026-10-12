@@ -36,6 +36,10 @@ import sys
 
 from fastapi.testclient import TestClient
 from starlette.routing import Match
+# ★ `psycopg` 把 `numeric` 读成 `Decimal`，所以库里的 `crs_central_meridian_deg`
+#   到 API 手上就是 Decimal。假行必须是**同一个类型**，否则「numeric 出去要转 float」
+#   那条投影就在测试里测不到（`_num` 对 str 和 Decimal 是两种行为）。
+from decimal import Decimal  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_PATH = ROOT / "modules" / "M6-api" / "app.py"
@@ -53,7 +57,7 @@ if str(ROOT / "modules" / "M3-rpdao") not in sys.path:
 if str(ROOT / "modules" / "M6-api") not in sys.path:
     sys.path.insert(0, str(ROOT / "modules" / "M6-api"))
 
-from rpdao import NotFound  # noqa: E402  （须在上面 sys.path 就位之后）
+from rpdao import GeRepository, NotFound  # noqa: E402  （须在上面 sys.path 就位之后）
 
 
 def _ensure_pg_driver():
@@ -183,11 +187,32 @@ class _FakeLo:
 
 class _FakeGe:
     """GE 域仓储的假实现。GE 的方法**一律带 section_id**（按路段取子树）——
-    这个假实现刻意不提供无 section 的平铺查，与真实 GeRepository 保持一致。"""
+    这个假实现刻意不提供无 section 的平铺查，与真实 GeRepository 保持一致。
+
+    ★★ 这个 `SECTION` 必须带上 12 个 `crs_*` 列 —— 那是 `ONE_SECTION_SQL` 的
+      真实输出形状。005 把「生效基准」的解析从文件搬到了这一行上之后，
+      `/sections` 会对每一行调用 `effective_crs(row)`：
+      行里没有这些键，就等于「两级都没配」，于是**每一条**都变成
+      「没有基准」——一个新增的读取被一个迁移前的假行形状放大成了
+      全局错误，而报错位置离真因很远。
+      ★ 同理 `effective_crs` 在这里**委派给真实现**，不抄第二份五态表。
+    """
 
     SECTION = {"id": 6, "section_name": "毕设", "line_code": "毕设",
                "start_station_text": "K0+000.000", "end_station_text": "K5+805.421",
-               "station_count": 2, "pi_count": 1, "element_count": 1}
+               "station_count": 2, "pi_count": 1, "element_count": 1,
+               "section_crs_epsg": None, "section_crs_zone_number": None,
+               "section_crs_central_meridian_deg": None,
+               "section_crs_zone_width_deg": None,
+               "section_crs_assumed": None, "section_crs_evidence": None,
+               "project_crs_epsg": 4548, "project_crs_zone_number": 39,
+               "project_crs_central_meridian_deg": Decimal("117.000000"),
+               "project_crs_zone_width_deg": Decimal("3.00"),
+               "project_crs_assumed": False,
+               "project_crs_evidence": "39 带已确认（见 sql/99_seed_crs_39band.sql）"}
+
+    # ★ `staticmethod(...)` 不能省：不加就变实例方法，`self` 会被塞进 `row`。
+    effective_crs = staticmethod(GeRepository.effective_crs)
 
     def sections(self):
         return [self.SECTION]

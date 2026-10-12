@@ -79,9 +79,14 @@ def _crs_message(exc: CrsBindingError) -> str:
     ★ 刻意读**结构化的字段**，而不是去解析 `str(exc)`：
       解析文本会在措辞一改时静默失配，而失配的表现只是"提示少了半句"，
       不报错、不红、没人会发现。**能拿到字段就别去猜字符串。**
+
+    ★★ 这里**不再自己加前缀**。加过一个「坐标基准不可用：」，结果与 M3 侧
+      自带的「没有配坐标基准：」叠成 `…不可用：…没有配…：…` 两层冒号。
+      而且上面那句 docstring 本来就写着"只原样带出去" —— 前缀与它自相矛盾。
+      M3 那句话是完整的，可以直接交给用户。
     """
     note = getattr(exc, "two_levels_note", "")
-    return f"坐标基准不可用：{exc}（{note}）" if note else f"坐标基准不可用：{exc}"
+    return f"{exc}（{note}）" if note else f"{exc}"
 
 
 def _http(exc: DaoError) -> HTTPException:
