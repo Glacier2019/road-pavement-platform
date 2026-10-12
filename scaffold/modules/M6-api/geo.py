@@ -282,61 +282,70 @@ def as_adapter_elements(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
 # ============================================================ 基准配置
 
 def crs_path() -> pathlib.Path:
-    """`crs.yaml` 的位置。
+    """`crs.yaml`（**派生产物**）的位置。
 
-    ★ 默认值 `crs.yaml` 是**相对路径**，与 M6 的 Dockerfile 一致：
-      容器里 `WORKDIR /app`，配置被 COPY 成 `/app/crs.yaml`。
-      可用环境变量 `RP_CRS_CONFIG` 覆盖（测试就是这么指的）。
+    ★★ 2026-10-12（005 / Q3 裁决）：库成为坐标基准的权威，本文件降为
+      **派生产物**。因此 ——
 
-    ⚠ 这个默认值意味着「只有从 /app 启动才对」。它不是 bug，是一个
-      必须与 Dockerfile 同步的耦合 —— 见 `tests/contract/test_region_frame.py`
-      里那一条"配置真的能被容器读到"的守卫。
+        **M6 自己不再读这个文件。** `load_crs()` 已改为收一个解析好的 dict。
+        这个函数留着，是因为"派生产物放在哪"仍然是一个必须能回答的问题：
+        其他四个消费者读它，漂移守卫（T027/T034）要拿它和库比对。
+
+    ⚠ 留着的代价要说清楚：`M6-api` 镜像里那个 `COPY … /app/crs.yaml`
+      （Dockerfile L46）现在是**给别的用途留的，不是给运行时用的**。
+      默认相对路径 `crs.yaml` 也因此只对 `WORKDIR /app` 成立。
+      可用环境变量 `RP_CRS_CONFIG` 覆盖。
     """
     return pathlib.Path(os.getenv("RP_CRS_CONFIG", "crs.yaml"))
 
 
-def load_crs(path: str | pathlib.Path | None = None) -> dict[str, Any]:
-    """读坐标基准配置，并**校验两条不变量**。
+def load_crs(doc: Mapping[str, Any], *,
+             origin: str = "传入的基准文档") -> dict[str, Any]:
+    """校验 `geographic_frame` 段并返回它。**不读文件。**
 
-    不变量（`crs.yaml` 自己声明过，这里把它变成机器可查的）：
-      · `assumed: false` ⇒ `epsg_after_confirm` 必须非空，且与 `zone_number` 对应
+    ★★ 签名变更（005 / Q3 裁决）：由「收一个路径、自己去读文件」改为
+      「**收一个已经解析好的 dict**」。
+      为什么：库是权威，文件是派生产物。一个既读文件又读库的模块，
+      在两者不一致时**不知道该信谁** —— 而这种不确定不会报错，
+      只会让某一部分请求静默用错带号。宁可让它**读不到文件**。
+
+    ★ 校验逻辑**逐字保留 004 立下的那两条**（由本文件 §8 守着）：
+      · `assumed: false` ⇒ `epsg_after_confirm` 必须非空
       · `assumed: true`  ⇒ `epsg_after_confirm` 必须为空
 
     ★ 为什么要校验：`assumed` 与 `epsg_after_confirm` 是两个字段，
       分开写就会分开漂。一个"猜的值配上已确认的 EPSG"是最坏的状态 ——
       它看起来是确认过的。
 
-    读不到文件一律抛 :class:`CrsError`，**不返回默认值**。
-    """
-    import yaml
+    文档结构不对或缺必填键，一律抛 :class:`CrsError`，**不返回默认值**。
 
-    p = pathlib.Path(path) if path is not None else crs_path()
-    if not p.is_file():
-        raise CrsError(
-            f"读不到坐标基准配置：{p}（绝对路径 {p.resolve()}）。"
-            "区域帧不猜默认带号 —— 猜错的代价是位置差几百公里，"
-            "而且在局部视图里看不出来。"
-        )
-    doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    gf = doc.get("geographic_frame")
+    参数
+    ----
+    doc     已经解析好的文档（含 `geographic_frame` 段）。
+    origin  出错时用在消息里的**来源说明**（例如「路段 6 的生效基准」）。
+            ★ 它取代了旧签名里的那个路径 —— 不读文件了，就没有路径可印，
+              但"这个值从哪来"仍然必须说清楚。少了这一句，
+              报错会变成"某个地方的基准有问题"，而调用方无从下手。
+    """
+    gf = doc.get("geographic_frame") if isinstance(doc, Mapping) else None
     if not isinstance(gf, dict):
-        raise CrsError(f"{p} 里没有 geographic_frame 段。")
+        raise CrsError(f"{origin} 里没有 geographic_frame 段。")
 
     missing = [k for k in ("zone_number", "central_meridian_deg", "assumed")
                if k not in gf]
     if missing:
-        raise CrsError(f"{p} 的 geographic_frame 缺少字段：{missing}")
+        raise CrsError(f"{origin} 的 geographic_frame 缺少字段：{missing}")
 
     assumed = bool(gf["assumed"])
     epsg = gf.get("epsg_after_confirm")
     if assumed and epsg is not None:
         raise CrsError(
-            f"{p}：assumed 为 true（值是猜的）却填了 epsg_after_confirm={epsg}。"
+            f"{origin}：assumed 为 true（值是猜的）却填了 epsg_after_confirm={epsg}。"
             "猜的时候不许填 EPSG —— 那会让一个未确认的值看起来已经确认。"
         )
     if not assumed and not epsg:
         raise CrsError(
-            f"{p}：assumed 为 false（值已确认）却没填 epsg_after_confirm。"
+            f"{origin}：assumed 为 false（值已确认）却没填 epsg_after_confirm。"
             "已确认就该能说出是哪个 EPSG 编码。"
         )
     return gf

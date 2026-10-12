@@ -48,11 +48,17 @@ GEO_PATH = ROOT / "modules" / "M6-api" / "geo.py"
 M2GEOM = ROOT / "modules" / "M6-api" / "m2geom"
 M2_ADAPTERS = ROOT / "modules" / "M2-ingest" / "adapters"
 CRS_PATH = ROOT / "modules" / "M9-console" / "config" / "crs.yaml"
-GEO_CONTRACT = ROOT / "contracts" / "openapi" / "m6-gateway.geo.v0.1.yaml"
+# ★ 2026-10-12（005 / T017）：**现行契约是 v0.2**（新增 5 个 `crs_*` 字段）。
+#   v0.1 **原样冻结，一个字都不许改**（宪法 §I：契约禁止就地改）。
+#   它仍然被下面那条"向后兼容"判据引用着 —— 不是留着好看的。
+GEO_CONTRACT = ROOT / "contracts" / "openapi" / "m6-gateway.geo.v0.2.yaml"
+GEO_CONTRACT_V01 = ROOT / "contracts" / "openapi" / "m6-gateway.geo.v0.1.yaml"
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "route_geometry.json"
 
-# app.py 用 load_crs() 找配置；测试里把它指到仓库里的那一份。
-# ★ 与容器一致：容器里 Dockerfile 把它 COPY 成 /app/crs.yaml，WORKDIR=/app。
+# ★ 2026-10-12（005 / Q3）：**M6 已不再读这个文件**（`load_crs` 收 dict）。
+#   下面这行现在是**给测试自己用**的 —— `crs_doc()` 经 `GEO.crs_path()` 找它。
+#   ⚠ 别把它读成"生产还在靠这个环境变量"：生产靠库，不靠文件。
+#   文件名仍叫 CRS_PATH，因为对**测试**来说它就是那个文件的路径。
 import os  # noqa: E402
 os.environ.setdefault("RP_CRS_CONFIG", str(CRS_PATH))
 
@@ -167,6 +173,48 @@ def dao_elements() -> list[dict]:
 
 # ============================================================ 假 DAO（夹具驱动）
 
+# ------------------------------------------------------------ 夹具行的 crs 补齐
+# ★★ 夹具是**迁移之前**导出的：`road_section` 那一行只有 6 个键，一个 crs_* 都没有。
+#    而 `SECTIONS_SQL` / `ONE_SECTION_SQL` 现在会带出 12 个
+#    `section_crs_*` / `project_crs_*`。⇒ 假 DAO 必须把这段差距补上。
+#
+#    **不补会怎样**：假 DAO 的形状 ≠ 真 DAO 的形状。生产代码在真库上跑得通、
+#    在假 DAO 上全部 503 —— 于是测试要么替一个不存在的形状背书，
+#    要么被人把生产代码改成绕过仓储（那会把域白名单一起绕掉）。
+#
+# ★ 补进去的值就是 `sql/99_seed_crs_39band.sql` 写进活库的那一套，
+#   逐字对应：项目级 39 带 / CM 117 / EPSG 4548 / assumed=false；
+#   路段级**留空** ⇒ 走五态表的**态 3**（项目有、路段没填 → 取项目）。
+#   路段侧留空不是省事，是**故意让它落在态3**：态1 与态3 生效值相同
+#   但来源级别相同（都是 project），正好覆盖「source 是溯源不是优先级」。
+# ★ 两个 `numeric` 列给 **`Decimal`**，不是 `float` —— 这一点必须忠实：
+#   psycopg 从 `numeric(9,6)` 取出来就是 `Decimal`，而 FastAPI 把 `Decimal`
+#   序列化成**字符串**。给假 DAO 填 `117.0`（float）的话，
+#   这个缺陷在离线套件里**永远复现不了**，只有真库能暴露它 ——
+#   而"只有真库能暴露"就等于"没有判据"。
+from decimal import Decimal  # noqa: E402
+
+_CRS_FILL = {
+    "section_crs_epsg": None,
+    "section_crs_zone_number": None,
+    "section_crs_central_meridian_deg": None,
+    "section_crs_zone_width_deg": None,
+    "section_crs_assumed": None,
+    "section_crs_evidence": None,
+    "project_crs_epsg": 4548,
+    "project_crs_zone_number": 39,
+    "project_crs_central_meridian_deg": Decimal("117.000000"),
+    "project_crs_zone_width_deg": Decimal("3.00"),
+    "project_crs_assumed": False,
+    "project_crs_evidence": "39 带已确认（见 sql/99_seed_crs_39band.sql）",
+}
+
+
+def section_row():
+    """夹具那行路段 + 12 个 crs 列 = **真 ONE_SECTION_SQL 的形状**。"""
+    return {**FIX["road_section"][0], **_CRS_FILL}
+
+
 class _FakeGe:
     """返回**真实**的 33 行线元与交点。数据来自夹具，不来自数据库。
 
@@ -194,12 +242,19 @@ class _FakeGe:
                 "elements": [dict(r) for r in self._elements]}
 
     def sections(self):
-        return FIX["road_section"]
+        return [section_row() for _ in FIX["road_section"]]
 
     def section(self, section_id):
         if section_id != FIX["section_id"]:
             raise NotFound(f"路段 {section_id} 不存在")
-        return FIX["road_section"][0]
+        return section_row()
+
+    # ★★ 委派给**真的**实现，而不是在这里再抄一遍五态表。
+    #    抄一遍 = 让测试替另一份规则背书，于是五态表有了两份会各自漂的实现，
+    #    而两份都会绿。这里补上的只是"这个方法存在"这一件事。
+    #    ★ `staticmethod(...)` 不能省：不加的话它变成实例方法，
+    #      调用时 `self` 会被塞进 `row` 的位置，然后报一个与真因无关的 TypeError。
+    effective_crs = staticmethod(GeRepository.effective_crs)
 
     def list_objects(self, table, *, limit=100):
         if table != "monitor_cross_section":
@@ -238,8 +293,27 @@ def elements():
     return GEO.as_adapter_elements(dao_elements())
 
 
+def crs_doc():
+    """读那份**派生产物**文件，返回原始文档。
+
+    ★ 2026-10-12（005 / Q3）：**"读文件"这件事从 M6 搬到了测试里。**
+      库成为权威之后 M6 不再读它（`load_crs` 已改为收 dict）。
+      测试仍然要读 —— 因为测试要问的问题正是
+      「**文件里写的这些，和库里的是不是一样**」，那个问题必须有人读文件。
+      如果让 M6 代读，问的就不是这个问题了。
+    """
+    import yaml  # noqa: E402
+    return yaml.safe_load(GEO.crs_path().read_text(encoding="utf-8")) or {}
+
+
 def gf():
-    return GEO.load_crs(CRS_PATH)
+    """生效基准的**文件版**（`geographic_frame` 段）。
+
+    ⚠ 路线几何仍拿文件里的值来算 —— 因为库里的值就是照它装的
+      （`sql/99_seed_crs_39band.sql`），两者此刻相等。
+      Phase 3（T013）会造**第二个**项目，那时两套基准才真正分开走。
+    """
+    return GEO.load_crs(crs_doc(), origin="crs.yaml（派生产物）")
 
 
 def grid_points():
@@ -561,26 +635,27 @@ def main() -> int:
           f"闭式 {pred:.4f} m vs 实测 {worst_right:.4f} m")
 
     # ---------------------------------------------------------------- 8) 不变量
-    print("\n=== 8) crs.yaml 的不变量（assumed ↔ epsg_after_confirm）===")
+    print("\n=== 8) 基准文档的不变量（assumed ↔ epsg_after_confirm）===")
     check(g["assumed"] is False and g.get("epsg_after_confirm") == 4548,
           "当前状态：assumed=false 且 epsg_after_confirm=4548")
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        for assumed, epsg, want_err in ((True, 4548, True), (False, None, True),
-                                        (True, None, False)):
-            doc = {"geographic_frame": {"zone_number": 39, "central_meridian_deg": 117,
-                                        "assumed": assumed,
-                                        "epsg_after_confirm": epsg}}
-            p = pathlib.Path(td) / f"c{assumed}{epsg}.yaml"
-            p.write_text(json.dumps(doc), encoding="utf-8")
-            try:
-                GEO.load_crs(p)
-                got_err = False
-            except GEO.CrsError:
-                got_err = True
-            check(got_err == want_err,
-                  f"assumed={assumed}, epsg={epsg} → "
-                  f"{'拒绝' if want_err else '接受'}")
+    # ★ 2026-10-12（005 / Q3）：`load_crs` 改为收**已解析的 dict**。
+    #   校验逻辑一个字没动，只是不再有临时文件与路径 ——
+    #   旧写法要落 3 个临时 yaml 才能问出同样这三个问题。
+    # ★ 注意这个"简化"本身不是目的：它顺带说明**这条判据从来测的都不是
+    #   "能不能读到文件"**。能读文件那条性质另有其测（§10 的容器可达性）。
+    for assumed, epsg, want_err in ((True, 4548, True), (False, None, True),
+                                    (True, None, False)):
+        doc = {"geographic_frame": {"zone_number": 39, "central_meridian_deg": 117,
+                                    "assumed": assumed,
+                                    "epsg_after_confirm": epsg}}
+        try:
+            GEO.load_crs(doc)
+            got_err = False
+        except GEO.CrsError:
+            got_err = True
+        check(got_err == want_err,
+              f"assumed={assumed}, epsg={epsg} → "
+              f"{'拒绝' if want_err else '接受'}")
 
     # ---------------------------------------------------------------- 9) 路由契约
     print("\n=== 9) 路由契约对齐（m6-gateway.geo.v0.1 ↔ 实现）===")
@@ -899,11 +974,15 @@ def main() -> int:
     #
     #   ⇒ 修法不是"以后仔细点"，是**把字段名变成机器可读的 `schema:`**，
     #     然后在这里逐一比对。**prose 写的契约不是契约，是注释。**
-    print("\n=== 13) 契约字段名 ↔ 真实响应键（m6-gateway.geo.v0.1）===")
+    print("\n=== 13) 契约字段名 ↔ 真实响应键（m6-gateway.geo.v0.2）===")
 
-    def _declared(path: str) -> set:
-        """契约声明的 200 响应字段名。"""
-        return set(doc["paths"][path]["get"]["responses"]["200"]
+    def _declared(path: str, doc_: dict | None = None) -> set:
+        """契约声明的 200 响应字段名。
+
+        ★ `doc_` 是留给**元测试注入**的：不给就用真契约。
+        """
+        _d = doc if doc_ is None else doc_
+        return set(_d["paths"][path]["get"]["responses"]["200"]
                    ["content"]["application/json"]["schema"]["properties"])
 
     #    路径模板 → (实际请求 URL, 查参, **允许缺失的条件字段**)
@@ -940,22 +1019,31 @@ def main() -> int:
     # ---- 元测试：把契约里 `station_m` 改名成 `x`，上面第①条必须红。
     #    ★ 这是本节存在的**唯一理由** —— 证明它读的真是契约里的名字，
     #      而不是把实际响应抄了一遍当期望值。
-    _cfg = GEO_CONTRACT.read_text(encoding="utf-8")
-    _broken = _cfg.replace("                  station_m: {type: number}\n"
-                           "                  north_m: {type: number}\n"
-                           "                  east_m: {type: number}\n",
-                           "                  x: {type: number}\n"
-                           "                  y: {type: number}\n", 1)
-    check(_broken != _cfg, "元测试：契约字段名的注入点存在", "已注入")
-    _bdoc = yaml.safe_load(_broken)
-    _bwant = set(_bdoc["paths"]["/v1/geometry/sections/{section_id}/geo"]
-                 ["get"]["responses"]["200"]["content"]["application/json"]
-                 ["schema"]["properties"])
+    # ---- 元测试：把契约里 `/geo` 的 `station_m` 删掉，上面第①条必须红。
+    #    ★ 这是本节存在的**唯一理由** —— 证明它读的真是契约里的名字，
+    #      而不是把实际响应抄了一遍当期望值。
+    #    ★★ 注入用**结构化**手法（深拷贝契约文档、删一个键），不用字面量替换：
+    #      字面量得连缩进一起写对，而契约一换版缩进就变，注入会**静默失效** ——
+    #      失效的样子是"元测试失败"，读起来却像契约有问题。
+    #      从 v0.1 换到 v0.2 时我正是这么踩了一次。
+    import copy  # noqa: E402
+
+    _bwant = _declared("/v1/geometry/sections/{section_id}/geo")
+    check("station_m" in _bwant, "元测试前置：契约的 /geo 确实声明了 station_m",
+          f"实际字段 {sorted(_bwant)}")
+    _bdoc = copy.deepcopy(doc)
+    _bp = (_bdoc["paths"]["/v1/geometry/sections/{section_id}/geo"]["get"]["responses"]
+           ["200"]["content"]["application/json"]["schema"]["properties"])
+    # ⚠ 必须是**改名**（弹掉 + 塞个新的），不能只 `pop`：
+    #   第①条判的是 `声明了 - 响应里有`。只删键 ⇒ 缺的那个键不在"声明了"里了，
+    #   差集反而**变小**，元测试永远红 —— 而它红得看起来像契约有问题。
+    _bp["x"] = _bp.pop("station_m")
+    _bwant2 = _declared("/v1/geometry/sections/{section_id}/geo", _bdoc)
     _bgot = set(c.get(f"/v1/geometry/sections/{sid}/geo",
                       params={"station_m": 300.0}).json().keys())
-    check(_bwant - _bgot,
-          "★ 元测试：把契约里的 station_m 改成 x，比对立刻发现「声明了但没有」",
-          f"注入后差集 = {sorted(_bwant - _bgot)}")
+    check("x" in (_bwant2 - _bgot),
+          "★ 元测试：把契约里的 station_m 改名成 x 之后，比对立刻发现「声明了但没有」",
+          f"改名后差集 = {sorted(_bwant2 - _bgot)}")
 
     # ================================================================ 14) 五态
     # ★ v0.6（契约变更工单 005）T012。
@@ -1166,6 +1254,92 @@ def main() -> int:
     check(not re.search(r"crs_zone_number\s*\*\s*3", _code),
           "★★★ check_i1 的**代码**里没有 `带号 × 3` 这条已否证的写法",
           "★ 那个 3 是硬编码常量，test_sim_track.py 有守卫说带号是配置项")
+
+    # ================================================================ 16) v0.2
+    # 005 / T017。这一段的每一条判据，都对应一个**实测抓到的**缺陷。
+    print("\n=== 16) 契约 v0.2：投影、类型、向后兼容 ===")
+
+    # --- 16a) 向后兼容：v0.1 声明过的字段，v0.2 里必须一个不少 ----------------
+    # ★ 宪法 §I「契约禁止就地改」⇒ v0.2 是新文件。但"新文件"不等于
+    #   "可以悄悄丢字段"：老客户端照着 v0.1 写的解析代码必须继续能跑。
+    _d01 = yaml.safe_load(GEO_CONTRACT_V01.read_text(encoding="utf-8"))
+    _d02 = yaml.safe_load(GEO_CONTRACT.read_text(encoding="utf-8"))
+
+    def _props(doc, path):
+        return set(doc["paths"][path]["get"]["responses"]["200"]
+                   ["content"]["application/json"]["schema"]["properties"])
+
+    _lost = {}
+    for _p in _d01["paths"]:
+        _gone = _props(_d01, _p) - _props(_d02, _p)
+        if _gone:
+            _lost[_p] = sorted(_gone)
+    check(not _lost, f"v0.1 声明的 {len(_d01['paths'])} 条路径，字段一个都没丢",
+          f"★ 丢了：{_lost}" if _lost else "只增不减")
+
+    # --- 16b) `/sections`：12 个 DAO 内部列一个都不许漏出去 -------------------
+    r = c.get("/v1/geometry/sections")
+    check(r.status_code == 200, "16 · /sections 可请求", f"HTTP {r.status_code}")
+    _items = r.json()["items"]
+    _leaked = sorted({k for it in _items for k in it if "_crs_" in k})
+    check(not _leaked,
+          "★★ /sections 里没有 DAO 的内部列名（`section_crs_*` / `project_crs_*`）",
+          f"★ 漏了：{_leaked}" if _leaked else "已按契约投影")
+
+    _need = {"crs_source", "crs_assumed", "crs_zone_number",
+             "crs_central_meridian_deg", "crs_epsg"}
+    _miss = sorted({k for it in _items for k in _need - set(it)})
+    check(not _miss, "★ /sections 每项都带契约声明的 5 个 crs_* 字段",
+          f"★ 缺：{_miss}" if _miss else f"共 {len(_items)} 项")
+    if _items:
+        _it0 = _items[0]
+        check(_it0["crs_source"] == "project" and _it0["crs_assumed"] is False,
+              "★ 生效基准来自项目级：crs_source=project, crs_assumed=false",
+              f"实际 {_it0['crs_source']!r} / {_it0['crs_assumed']!r}")
+
+    # --- 16c) 【核心】`numeric` 不许以字符串出去 -----------------------------
+    # ★★★ 这一条守的是一个**实测出来的、平台级的**行为：
+    #   同一个 `Decimal`，路由**不写**返回注解时经 `jsonable_encoder` → float；
+    #   路由**写了** `-> dict[str, Any]` 时经 pydantic → **字符串**
+    #   （pydantic 的 `Decimal` JSON 序列化默认保精度，输出 str）。
+    #   005 之前没人看见它 —— 因为 004 时代中央子午线来自 YAML（一个 int）。
+    #   改为读库之后，`numeric(9,6)` 的 `Decimal` 第一次走上这条路。
+    # ⇒ 断言**响应 JSON 里的类型**，而不是 Python 里的类型：字符串是在
+    #   序列化那一步才出现的，在 Python 层看永远是 Decimal，测不出来。
+    check(isinstance(_it0["crs_central_meridian_deg"], (int, float))
+          and not isinstance(_it0["crs_central_meridian_deg"], bool),
+          "★★★ /sections 的 crs_central_meridian_deg 是 JSON 数字，不是字符串",
+          f"实际 {_it0['crs_central_meridian_deg']!r} "
+          f"（{type(_it0['crs_central_meridian_deg']).__name__}）")
+
+    for _tpl, _url, _q in (("geo", f"/v1/geometry/sections/{sid}/geo", "station_m=2900"),
+                           ("reverse", f"/v1/geometry/sections/{sid}/geo/reverse",
+                            "lat=25.19&lon=117.36"),
+                           ("route", f"/v1/geometry/sections/{sid}/geo/route", "step_m=20"),
+                           ("monitor", f"/v1/geometry/sections/{sid}/monitor-sections", "")):
+        _rr = c.get(_url + ("?" + _q if _q else ""))
+        _j = _rr.json()
+        check(_rr.status_code == 200 and isinstance(_j.get("crs_source"), str)
+              and "crs_assumed" in _j,
+              f"16 · {_tpl} 带 crs_source / crs_assumed",
+              f"HTTP {_rr.status_code} source={_j.get('crs_source')!r}")
+        check(isinstance(_j.get("central_meridian_deg"), (int, float))
+              and not isinstance(_j.get("central_meridian_deg"), bool),
+              f"★★ {_tpl} 的 central_meridian_deg 是 JSON 数字",
+              f"实际 {_j.get('central_meridian_deg')!r}")
+
+    # --- 16d) 元测试：把 `_num` 摘掉，16c 必须变红 ---------------------------
+    # ★ 宪法 §V：「每条新增的检查，必须配一个元测试」。
+    #   没有它，16c 就只是一句"现在是数字"的观察 —— 而观察不是守卫。
+    _keep = APP._num
+    try:
+        APP._num = lambda v: v          # 还原成"不转换"
+        _bad = c.get("/v1/geometry/sections").json()["items"][0]["crs_central_meridian_deg"]
+    finally:
+        APP._num = _keep
+    check(isinstance(_bad, str),
+          "★★★ 元测试：摘掉 `_num` 之后，那个值**确实**变成字符串",
+          f"实际 {_bad!r} —— 若仍是数字，说明 16c 测的不是它声称要测的东西")
 
     print("\n" + "=" * 72)
     if fails:

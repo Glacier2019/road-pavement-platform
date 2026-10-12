@@ -34,6 +34,7 @@ from rpdao import (
     DOMAINS,
     TABLE_OWNER,
     ContractViolation,
+    CrsBindingError,
     Dao,
     DaoError,
     NotFound,
@@ -69,17 +70,129 @@ app = FastAPI(
 )
 
 
+def _crs_message(exc: CrsBindingError) -> str:
+    """坐标基准不可用 → 一句能让人动手改的话。
+
+    ★★ SC-009 要求：两级不一致时，错误信息 MUST 说出**两级各自是什么**。
+      那句话由 M3 侧生成（`CrsBindingError.two_levels_note`），这里只**原样带出去**。
+
+    ★ 刻意读**结构化的字段**，而不是去解析 `str(exc)`：
+      解析文本会在措辞一改时静默失配，而失配的表现只是"提示少了半句"，
+      不报错、不红、没人会发现。**能拿到字段就别去猜字符串。**
+    """
+    note = getattr(exc, "two_levels_note", "")
+    return f"坐标基准不可用：{exc}（{note}）" if note else f"坐标基准不可用：{exc}"
+
+
 def _http(exc: DaoError) -> HTTPException:
     """把 M3 的语义化异常翻成 HTTP。DAO 不依赖 FastAPI，这层翻译是 M6 的职责。"""
     if isinstance(exc, NotFound):
         return HTTPException(404, str(exc))
     if isinstance(exc, (UnknownTable, UnknownDomain)):
         return HTTPException(404, str(exc))
+    # ★★ 这一条**必须排在 ContractViolation 之前**。
+    #    CrsBindingError 是 ContractViolation 的子类；顺序反了，它会掉进
+    #    下面那个 400 分支 —— 于是"本实例手上的坐标基准不足以回答"
+    #    被报成"你请求得不对"。**码值方向反了，而且不会报错。**
+    #    为什么是 503 而不是 400：数据是平台自己录错的（两级不等 / SRID 查不到），
+    #    客户端没有任何东西需要改。让客户端去改，它改不了。
+    if isinstance(exc, CrsBindingError):
+        return HTTPException(503, _crs_message(exc))
     if isinstance(exc, ContractViolation):
         return HTTPException(400, str(exc))
     if isinstance(exc, StorageUnavailable):
         return HTTPException(503, f"存储不可用：{exc}")
     return HTTPException(500, str(exc))
+
+
+def _num(v: Any) -> Any:
+    """`numeric` 列 → JSON 数字；`None` 原样返回。
+
+    ★★ 这个函数存在的理由是**一个实测出来的缺陷**，不是风格：
+      `crs_central_meridian_deg` 是 `numeric(9,6)`，psycopg 取出来是 `Decimal`，
+      而 FastAPI 把 `Decimal` 序列化成**字符串**。契约写的是 `type: number`。
+      实测（重建容器前后逐字对比）：`central_meridian_deg`
+      由 `117` 变成 `"117.000000"`。
+      ★★ 而契约测试**全绿** —— 因为 §13 只比**字段名**，不比类型。
+      于是一个"看着是数字"的字符串会一路走到客户端才炸，
+      炸的样子取决于客户端：JS 里 `"117.000000" * 3` 侥幸对，
+      `+ 3` 就变成拼接；Python 里直接 TypeError。
+
+    ⚠ 只用在**numeric 列**上。`smallint` / `integer` 本来就是 int，
+      对它们调 `float()` 会把 `39` 变成 `39.0` ——
+      那是在修一个类型的同时**弄坏另一个类型**。
+    """
+    return None if v is None else float(v)
+
+
+# DAO 行里那 12 个带前缀的列名，逐字写出来。
+# ★ 写死而不是"按前缀裁一刀"：DAO 的行形状归 M3，响应字段名归 M6 的契约。
+#   用字符串裁剪把两者绑在一起，等于让**一次 DAO 侧的改名静默改掉 API 字段名**。
+_CRS_ROW_KEYS = ("section_crs_epsg", "section_crs_zone_number",
+                 "section_crs_central_meridian_deg", "section_crs_zone_width_deg",
+                 "section_crs_assumed", "section_crs_evidence",
+                 "project_crs_epsg", "project_crs_zone_number",
+                 "project_crs_central_meridian_deg", "project_crs_zone_width_deg",
+                 "project_crs_assumed", "project_crs_evidence")
+
+
+def _crs_fields(eff: dict[str, Any] | None) -> dict[str, Any]:
+    """把 `effective_crs()` 的结果投影成契约 v0.2 的 5 个 `crs_*` 字段。
+
+    ★ `eff is None` ⇒ 五项全 `null`。这不是"没算"，是**有类型的「没有」**：
+      「这个路段没有可用的坐标基准」。契约对 `/sections` 明说
+      「这四项都 NOT required：本接口只如实报出库里有什么，不替客户端判必填」。
+    """
+    if eff is None:
+        return {"crs_source": None, "crs_assumed": None, "crs_zone_number": None,
+                "crs_central_meridian_deg": None, "crs_epsg": None}
+    return {
+        # ★ `source` 是**溯源**（这个值在哪一级被写下的），不是优先级。
+        #   键名叫 `crs_source` 而**不是** `source`：本接口里已经有一个 `source`，
+        #   它说的是"桩号是存的还是算的"。两者含义无关，同名会互相顶掉。
+        "crs_source": eff["source"],
+        "crs_assumed": eff["assumed"],
+        "crs_zone_number": eff["zone_number"],
+        "crs_central_meridian_deg": _num(eff["central_meridian_deg"]),
+        "crs_epsg": eff["epsg"],
+    }
+
+
+def _crs_provenance(eff: dict[str, Any]) -> dict[str, Any]:
+    """**单主体**路径（`/sections/{id}/geo` 等四条）上的两个基准字段。
+
+    ★★ 只有两个，不是偷懒：契约 `m6-gateway.geo.v0.2.yaml` 在这四条路径上
+      **只声明了 `crs_source` 与 `crs_assumed`**。
+      多带 `crs_zone_number` / `crs_epsg` 出来，就是**未声明的字段** ——
+      §13 的第②条判据会立刻红。
+      ★ 单主体路径上带号与中央子午线**已经在响应里**（`zone_number` /
+        `central_meridian_deg`，004 就有的字段）。再加一组 `crs_` 前缀的
+        同义字段，会造出两个会各自漂的副本 —— 而副本不一致时没有判据看得见。
+    """
+    return {"crs_source": eff["source"], "crs_assumed": eff["assumed"]}
+
+
+def _section_view(row: dict[str, Any]) -> dict[str, Any]:
+    """DAO 的 38 列 → 契约声明的 31 个字段。**12 个 `*_crs_*` 不进响应。**
+
+    ★★ 为什么必须显式投影，而不是"让 DAO 行原样过去"：
+      `SECTIONS_SQL` 现在带出 12 个 `section_crs_*` / `project_crs_*`，
+      而 `/sections` 原本是**直接把 DAO 行当响应**返回的。
+      实测（重建容器后）：每一项多出 **12 个契约里没有的字段**，
+      名字还是 M3 的内部列名。
+      ⇒ 一次 DB 侧的加列，就变成一次**未声明的 API 变更**。
+    """
+    out = {k: v for k, v in row.items() if k not in _CRS_ROW_KEYS}
+    try:
+        eff = dao.ge.effective_crs(row)
+    except CrsBindingError:
+        # ★★ 一行配错**不许把整张表打成 503**。
+        #   路网上千条时，一条录错会让"列出所有路段"整个不可用 ——
+        #   而那恰恰是运维最需要它的时刻。这一行如实报 null，
+        #   具体原因去 `/sections/{id}/geo` 看（那条带原话）。
+        eff = None
+    out.update(_crs_fields(eff))
+    return out
 
 
 @app.get("/healthz", tags=["运维"])
@@ -329,7 +442,9 @@ def list_sections() -> dict[str, Any]:
         rows = dao.ge.sections()
     except DaoError as exc:
         raise _http(exc) from exc
-    return {"count": len(rows), "items": rows}
+    # ★ 逐行投影，不是 `return rows`。DAO 的行形状会随 DB 加列而变，
+    #   而响应字段名是**契约**，不能跟着 DB 一起动。见 `_section_view`。
+    return {"count": len(rows), "items": [_section_view(r) for r in rows]}
 
 
 @app.get("/v1/geometry/sections/{section_id}/stations", tags=["几何查询"],
@@ -467,10 +582,49 @@ def get_samples_by_station(
 import geo as geo_mod   # noqa: E402  （与 app.py 同目录，容器里由 WORKDIR /app 提供）
 
 
-def _geo_crs() -> dict[str, Any]:
-    """读坐标基准。读不到 → 503，**不猜默认带号**。"""
+def _geo_crs(section_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """取该路段**生效**的坐标基准。取不到 → 503，**不猜默认带号**。
+
+    返回 `(geographic_frame, 生效值)`。★ 两个都返回，是因为调用方**两样都要**：
+      · `geographic_frame` 给几何算法用（带号、中央子午线）
+      · 生效值给响应体用（`crs_source` / `crs_assumed` —— 契约 v0.2 要求）
+      只返回前者，`crs_source` 就得在四条路由里各查一次库；
+      查四次就有四次机会和几何用的不是同一份。
+
+    ★★ 2026-10-12（005 / Q3 裁决）：来源由「读 `crs.yaml`」改为「**读库**」。
+       库是权威，文件降为派生产物。
+
+    三件事分在三个地方，这是宪法 II 的直接后果：
+      · 两级怎么合成、不等就报错      → M3 的 `GeRepository.effective_crs()`
+      · 合成出来的值合不合法           → `geo.load_crs()`（assumed ↔ epsg）
+      · 上面两类异常翻成 HTTP          → 这里
+      ★ `geo.py` 里**没有任何数据库调用**，它收到的只是一个 dict。
+        这条分工不是洁癖：让 `geo.py` 自己去查库，它就会长出连接池，
+        而 M9 容器刻意不给它 `PG_DSN` —— 到那时它只能在生产里失败。
+    """
     try:
-        return geo_mod.load_crs()
+        # `ONE_SECTION_SQL` 已经把两组 `crs_*` 列带出来了（39 列）。
+        # ★ 不再单独查一次 `design_project`：两级必须来自**同一次读取**，
+        #   分两次读会引入一个"两次读之间被人改了"的窗口，
+        #   而那个窗口的后果是两级看似一致、其实不等。
+        row = dao.ge.section(section_id)
+        eff = dao.ge.effective_crs(row)
+    except DaoError as exc:
+        raise _http(exc) from exc
+
+    doc = {"geographic_frame": {
+        "zone_number": eff["zone_number"],
+        # ⚠ `_num` 不能省：这两列是 `numeric`，不转就会以**字符串**出去。
+        "central_meridian_deg": _num(eff["central_meridian_deg"]),
+        "zone_width_deg": _num(eff["zone_width_deg"]),
+        "assumed": eff["assumed"],
+        # ★ 键名沿用小节里那个 `epsg_after_confirm`（"确认之后填的 EPSG"）。
+        #   库里它就是权威字段本身，所以这里是**映射，不是改名** ——
+        #   目的是让 `load_crs` 的校验逻辑与 004 逐字一致，一个字都不用动。
+        "epsg_after_confirm": eff["epsg"],
+    }}
+    try:
+        return geo_mod.load_crs(doc, origin=f"路段 {section_id} 的生效基准"), eff
     except geo_mod.CrsError as exc:
         raise HTTPException(503, f"坐标基准不可用：{exc}") from exc
 
@@ -507,7 +661,7 @@ def get_geo_point(
     ★ `source` 固定为 `"computed_from_station"`：这是**换算**，不是**定位**。
       本平台不声称这条路真的在这个经纬度上（理由见 research.md 的 R7）。
     """
-    gf = _geo_crs()
+    gf, crs = _geo_crs(section_id)
     els = _geo_elements(section_id)
     try:
         out = geo_mod.station_to_lonlat(els, station_m, gf)
@@ -515,7 +669,7 @@ def get_geo_point(
         # 桩号越界是**调用方**的问题，用 400 而不是 404：
         # 404 会被读成「这个桩号没有数据」，而实际是「这个桩号不在链上」。
         raise HTTPException(400, str(exc)) from exc
-    return {"section_id": section_id, **out}
+    return {"section_id": section_id, **out, **_crs_provenance(crs)}
 
 
 @app.get("/v1/geometry/sections/{section_id}/geo/reverse", tags=["区域帧"],
@@ -549,10 +703,11 @@ def get_geo_reverse(
       残差已达 371.7 m —— 带号检查会放过它。
       「带外」只是"点不在路上"的一种成因，`offset_m` 才是那道闸。
     """
-    gf = _geo_crs()
+    gf, crs = _geo_crs(section_id)
     els = _geo_elements(section_id)
     return {"section_id": section_id,
-            **geo_mod.reverse_lonlat(els, lat, lon, gf)}
+            **geo_mod.reverse_lonlat(els, lat, lon, gf),
+            **_crs_provenance(crs)}
 
 
 @app.get("/v1/geometry/sections/{section_id}/geo/route", tags=["区域帧"],
@@ -570,9 +725,10 @@ def get_geo_route(
 
     ★ 包围盒是本 feature 落点检查（SC-002）所用的量。
     """
-    gf = _geo_crs()
+    gf, crs = _geo_crs(section_id)
     els = _geo_elements(section_id)
-    return {"section_id": section_id, **geo_mod.route_lonlat(els, gf, step_m)}
+    return {"section_id": section_id, **geo_mod.route_lonlat(els, gf, step_m),
+            **_crs_provenance(crs)}
 
 
 # ⚠ `DomainRepository.list_objects` 的默认 `limit=100` 是**静默截断**：
@@ -622,7 +778,7 @@ def get_monitor_sections(section_id: int) -> dict[str, Any]:
     ★ 设备带 `install_mode` 与 `simulated` 两个字段（判断 + 依据）。
       仿真设备不冒充实体资产。
     """
-    gf = _geo_crs()
+    gf, crs = _geo_crs(section_id)
     try:
         # ★ 先证明**路段存在**，再回答"它有几个断面"。
         #   两件事必须分开：路段不存在 → 404；路段存在但没有断面 → 200 空列表。
@@ -640,7 +796,9 @@ def get_monitor_sections(section_id: int) -> dict[str, Any]:
              if r.get("section_id") == section_id]
     sensors = _list_tracked(dao.re, "sensor_install")
 
-    return {"section_id": section_id, **geo_mod.section_positions(els, xsecs, sensors, gf)}
+    return {"section_id": section_id,
+            **geo_mod.section_positions(els, xsecs, sensors, gf),
+            **_crs_provenance(crs)}
 
 
 # ----------------------------------------------------------------- 指标查询

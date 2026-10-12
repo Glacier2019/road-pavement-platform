@@ -54,7 +54,7 @@ description: "Task list for 005-project-crs-binding"
 - [x] T008 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `SECTIONS_SQL`（约 L203）里，加 `s.crs_*` 与 `p.crs_*` 两组列，**别名区分级别**（如 `s.crs_epsg AS section_crs_epsg`、`p.crs_epsg AS project_crs_epsg`）。★ **不许动 `FROM` / `JOIN` 那一节** —— `LEFT JOIN design_project p` 已经在了
 - [x] T009 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `ONE_SECTION_SQL`（约 L221）里做同样的加列
 - [x] T010 在 `repo.py` 的 `GeRepository` 里加纯函数 `effective_crs(row) -> dict`，**逐字实现 data-model.md E2 的五态表**：①两级都有且相等 → 取该值、`source=project`；②两级都有且不等 → **抛错，错误信息 MUST 说出两级的取值各是什么**；③项目有、路段没填 → 取项目、`source=project`；④项目没有（含路段无 `design_project_id`）、路段有 → 取路段、`source=section`；⑤两级都没有 → **返回一个有类型的「没有」**。★ 这个函数**纯函数、不碰库**，与 `derive_level`（L394）同形，可离线测
-- [ ] T011 ★★ 在 `repo.py` 的 `GeRepository` 里加不变量校验函数，**逐字实现 data-model.md E3 的 I1 —— 2026-10-12 按宪法原则 VI 改写后的版本**：`crs_epsg` 必须在 `spatial_ref_sys.srid` 里查得到（**查表**）；三个注释字段（带号 / 中央子午线 / 带宽）**有则比行为，无则不报错**。
+- [x] T011 ★★ 在 `repo.py` 的 `GeRepository` 里加不变量校验函数，**逐字实现 data-model.md E3 的 I1 —— 2026-10-12 按宪法原则 VI 改写后的版本**：`crs_epsg` 必须在 `spatial_ref_sys.srid` 里查得到（**查表**）；三个注释字段（带号 / 中央子午线 / 带宽）**有则比行为，无则不报错**。
   ★★★ **两条已被实测否证的写法 MUST NOT 出现**：① `crs_central_meridian_deg == crs_zone_number * 3` —— 那个 `3` 是**硬编码常量**，而 `tests/contract/test_sim_track.py` 有一条既有守卫逐字写着「带号是配置项，不是代码里的常量」（research.md R10）；② 从 `spatial_ref_sys.proj4text` 抓 `+lon_0` —— 实测全表 8500 个 SRID 只有 **5818** 个有它，**UTM 全部没有**（research.md R11 补记）。
   ★★ **自洽判据是行为不是记法**：把同一批点分别走「SRID 路径」与「手写路径」，结果 MUST 落在 **1e-4 m** 内。★ 容差**不许取 1e-9** —— 那是拿浮点噪声当判据。
 
@@ -79,11 +79,11 @@ description: "Task list for 005-project-crs-binding"
 
 ### Implementation for User Story 1
 
-- [ ] T015 [US1] 改 `scaffold/modules/M6-api/geo.py` 的 `load_crs`（L298）：由「收一个路径、自己去读文件」改为「**收一个已经解析好的 dict**」。★ 校验逻辑（`assumed` ↔ `evidence` 的不变量、必填键、`geographic_frame` 必须存在）**逐字保留** —— 那是 004 立下的、被 `test_region_frame.py` §8 守着的性质
-- [ ] T016 [US1] 改 `scaffold/modules/M6-api/app.py` 的 `_geo_crs()`（L466-474）：**去掉空参调用**，改为按主体取 —— 经 `dao.ge.section(section_id)`（该行的 `SECTIONS_SQL`/`ONE_SECTION_SQL` 已带两组 `crs_*` 列），调 `effective_crs()`，再把结果传给 `geo.load_crs()`。★ **`geo.py` 里不许出现任何数据库调用**
-- [ ] T017 [US1] 让 `app.py` 的**五条** `/v1/geometry/*` 路径都把 `crs_source` 与 `crs_assumed` 带进响应：`/sections`（L329）、`/sections/{id}/geo`（L345 一带）、`/geo/reverse`、`/geo/route`、`/monitor-sections`。★ 字段名**逐字按** `specs/005-project-crs-binding/contracts/m6-gateway.geo.v0.2.yaml` 的 `schema:` 块
+- [x] T015 [US1] 改 `scaffold/modules/M6-api/geo.py` 的 `load_crs`（L298）：由「收一个路径、自己去读文件」改为「**收一个已经解析好的 dict**」。★ 校验逻辑（`assumed` ↔ `evidence` 的不变量、必填键、`geographic_frame` 必须存在）**逐字保留** —— 那是 004 立下的、被 `test_region_frame.py` §8 守着的性质
+- [x] T016 [US1] 改 `scaffold/modules/M6-api/app.py` 的 `_geo_crs()`（L466-474）：**去掉空参调用**，改为按主体取 —— 经 `dao.ge.section(section_id)`（该行的 `SECTIONS_SQL`/`ONE_SECTION_SQL` 已带两组 `crs_*` 列），调 `effective_crs()`，再把结果传给 `geo.load_crs()`。★ **`geo.py` 里不许出现任何数据库调用**
+- [x] T017 [US1] 让 `app.py` 的**五条** `/v1/geometry/*` 路径都把 `crs_source` 与 `crs_assumed` 带进响应：`/sections`（L329）、`/sections/{id}/geo`（L345 一带）、`/geo/reverse`、`/geo/route`、`/monitor-sections`。★ 字段名**逐字按** `specs/005-project-crs-binding/contracts/m6-gateway.geo.v0.2.yaml` 的 `schema:` 块
 - [ ] T018 [US1] 在 `scaffold/modules/M6-api/app.py` 里让两级都没配时按 FR-003 返回**有类型的「没有」**：响应里 MUST NOT 出现任何经纬度字段，且 MUST 有一句说清为什么。★★ **MUST NOT 回落到 39 带、MUST NOT 回落到任何全局默认**。真实用例 = 路段 1（`design_project_id` 为 NULL）
-- [ ] T019 [US1] 把 `crs.yaml` 的值装载进库：把 `scaffold/modules/M9-console/config/crs.yaml` 现有的值（`zone 39 / CM 117 / EPSG 4548 / assumed false` + 那 8 条 `evidence`）写进 `design_project` 第 2 行（`project_name='毕设'`）的六个 `crs_*` 列
+- [x] T019 [US1] 把 `crs.yaml` 的值装载进库：把 `scaffold/modules/M9-console/config/crs.yaml` 现有的值（`zone 39 / CM 117 / EPSG 4548 / assumed false` + 那 8 条 `evidence`）写进 `design_project` 第 2 行（`project_name='毕设'`）的六个 `crs_*` 列
 
 **Checkpoint**: US1 独立可测。**这就是 MVP。**
 
