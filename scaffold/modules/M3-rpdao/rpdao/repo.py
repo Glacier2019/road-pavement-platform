@@ -13,7 +13,7 @@ from datetime import date, datetime
 from typing import Any, TYPE_CHECKING
 
 from .catalog import ALL_TABLES, DOMAINS, Domain
-from .errors import ContractViolation, NotFound, UnknownTable
+from .errors import ContractViolation, CrsBindingError, NotFound, UnknownTable
 from .pool import quote_ident
 
 if TYPE_CHECKING:  # 仅类型标注，避免运行期循环 import
@@ -459,6 +459,98 @@ class GeRepository(DomainRepository):
                               f"但 {lv} 要求 {'／'.join(required)} **全部**有数据，"
                               f"缺 {'／'.join(need)}")
         return "L0", "没有任何几何段"
+
+    @staticmethod
+    def effective_crs(row: dict[str, Any]) -> dict[str, Any]:
+        """由一行（路段 + 所属项目）算出**生效的**坐标基准。**纯函数，不碰库，可离线对拍。**
+
+        ★★★ 为什么这是 005 的核心，也是最容易被写错的地方
+        ---------------------------------------------------
+        两级都存在，所以「用哪个」**不是选择题，是一致性检查**（Q1b = B）。
+        写成「路段有就用路段、没有就用项目」——那是**级联**，会静默放过
+        「两级都填了、但填的不一样」这个真正的错误：它看起来像一次正常回退。
+
+        逐字实现 `specs/005-project-crs-binding/data-model.md` E2 的五态表：
+
+          | # | 项目级 | 路段级       | 生效值 | source    | 行为                    |
+          |---|--------|--------------|--------|-----------|-------------------------|
+          | 1 | 有     | 有，且相等   | 该值   | project   | 通过                    |
+          | 2 | 有     | 有，不相等   | —      | —         | ★ 抛错，说出两级各是什么 |
+          | 3 | 有     | 没填         | 项目的 | project   | 通过                    |
+          | 4 | 没填   | 有           | 路段的 | section   | 通过（FR-010）          |
+          | 5 | 没填   | 没填         | —      | —         | ★ 抛错（有类型的「没有」）|
+
+        ★★ 第 4 条为什么**必须**通过而不是报错：实测路段 1「滨海大通道试验段」
+        `design_project_id = NULL`。判为报错，那个路段就**永远无法定位** ——
+        那是把能用的数据锁死，不是在防错。而且它在数据层已经是被处理过的形状
+        （`LEFT JOIN design_project` 本来就会给出 `project_id = NULL`）。
+
+        ★★ **`source` 是溯源，不是优先级顺序。** 第 1 条与第 3 条生效值相同、
+        `source` 都是 `project` —— 路段级填了相同的值，也不改变
+        「权威来源仍是项目级」这个事实。人要知道**这个值是在哪一级被写下的**，
+        这样他要改它时，知道该去改哪一行。
+
+        ★ 第 5 条抛错而不是返回 None：见 `CrsBindingError` 的说明。
+
+        参数
+        ----
+        row：能同时看到两级的字典。`SECTIONS_SQL` / `ONE_SECTION_SQL` 的输出
+        直接可用（别名 `section_crs_*` / `project_crs_*`）。缺键按「没填」处理 ——
+        因为「没填」与「没有这个键」在五态表里是同一档，不该让调用方先补齐键。
+        """
+        def cell(prefix: str, name: str) -> Any:
+            return row.get(f"{prefix}_crs_{name}")
+
+        s_epsg = cell("section", "epsg")
+        p_epsg = cell("project", "epsg")
+
+        # ---- 第 5 条：两级都没有 --------------------------------------------
+        # 放在最前面，因为它不是「比较失败」，是「没有什么可比」。
+        if s_epsg is None and p_epsg is None:
+            raise CrsBindingError(
+                "没有可用坐标基准：项目级与路段级都没有配 crs_epsg。"
+                "区域帧不猜默认带号 —— 猜错的代价是位置差几百公里，"
+                "而且在局部视图里看不出来。请给这条路段或它所属的项目配一个 EPSG。",
+                two_levels_note="project_crs_epsg=NULL；section_crs_epsg=NULL",
+            )
+
+        # ---- 第 2 条：两级都有且不等 ----------------------------------------
+        # ★ 这一条是 005 存在的理由（Q1b = B）。错误信息 MUST 说出两级各是什么（SC-009）——
+        #   只报「不一致」，用户得自己去两处查，那就把一次报错变成了两次查询。
+        if s_epsg is not None and p_epsg is not None and int(s_epsg) != int(p_epsg):
+            raise CrsBindingError(
+                f"两级坐标基准不一致：项目级是 EPSG {p_epsg}，"
+                f"路段级是 EPSG {s_epsg}。同一个路段只能有一个基准 —— "
+                "长线状工程跨越两个投影带时，规范上按整条线一个中央子午线处理，"
+                "所以「两级不同」几乎总是录入错误。"
+                "要改就改一处，让它与另一处相同。",
+                two_levels_note=(f"project_crs_epsg={p_epsg}；"
+                                 f"section_crs_epsg={s_epsg}"),
+            )
+
+        # ---- 第 1 / 3 条：项目级有 ⇒ 项目级说了算 --------------------------
+        # 第 1 条（路段也填了、且相等）也走这里，且 source 仍是 project。
+        if p_epsg is not None:
+            return {
+                "epsg": int(p_epsg),
+                "zone_number": cell("project", "zone_number"),
+                "central_meridian_deg": cell("project", "central_meridian_deg"),
+                "zone_width_deg": cell("project", "zone_width_deg"),
+                "assumed": cell("project", "assumed"),
+                "evidence": cell("project", "evidence"),
+                "source": "project",
+            }
+
+        # ---- 第 4 条：项目没有（含路段无项目）、路段有 ----------------------
+        return {
+            "epsg": int(s_epsg),
+            "zone_number": cell("section", "zone_number"),
+            "central_meridian_deg": cell("section", "central_meridian_deg"),
+            "zone_width_deg": cell("section", "zone_width_deg"),
+            "assumed": cell("section", "assumed"),
+            "evidence": cell("section", "evidence"),
+            "source": "section",
+        }
 
     def section(self, section_id: int) -> dict[str, Any]:
         row = self._dao.query_one(self.ONE_SECTION_SQL, {"sid": section_id})

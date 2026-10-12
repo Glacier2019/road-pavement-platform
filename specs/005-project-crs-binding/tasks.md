@@ -51,7 +51,7 @@ description: "Task list for 005-project-crs-binding"
 
 ### 读列（契约③，M3-rpdao）
 
-- [ ] T008 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `SECTIONS_SQL`（约 L203）里，加 `s.crs_*` 与 `p.crs_*` 两组列，**别名区分级别**（如 `s.crs_epsg AS section_crs_epsg`、`p.crs_epsg AS project_crs_epsg`）。★ **不许动 `FROM` / `JOIN` 那一节** —— `LEFT JOIN design_project p` 已经在了
+- [x] T008 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `SECTIONS_SQL`（约 L203）里，加 `s.crs_*` 与 `p.crs_*` 两组列，**别名区分级别**（如 `s.crs_epsg AS section_crs_epsg`、`p.crs_epsg AS project_crs_epsg`）。★ **不许动 `FROM` / `JOIN` 那一节** —— `LEFT JOIN design_project p` 已经在了
 - [ ] T009 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `ONE_SECTION_SQL`（约 L221）里做同样的加列
 - [ ] T010 在 `repo.py` 的 `GeRepository` 里加纯函数 `effective_crs(row) -> dict`，**逐字实现 data-model.md E2 的五态表**：①两级都有且相等 → 取该值、`source=project`；②两级都有且不等 → **抛错，错误信息 MUST 说出两级的取值各是什么**；③项目有、路段没填 → 取项目、`source=project`；④项目没有（含路段无 `design_project_id`）、路段有 → 取路段、`source=section`；⑤两级都没有 → **返回一个有类型的「没有」**。★ 这个函数**纯函数、不碰库**，与 `derive_level`（L394）同形，可离线测
 - [ ] T011 ★★ 在 `repo.py` 的 `GeRepository` 里加不变量校验函数，**逐字实现 data-model.md E3 的 I1 —— 2026-10-12 按宪法原则 VI 改写后的版本**：`crs_epsg` 必须在 `spatial_ref_sys.srid` 里查得到（**查表**）；三个注释字段（带号 / 中央子午线 / 带宽）**有则比行为，无则不报错**。

@@ -93,7 +93,7 @@ def _ensure_pg_driver():
 
 _ensure_pg_driver()
 
-from rpdao import NotFound, UnknownTable  # noqa: E402  （须在 sys.path 与 psycopg 桩就位之后）
+from rpdao import CrsBindingError, GeRepository, NotFound, UnknownTable  # noqa: E402  （须在 sys.path 与 psycopg 桩就位之后）
 
 
 def load_app():
@@ -956,6 +956,119 @@ def main() -> int:
     check(_bwant - _bgot,
           "★ 元测试：把契约里的 station_m 改成 x，比对立刻发现「声明了但没有」",
           f"注入后差集 = {sorted(_bwant - _bgot)}")
+
+    # ================================================================ 14) 五态
+    # ★ v0.6（契约变更工单 005）T012。
+    #   逐字对拍 data-model.md E2 的五态表。**纯函数、不碰库**，所以这一段
+    #   不违反本文件开头那句「不需要数据库、不需要容器、不需要网络」。
+    print("\n=== 14) 生效基准的五态派生（E2 表：两级都有 / 不等报错 / 缺一级 / 全缺）===")
+
+    def _row(s=None, p=None, s_assumed=True, p_assumed=True,
+             s_zone=39, p_zone=39, s_cm=117.0, p_cm=117.0):
+        """造一行「路段 + 所属项目」。只填五态表看得见的字段。"""
+        return {
+            "section_crs_epsg": s, "section_crs_zone_number": s_zone,
+            "section_crs_central_meridian_deg": s_cm, "section_crs_zone_width_deg": 3.0,
+            "section_crs_assumed": s_assumed, "section_crs_evidence": "路段侧依据",
+            "project_crs_epsg": p, "project_crs_zone_number": p_zone,
+            "project_crs_central_meridian_deg": p_cm, "project_crs_zone_width_deg": 3.0,
+            "project_crs_assumed": p_assumed, "project_crs_evidence": "项目侧依据",
+        }
+
+    # ---- 态 1：两级都有且相等 → 取该值，source=project -------------------
+    r = GeRepository.effective_crs(_row(s=4548, p=4548))
+    check(r["epsg"] == 4548 and r["source"] == "project",
+          "态1 · 两级都有且相等 → 取该值、source=project",
+          f"epsg={r['epsg']} source={r['source']}")
+    # ★ 态1 与态3 生效值相同、source 也相同 —— 这正是「来源级别是溯源，
+    #   不是优先级」的直接体现。路段级填了相同的值，权威来源仍是项目级。
+    r3 = GeRepository.effective_crs(_row(s=None, p=4548))
+    check(r["epsg"] == r3["epsg"] and r["source"] == r3["source"],
+          "态1 与态3 的来源级别相同（都是 project）—— 级别不是优先级",
+          f"态1={r['source']} 态3={r3['source']}")
+
+    # ---- 态 2：两级都有且不等 → 抛错，且**必须说出两级各是什么** ---------
+    _err2 = None
+    try:
+        GeRepository.effective_crs(_row(s=4545, p=4548))
+    except CrsBindingError as exc:
+        _err2 = exc
+    check(_err2 is not None, "态2 · 两级不等 → 抛 CrsBindingError",
+          "已抛" if _err2 else "★ 没抛，静默回退了")
+    if _err2 is not None:
+        _txt = f"{_err2} {_err2.two_levels_note}"
+        check("4548" in _txt and "4545" in _txt,
+              "★ 态2 的错误信息说出了两级各是什么（SC-009）",
+              f"原话：{_err2.two_levels_note}")
+        # ★★ 元测试：把两个值都改成一样，态2 必须不再触发 ——
+        #    证明上面那条不是因为「随便抛了个错」而通过。
+        _quiet = None
+        try:
+            GeRepository.effective_crs(_row(s=4548, p=4548))
+        except CrsBindingError as exc:
+            _quiet = exc
+        check(_quiet is None, "元测试：两级改成相等后，态2 不再抛错",
+              "★ 仍抛错 = 判定没在看两级的取值" if _quiet else "已静默")
+
+    # ---- 态 3：项目有、路段没填 → 取项目，source=project -----------------
+    check(r3["epsg"] == 4548 and r3["source"] == "project",
+          "态3 · 项目有、路段没填 → 取项目、source=project",
+          f"epsg={r3['epsg']} source={r3['source']}")
+
+    # ---- 态 4：项目没有（含路段无项目）、路段有 → 取路段，source=section -
+    r4 = GeRepository.effective_crs(_row(s=4548, p=None))
+    check(r4["epsg"] == 4548 and r4["source"] == "section",
+          "态4 · 项目没填、路段有 → 取路段、source=section（FR-010）",
+          f"epsg={r4['epsg']} source={r4['source']}")
+    # ★★ 态4 是**实测必须通过**的一条：路段 1「滨海大通道试验段」
+    #    design_project_id = NULL。判为报错，那个路段就永远无法定位。
+    #    这里连同「整行都没有 project_ 键」也一并试 —— 那正是 LEFT JOIN 的形状。
+    _no_keys = {k: v for k, v in _row(s=4548, p=None).items()
+                if not k.startswith("project_")}
+    r4b = GeRepository.effective_crs(_no_keys)
+    check(r4b["epsg"] == 4548 and r4b["source"] == "section",
+          "态4 · 整行连 project_ 键都没有（LEFT JOIN 的真实形状）也通过",
+          f"epsg={r4b['epsg']} source={r4b['source']}")
+
+    # ---- 态 5：两级都没有 → **有类型的「没有」**（FR-003 / E5）-----------
+    _err5 = None
+    try:
+        GeRepository.effective_crs(_row(s=None, p=None))
+    except CrsBindingError as exc:
+        _err5 = exc
+    check(_err5 is not None, "态5 · 两级都没有 → 抛 CrsBindingError（不是返回 None）",
+          "已抛" if _err5 else "★ 返回了 None，上层会拿它当「随便挑个默认值」")
+    if _err5 is not None:
+        check("crs_epsg" in str(_err5) and "没有" in str(_err5),
+              "★ 态5 的说法里说了「没有什么」和「去哪里配」",
+              f"原话：{str(_err5)[:56]}…")
+
+    # ---- 五态必须**穷尽**（SC-005 查的就是这个）--------------------------
+    # ★ 组合只有四种（s 有/无 × p 有/无），第五态是「有有不等」这一支。
+    #   这里枚举全部四种组合 × 相等/不等，断言「要么给值、要么抛错」，没有第三种结局。
+    _outcomes = []
+    for _s in (None, 4548, 4545):
+        for _p in (None, 4548, 4545):
+            try:
+                _o = GeRepository.effective_crs(_row(s=_s, p=_p))
+                _outcomes.append(("值", _s, _p, _o["epsg"], _o["source"]))
+            except CrsBindingError:
+                _outcomes.append(("错", _s, _p, None, None))
+    _vals = [o for o in _outcomes if o[0] == "值"]
+    _errs = [o for o in _outcomes if o[0] == "错"]
+    check(len(_vals) + len(_errs) == 9,
+          "★ 9 种组合全部落在「给值」或「抛错」两结局之一（没有第三种）",
+          f"给值 {len(_vals)} / 抛错 {len(_errs)}")
+    check(len(_vals) == 6,
+          "★ 给值的是 6 种（态1 两种取值 + 态3 两种 + 态4 两种）",
+          "；".join(f"({o[1]},{o[2]})→{o[3]}/{o[4]}" for o in _vals))
+    # ★★ 这个数是 6 不是 5：E2 那张表是**规则**，不是**枚举** ——
+    #    态1 和态4 各能容纳两种取值，所以 5 行规则 → 6 种给值组合。
+    #    （第一版按「表有 5 行」写了 5，测试当场变红。它抓对了。
+    #      把表的行数当成可能性的个数，是这个项目反复出现的那类错。）
+    check(len(_errs) == 3,
+          "★ 抛错的是 3 种（态2 两个方向 + 态5）",
+          "；".join(f"({o[1]},{o[2]})" for o in _errs))
 
     print("\n" + "=" * 72)
     if fails:

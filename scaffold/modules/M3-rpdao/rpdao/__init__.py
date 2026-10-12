@@ -28,6 +28,7 @@ from .catalog import (
 )
 from .errors import (
     ContractViolation,
+    CrsBindingError,
     DaoError,
     NotFound,
     StorageUnavailable,
@@ -67,6 +68,7 @@ __all__ = [
     "UnknownTable",
     "NotFound",
     "ContractViolation",
+    "CrsBindingError",
     "WriteGuardError",
     "__version__",
 ]
