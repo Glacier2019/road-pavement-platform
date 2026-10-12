@@ -1070,6 +1070,103 @@ def main() -> int:
           "★ 抛错的是 3 种（态2 两个方向 + 态5）",
           "；".join(f"({o[1]},{o[2]})" for o in _errs))
 
+    # ================================================================ 15) I1
+    # ★ v0.6（契约变更工单 005）T011。
+    #   `check_i1` 的 lookup 参数是**注入**的 —— 所以这一段同样不连库。
+    print("\n=== 15) I1 不变量：SRID 必须查得到，三个注释缺了不许报错 ===")
+
+    # 造一个「只有这几个 SRID 存在」的假登记表。
+    _KNOWN = {4326, 4545, 4548, 2154}
+    _lookup = lambda s: int(s) in _KNOWN  # noqa: E731
+
+    _r = _row(s=4548, p=4548)
+    _eff = GeRepository.effective_crs(_r)
+
+    # ---- ① 查得到的 SRID：必须无话可说 -----------------------------------
+    _p = GeRepository.check_i1(_r, _eff, _lookup)
+    check(_p == [], "查得到的 SRID（4548）→ 无问题", f"problems={_p}")
+
+    # ---- ② 查不到的 SRID：必须报，且说清是「编码不存在」不是「不支持」----
+    _r_bad = _row(s=999999, p=999999)
+    _p_bad = GeRepository.check_i1(_r_bad, GeRepository.effective_crs(_r_bad), _lookup)
+    check(len(_p_bad) == 1 and "999999" in _p_bad[0],
+          "★ 查不到的 SRID（999999）→ 报出问题、并原样说出那个数",
+          f"{_p_bad[:1]}")
+    check(_p_bad and "根本不存在" in _p_bad[0],
+          "★ 说法区分了「编码不存在」与「投影不支持」",
+          "★ 这两件事的处置完全不同：一个是录错了，一个是还没实现")
+
+    # ---- ③ ★★ 三个注释缺了 MUST NOT 报错（I1 原话）---------------------
+    #   为什么这不是宽容：UTM 与 Lambert **没有「带号」这个记法**
+    #   （实测：8500 个 SRID 只有 5818 个有 +lon_0，UTM 全部没有）。
+    #   拿一个不存在的记法去要求它，会把正确的数据判成错的。
+    _r_noann = {"section_crs_epsg": 4548, "project_crs_epsg": 4548}
+    _eff_noann = GeRepository.effective_crs(_r_noann)
+    _p_noann = GeRepository.check_i1(_r_noann, _eff_noann, _lookup)
+    check(_p_noann == [],
+          "★★ 三个注释全缺 → **不报错**（UTM/Lambert 没有带号记法）",
+          f"problems={_p_noann}")
+
+    # ---- ④ 只给一个注释也不许报错（「任一个缺值」）----------------------
+    _r_part = {"section_crs_epsg": 4548, "project_crs_epsg": 4548,
+               "project_crs_zone_number": 39}
+    _p_part = GeRepository.check_i1(_r_part,
+                                    GeRepository.effective_crs(_r_part), _lookup)
+    check(_p_part == [],
+          "★ 只给「带号」一个注释 → 同样**不报错**（任一个缺值都不算错）",
+          f"problems={_p_part}")
+
+    # ---- ⑤ 元测试：lookup 反过来，②必须不再报 ------------------------
+    _p_flip = GeRepository.check_i1(_r_bad, GeRepository.effective_crs(_r_bad),
+                                    lambda s: True)
+    check(_p_flip == [],
+          "元测试：把 lookup 改成「什么都查得到」，②立刻不报 —— 证明它真在查表",
+          "★ 仍报错 = 判定没在看 lookup" if _p_flip else "已静默")
+
+    # ---- ⑥ ★★★ 元测试：两条被否证的写法 MUST NOT 出现在**代码**里 ----------
+    #   这是一条**源码级**守卫，因为前面几条只能证明「结果对」，
+    #   证明不了「没走那条错路」—— 而那条错路在本题里恰好会算出对的答案
+    #   （4545 的 36×3 与真实 lon_0 都是 108）。★ 偶然对上，所以必须查源码。
+    #
+    #   ★★ 用 AST 取函数体，**不用字符串切分**：
+    #      第一版写成 `src.split("def check_i1")[1].split("def stations")[0]`，
+    #      而 "def stations" 在 check_i1 之后**只出现一次**、位置在文件更后面，
+    #      切出来是个空串 —— 于是「在空集里找不到」被算成了失败。
+    #      一个永远为真的断言和一个永远为假的断言一样没用。
+    #   ★★ 并且**排除注释**：注释里提到这两条错路是**必要的**
+    #      （不写下来，下一个人还会走一遍）。查的是代码，不是文字。
+    import ast as _ast  # noqa: E402
+
+    _repo_src = (ROOT / "modules" / "M3-rpdao" / "rpdao" / "repo.py").read_text(
+        encoding="utf-8")
+    _tree = _ast.parse(_repo_src)
+    _fn = None
+    for _node in _ast.walk(_tree):
+        if isinstance(_node, _ast.FunctionDef) and _node.name == "check_i1":
+            _fn = _node
+    check(_fn is not None, "元测试前置：在 repo.py 的 AST 里找到了 check_i1",
+          "★ 找不到 = 下面两条在对着空气断言" if _fn is None else "已定位")
+
+    _code = ""
+    if _fn is not None:
+        # 只留**代码**：丢掉 docstring 与一切字符串字面量。
+        # ★ ast.unparse 会把注释也丢掉 —— 正是我们要的。
+        _body_nodes = [n for n in _fn.body
+                       if not (isinstance(n, _ast.Expr)
+                               and isinstance(n.value, _ast.Constant)
+                               and isinstance(n.value.value, str))]
+        _code = "\n".join(_ast.unparse(n) for n in _body_nodes)
+        check(len(_code) > 200,
+              "元测试前置：取到的函数体不是空的",
+              f"取到 {len(_code)} 字符（空的话下面两条等于没测）")
+
+    check("proj4text" not in _code,
+          "★★★ check_i1 的**代码**里没有「从 proj4text 抓 +lon_0」这条已否证的写法",
+          "（UTM 全部没有 +lon_0，抓不到不等于错）")
+    check(not re.search(r"crs_zone_number\s*\*\s*3", _code),
+          "★★★ check_i1 的**代码**里没有 `带号 × 3` 这条已否证的写法",
+          "★ 那个 3 是硬编码常量，test_sim_track.py 有守卫说带号是配置项")
+
     print("\n" + "=" * 72)
     if fails:
         print(f"失败 {len(fails)} 项：")

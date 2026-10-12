@@ -52,15 +52,15 @@ description: "Task list for 005-project-crs-binding"
 ### 读列（契约③，M3-rpdao）
 
 - [x] T008 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `SECTIONS_SQL`（约 L203）里，加 `s.crs_*` 与 `p.crs_*` 两组列，**别名区分级别**（如 `s.crs_epsg AS section_crs_epsg`、`p.crs_epsg AS project_crs_epsg`）。★ **不许动 `FROM` / `JOIN` 那一节** —— `LEFT JOIN design_project p` 已经在了
-- [ ] T009 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `ONE_SECTION_SQL`（约 L221）里做同样的加列
-- [ ] T010 在 `repo.py` 的 `GeRepository` 里加纯函数 `effective_crs(row) -> dict`，**逐字实现 data-model.md E2 的五态表**：①两级都有且相等 → 取该值、`source=project`；②两级都有且不等 → **抛错，错误信息 MUST 说出两级的取值各是什么**；③项目有、路段没填 → 取项目、`source=project`；④项目没有（含路段无 `design_project_id`）、路段有 → 取路段、`source=section`；⑤两级都没有 → **返回一个有类型的「没有」**。★ 这个函数**纯函数、不碰库**，与 `derive_level`（L394）同形，可离线测
+- [x] T009 [P] 在 `scaffold/modules/M3-rpdao/rpdao/repo.py` 的 `ONE_SECTION_SQL`（约 L221）里做同样的加列
+- [x] T010 在 `repo.py` 的 `GeRepository` 里加纯函数 `effective_crs(row) -> dict`，**逐字实现 data-model.md E2 的五态表**：①两级都有且相等 → 取该值、`source=project`；②两级都有且不等 → **抛错，错误信息 MUST 说出两级的取值各是什么**；③项目有、路段没填 → 取项目、`source=project`；④项目没有（含路段无 `design_project_id`）、路段有 → 取路段、`source=section`；⑤两级都没有 → **返回一个有类型的「没有」**。★ 这个函数**纯函数、不碰库**，与 `derive_level`（L394）同形，可离线测
 - [ ] T011 ★★ 在 `repo.py` 的 `GeRepository` 里加不变量校验函数，**逐字实现 data-model.md E3 的 I1 —— 2026-10-12 按宪法原则 VI 改写后的版本**：`crs_epsg` 必须在 `spatial_ref_sys.srid` 里查得到（**查表**）；三个注释字段（带号 / 中央子午线 / 带宽）**有则比行为，无则不报错**。
   ★★★ **两条已被实测否证的写法 MUST NOT 出现**：① `crs_central_meridian_deg == crs_zone_number * 3` —— 那个 `3` 是**硬编码常量**，而 `tests/contract/test_sim_track.py` 有一条既有守卫逐字写着「带号是配置项，不是代码里的常量」（research.md R10）；② 从 `spatial_ref_sys.proj4text` 抓 `+lon_0` —— 实测全表 8500 个 SRID 只有 **5818** 个有它，**UTM 全部没有**（research.md R11 补记）。
   ★★ **自洽判据是行为不是记法**：把同一批点分别走「SRID 路径」与「手写路径」，结果 MUST 落在 **1e-4 m** 内。★ 容差**不许取 1e-9** —— 那是拿浮点噪声当判据。
 
 ### 派生的可测性
 
-- [ ] T012 [P] 在 `scaffold/tests/contract/test_region_frame.py` 里加一段**离线**测试：直接喂 `effective_crs()` 五态输入，断言五个输出（含两处抛错）。★ 这一段**不连库、不连容器** —— 保住该文件开头那句「运行（不需要数据库、不需要容器、不需要网络）」
+- [x] T012 [P] 在 `scaffold/tests/contract/test_region_frame.py` 里加一段**离线**测试：直接喂 `effective_crs()` 五态输入，断言五个输出（含两处抛错）。★ 这一段**不连库、不连容器** —— 保住该文件开头那句「运行（不需要数据库、不需要容器、不需要网络）」
 
 **Checkpoint**: 列在库里、DAO 读得出、五态派生可离线验证。user story 可以开始了。
 

@@ -558,6 +558,100 @@ class GeRepository(DomainRepository):
             raise NotFound(f"路段不存在：section_id={section_id}")
         return row
 
+    # ------------------------------------------------------- 域外只读参照表
+    #: 本域**只读**引用的域外表（v0.6，契约变更工单 005）。
+    #: 它们不在 `domain.tables` 里，所以走不了 `list_objects`/`count` —— 那是**故意**的。
+    #: 见 `catalog.REFERENCE_TABLES` 的说明：为查坐标系而放宽域白名单，
+    #: 等于把「M3 不许越域乱读」这条守卫拆了。
+    REFERENCE_TABLES = ("spatial_ref_sys",)
+
+    #: 只读、单列、单值。**不接受任意列名** —— 那会把这条通道变回通用查询。
+    _SRID_EXISTS_SQL = "SELECT 1 AS ok FROM spatial_ref_sys WHERE srid = %(srid)s::int"
+
+    def srid_exists(self, srid: int) -> bool:
+        """这个 SRID 在 PostGIS 的坐标系登记表里查得到吗？（FR-005 / I1）
+
+        ★ 这是本仓库里**唯一**读 `spatial_ref_sys` 的地方。
+
+        ★★ 它和「写不进去」不是一回事，两者都要有：
+          · 数据库层：`crs_epsg` 挂 `REFERENCES spatial_ref_sys(srid)` ⇒ 查不到的
+            SRID **结构上存不进去**（实测过：`Key (srid)=(999999) is not present`）。
+          · 这一层：读出来的值仍然要**当场核一遍** —— 因为数据可能来自
+            绕过 FK 的路径（手工 SQL、`COPY`、恢复的备份），也可能是在
+            FK 建立之前就写进去的。**结构上的保证只覆盖它建立之后的写入。**
+
+        ★ 查不到**不是**返回 False 就完事：调用方（见 `check_i1`）必须把它变成
+          一次显式失败。一个「查不到就当 4326」的兜底，会让 99% 的调用方正常，
+          只在换基准时静默算错。
+        """
+        return self._dao.query_one(self._SRID_EXISTS_SQL, {"srid": int(srid)}) is not None
+
+    @staticmethod
+    def check_i1(row: dict[str, Any], effective: dict[str, Any],
+                 lookup) -> list[str]:
+        """I1：SRID 为权威，三个习惯记法是**可空注释**。返回问题清单（空 = 通过）。
+
+        逐字实现 `data-model.md` E3 的 I1（2026-10-12 按宪法原则 VI 改写后的版本）：
+
+            crs_epsg 是唯一权威字段：有基准时 MUST 非空，且 MUST 在
+            spatial_ref_sys.srid 里查得到（FR-005），查不到当场拒绝。
+
+            crs_zone_number / crs_central_meridian_deg / crs_zone_width_deg
+            是可空注释：三个都有值时 ⇒ 与 crs_epsg 所指的基准 MUST 自洽；
+                        任一个缺值时 ⇒ ★ MUST NOT 因此报错。
+
+        ★★ 「缺值不报错」不是宽容，是**正确**：UTM 与 Lambert 没有「带号」记法
+          （实测：8500 个 SRID 里 5818 个有 `+lon_0`，**UTM 全部没有**）。
+          拿一个不存在的记法去要求它，会把正确的数据判成错的。
+
+        ★★★ 自洽**不用算式判，用行为判** —— 本函数**刻意不实现**那两条已被实测
+          否证的写法：
+            ① `crs_central_meridian_deg == crs_zone_number * 3` —— 那个 3 是硬编码
+               常量，而 `test_sim_track.py` 有一条既有守卫逐字写着
+               「带号是配置项，不是代码里的常量」（research.md R10）。
+               实测否证：`4524` 按 6 度带规律算出 48，实际是 108。
+            ② 从 `proj4text` 抓 `+lon_0` —— UTM 全部没有，抓不到不等于错。
+          行为比对在 Phase 7 的 PostGIS 对照里做（T038–T042，容差 1e-4 m，
+          不许取 1e-9 —— 那是拿浮点噪声当判据）。
+
+        参数
+        ----
+        row        一行原始数据（含 `section_crs_*` / `project_crs_*`）。
+        effective  `effective_crs(row)` 的结果。
+        lookup     形如 `srid_exists` 的可调用对象。**注入进来**是为了让这个
+                   函数**离线可测** —— 测试传一个假的 lookup 即可，
+                   不必连库（保住 `test_region_frame.py` 开头那句
+                   「不需要数据库、不需要容器、不需要网络」）。
+        """
+        problems: list[str] = []
+
+        # ---- ① 权威字段：MUST 在登记表里查得到 ------------------------------
+        srid = effective.get("epsg")
+        if srid is None:
+            problems.append("生效基准里没有 crs_epsg —— 五态派生不该产出这种结果")
+        elif not lookup(int(srid)):
+            problems.append(
+                f"crs_epsg={srid} 在 spatial_ref_sys 里查不到。"
+                "这不是「不支持」，是「这个编码根本不存在」——"
+                "请核对 EPSG 编码，或先在坐标系登记表里补充它。"
+            )
+
+        # ---- ② 三个注释：要么都给、要么不查；给全了才比对 -------------------
+        # ★ 注意这里**不比对行为**（那要调投影内核，属于 Phase 7）。
+        #   本函数只做两件不依赖投影数学的事：权威字段查表 + 注释三缺一不算错。
+        #   行为比对留一个显式的「待办」，而不是假装这里已经做完了。
+        prefix = "section" if effective.get("source") == "section" else "project"
+        ann = {k: row.get(f"{prefix}_crs_{k}")
+               for k in ("zone_number", "central_meridian_deg", "zone_width_deg")}
+        present = {k: v for k, v in ann.items() if v is not None}
+        if present and len(present) != 3:
+            # ★★ 这一条**不报错** —— 只在返回值里提一句，供展示层提示。
+            #   I1 的原话是「任一个缺值时 MUST NOT 因此报错」。
+            #   把它写进 problems 就是违反 I1，所以这里刻意什么都不做，
+            #   只留注释说明为什么这一段是空的。
+            pass
+        return problems
+
     def stations(self, section_id: int, *, from_km: float | None = None,
                  to_km: float | None = None, integer_only: bool = False,
                  limit: int = 500) -> list[dict[str, Any]]:

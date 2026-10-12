@@ -140,6 +140,31 @@ CROSS_TABLES: tuple[str, ...] = (
     "quality_rule", "mapping_set",
 )
 
+# 域外只读参照表（v0.6，契约变更工单 005）。
+#
+# ★★ 为什么**不**并入 CROSS_TABLES / ALL_TABLES
+# ---------------------------------------------------------------------------
+# `ALL_TABLES` 是「我们自己的物理表」的清单，长度必须 == EXPECTED_PHYSICAL_TABLES
+# == DDL 里的表数（`test_ddl_dict_catalog.py` 三处强制核对）。
+#
+# `spatial_ref_sys` 是 **PostGIS 扩展装的**，不是我们设计的表：
+#   · 并进去 ⇒ 那个 62 要改成 63 ⇒ 连带改 DDL 对拍、数据字典 —— 而我们一张表都没加。
+#   · 更要命的：那会让「我们有多少张业务表」这个数**不再是我们能说了算的数**。
+#     哪天 PostGIS 升级多装一张参照表，测试就红了，而错不在我们。
+#
+# ★ 它也**必须**留在域外：`DomainRepository._check()` 是域内白名单，
+#   放它进来就等于为一个新功能把「M3 不许越域乱读」这条守卫拆了。
+#   正确的做法是**承认它是域外的**，然后开一条明说的通道（见 `GeRepository` 的
+#   `REFERENCE_TABLES` / `srid_exists`），而不是放宽白名单。
+#
+# ★ 写权侧无需登记：它不在 `TABLE_OWNER` 里 ⇒ 写权守卫**默认拒绝**（`write.py` L12
+#   「默认拒绝」）。读得到、写不了 —— 正是坐标系登记表该有的样子。
+#
+# ○ 契约测试里凡是要说「全库多少张表/多少列」的地方，**一律排除本表**；
+#   已有先例：`test_ddl_migration_parity.py` 的快照 SQL 写着
+#   `WHERE c.relname <> 'spatial_ref_sys'`。
+REFERENCE_TABLES: tuple[str, ...] = ("spatial_ref_sys",)
+
 # DDL 的物理表总数。**这个数字必须与 DDL、数据字典三处一致**，
 # 由 tests/contract/test_ddl_dict_catalog.py 强制核对——不允许各自漂移。
 # 历史：v0.1 = 30 表；v0.2 = 32 表（+quality_rule +mapping_set，契约变更工单 #1）；
