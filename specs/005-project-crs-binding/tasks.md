@@ -169,6 +169,27 @@ description: "Task list for 005-project-crs-binding"
 
 ---
 
+### ⚠ 005 期间**发现**、但**不属 005 范围**的缺陷（登记在此，防止丢失）
+
+不是 005 引入的，是 005 第一次走到那条路上时露出来的。**不要**把它们算进 005 的完成度。
+
+- [ ] T045 ★★★ 平台级：`numeric` 列的 JSON 类型**取决于路由有没有写返回类型注解**。
+  实测（同一份 `Decimal("117.000000")`）：
+  · 路由**不写**注解 → 走 `jsonable_encoder` → **`117.0`（float）**
+  · 路由**写了** `-> dict[str, Any]` → 走 pydantic → **`"117.000000"`（str）**
+  （pydantic 的 `Decimal` JSON 序列化默认保精度，输出字符串）
+  ★ 005 让它第一次显形：004 时中央子午线来自 YAML（一个 int），改读库后才变成 `numeric`。
+  ★★ 现状：`/sections` 的 `length_m` / `start_station_km` / `end_station_km` 等
+  一批 `numeric` 字段**一直是字符串**，而契约写的是 `type: number`。
+  ⇒ 先**盘一遍**所有响应里的 `numeric` 字段，列出「契约说 number、实际出 str」的清单，
+  再决定是逐个 `float()` 还是收成一个全局出口。**不许**只修看得见的那几个。
+- [ ] T046 ★ 给 T045 配两条判据（宪法 §V）：
+  ① 契约测试的字段比对**必须同时比类型**，不能只比字段名 ——
+     005 之前 §13 只比名字，所以那个字符串缺陷**全绿通过**；
+  ② 元测试：故意让一个 numeric 字段以字符串出去，断言比对**变红**。
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
