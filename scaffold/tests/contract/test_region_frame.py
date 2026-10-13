@@ -1979,6 +1979,42 @@ def main() -> int:
           "（「文件存在」和「有人会跑它」是两件事，这条判据守的是后一件）",
           f"去掉后仍报已挂载={_mount_guard(_cmp_nomount)}")
 
+    # ---- 18h) initdb.d 挂的宿主文件**必须对容器可读** ----------------------
+    # ★★★ 这一条也是实测撞出来的，而且比「少了守卫」严重得多。
+    #     005 期间用一次性库真跑全新装来验证 18g 那句主张，结果：
+    #       `psql: error: .../25_crs_two_level_guard.sql: Permission denied`
+    #       ⇒ postgres 容器以 `postgres` 用户跑，读不了 **600** 的文件；
+    #       ⇒ **整个 initdb 中止、容器直接退出** —— 不是「少了守卫」，
+    #         是**全新装根本起不来**。
+    #     根因：那个文件由 `write` 工具创建，mode 是 `-rw-------`。
+    #     ★ git 只记录**可执行位**，不记录读写位 ——
+    #       `git ls-files -s` 里所有 sql 全是 `100644`，
+    #       所以**仓库是好的、clone 出来也是 644**，坑只在本地工作区，
+    #       恰恰又是跑全新装的那一份。
+    #     ⇒ 这条判据守的是「宿主权限」这个 git 表达不了的维度。
+    _sql_dir = pathlib.Path(__file__).resolve().parents[2] / "sql"
+    _host_files = [ln.split(":")[0].strip().lstrip("- ").replace("./", "")
+                   for ln in _cmp.splitlines()
+                   if "docker-entrypoint-initdb.d" in ln and ".sql:" in ln]
+    _unreadable = []
+    for _h in _host_files:
+        _p = pathlib.Path(__file__).resolve().parents[2] / _h
+        if _p.is_file() and not (_p.stat().st_mode & 0o044):
+            _unreadable.append(f"{_h} ({oct(_p.stat().st_mode & 0o777)})")
+    check(not _unreadable,
+          "★★★ 18h · initdb.d 挂的每个宿主 sql 都**对容器可读**。"
+          "★ 不可读不是「少个守卫」，是 **initdb 直接中止、全新装起不来** —— "
+          "而 git 只记可执行位，`ls-files -s` 里全是 100644，本地 600 看不出来",
+          f"不可读：{_unreadable}" if _unreadable else f"查了 {len(_host_files)} 个文件")
+
+    # ★ 元测试：把真实权限位喂进去，判据必须变红
+    _fake600 = [0o100600]  # 一个 600 的普通文件
+    _red = [m for m in _fake600 if not (m & 0o044)]
+    check(bool(_red),
+          "★★ 18h · ★元测试：喂一个 600 的权限位 → 判据会红"
+          "（否则这条永远绿：`0o044` 的判定写错了也看不出来）",
+          f"0o600 & 0o044 = {0o600 & 0o044}")
+
     print("\n" + "=" * 72)
     if fails:
         print(f"失败 {len(fails)} 项：")
