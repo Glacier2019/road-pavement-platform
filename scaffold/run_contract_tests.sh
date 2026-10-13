@@ -98,6 +98,35 @@ TESTS=(
   #   ★ 它自带两条元测试（把层级改坏、把模板的 VI 行删掉），所以它不会退化成摆设。
   #   ★ 它是**离线**的（纯文本解析，无数据库、无网络），所以放 PY 桶。
   "宪法一致|宪法 ↔ 模板 ↔ plan：逐原则覆盖 + 层级一致 + 历史名单只许缩短（含元测试）|全组|PY|tests/contract/test_spec_kit_consistency.py"
+
+  # ★★ v0.7 补登记（2026-10-13）。**这份文件从 002 起就在仓库里，却没有任何一行会跑它。**
+  #   引用它的**全是文档**（002 的 tasks.md / plan.md、contracts/design-import/README.md），
+  #   运行器没有它、run_e2e_smoke.sh 没有它、compose 也没有它。
+  #   ★ 直接补登记是**不够**的：它当时写的是
+  #       os.environ.get("PG_DSN") or os.environ.get("RPP_PG_DSN")
+  #     —— 压根不读 scaffold/.env，而运行器**从不传 PG_DSN**
+  #     （实测：本脚本里搜 PG_DSN 零命中）。所以它第 5 组只会走 [SKIP]，
+  #     而**第 5 组的 `return fails` 会把第 6/7/8 组一并吞掉** ——
+  #     八组只跑一半，报告写「全部通过」。
+  #   ★★ 这正是本仓反复栽的那类**假绿**，也正是 test_station_baseline.py
+  #      当初写下「为什么要读 .env 而不是没 PG_DSN 就跳过」那段注释的原因。
+  #      ⇒ 解析已收到 tests/contract/_env.py 一份，本文件改为 import 它。
+  #   ★ 桶选 DAO：它只要 psycopg（已实测「不加 pyyaml 也能全过」）。
+  "几何重建|逐桩几何可重建（重算 ≡ 已存）+ 桩号1:1 + ★篡改必须被发现|M2|DAO|tests/contract/test_geometry_solver.py"
+
+  # ★★ v0.7 新增（2026-10-13）。守的**不是功能，是两份清单的完整性**：
+  #    ① run_contract_tests.sh 的 TESTS=()  ←→ tests/**/*.py
+  #    ② docker-compose 的 initdb.d 挂载表  ←→ sql/*.sql
+  #    两份都是**手写的**，而原先**没有任何东西在读它们** ——
+  #    于是「新增一个测试文件 / 一个 sql 文件」不产生任何信号。
+  #    ★ 起因就是上一行那个孤儿：test_geometry_solver.py 提交了很久，
+  #      引用它的全是文档，**没有任何一行会跑它**。
+  #    ★ 它自带三条元测试（拿掉一行登记、拿掉一行挂载、拿掉一个种子的挂载），
+  #      所以它不会退化成「读一遍文件然后永远打印 OK」的那种摆设。
+  #    ★ 离线（纯文本解析），放 PY 桶。
+  #    ★★ 它还**显式记下自己查不了什么**（迁移 vs 种子没有机器判据，
+  #       实测三条候选规则全不成立）—— 见文件里 §2c 的注释。
+  "清单完整|运行器登记表 ↔ tests/ + initdb.d 挂载表 ↔ sql/：不许有孤儿，豁免须写明理由|全组|PY|tests/contract/test_runner_completeness.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

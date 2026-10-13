@@ -377,8 +377,23 @@ def _tamper_probe(dao):
 
 
 def _dsn():
-    import os
-    return os.environ.get("PG_DSN") or os.environ.get("RPP_PG_DSN")
+    """真库 DSN —— **转交 `_env.dsn()`**，本文件不再自己解析 `.env`。
+
+    ★★★ 这里原先写的是 ``os.environ.get("PG_DSN") or os.environ.get("RPP_PG_DSN")`` ——
+    **压根不读 `scaffold/.env`**。而 `run_contract_tests.sh` 从不传 `PG_DSN`
+    （实测：脚本里搜 `PG_DSN` 零命中）。两条加起来只有一个后果：
+
+        第 5 组「真实库」在总运行器下**永远走 `[SKIP]`**，
+        而本套件会显示成一行**绿**。
+
+    ★★ 这个坑不是新发现的 —— `test_station_baseline.py` 早就写下过
+    「为什么要读 .env 而不是没 PG_DSN 就跳过」，`test_design_import.py`
+    连 `.env` 行内注释那个坑都记了。**问题在于那段话当时只写在一个文件里，
+    所以它拦不住第二个、第三个、第五个消费者。**
+    ⇒ 现在解析收到 `tests/contract/_env.py` 一份，新套件 import 即可。
+    """
+    import _env
+    return _env.dsn()
 
 
 def _real_pm():
