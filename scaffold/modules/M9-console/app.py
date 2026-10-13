@@ -510,6 +510,92 @@ def gateway_get(path: str, request: Request) -> JSONResponse:
     return JSONResponse(payload)
 
 
+@app.get("/v1/crs/drift", include_in_schema=False)
+def crs_drift_check() -> JSONResponse:
+    """`crs.yaml` 与**契约给的取值**是否一致（FR-014 / SC-012 的巡检入口）。
+
+    ★★ 为什么这里比的是「契约值」，不是「库值」
+    ---------------------------------------------------------------
+    005 把 `crs.yaml` 降为**派生产物**、库升为权威。于是「文件跟着库走了没有」
+    需要一条判据。任务书写的是「在 `app.py` 与 `quickstart_probe.py` 加
+    「文件与库一致」检查」—— **但 M9 按字面做不到**：M9 的硬线是
+    「**不得直连数据库**」（读只经 M3 rpdao），本文件里没有 psycopg、
+    也没有 PG_DSN（§18c 用 AST 钉住了这一条）。
+
+    所以这里做的是它能做的那一半：拿 `/gw` → M6 → M3 这条**契约通道**的取值
+    与文件比。M6 报的那个值**就是库里那个值**（M3 读库、M6 原样带出），
+    所以语义上仍是「文件 vs 库」；区别只在**M9 不自己去看库**，它问契约。
+
+    ★ 三条通路各管一段，合起来才闭合（定义只有一份，在 `crs_drift.py`）：
+        · 本路由            M9 → 文件 vs **契约值**（能进容器、能进巡检）
+        · `quickstart_probe`     → 文件 vs **DAO 值**（部署后当场跑）
+        · `test_region_frame.py` §18d → **权威判据**（离线、可重复、带元测试）
+      前两条都绿**且**第三条绿，才叫「一致」。
+
+    ★ 拿哪一条路段的基准比？取**第一条配了基准的路段**，并把它报出来。
+      文件是**全平台一份**，说的是「这套部署默认用哪个基准」；多项目共存时它
+      必然只能代表其中一个 —— 那正是 SC-001/SC-002 要证明「文件不够用」之处。
+      所以这里不假装它在代表全部，而是**点名它代表谁**。
+    """
+    import crs_drift  # noqa: PLC0415  （同目录，纯函数，不碰库）
+
+    if not CRS_CONFIG.is_file():
+        raise HTTPException(503, detail=f"读不到基准文件：{CRS_CONFIG}")
+    doc = yaml.safe_load(CRS_CONFIG.read_text(encoding="utf-8")) or {}
+
+    url = f"{GATEWAY_BASE}/v1/geometry/sections"
+    try:
+        with urllib.request.urlopen(url, timeout=GATEWAY_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(502, detail=f"取不到上游数据：M6 返回 {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(
+            502, detail=f"取不到上游数据：M6（{GATEWAY_BASE}）不可达 —— {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, detail=f"上游返回的不是 JSON：{exc}") from exc
+
+    picked = None
+    for _it in (payload.get("items") or []):
+        if _it.get("crs_epsg") is not None:
+            picked = _it
+            break
+    if picked is None:
+        # ★ 「没有」也要有类型：不是「一致」，是「**没得比**」。
+        return JSONResponse({
+            "consistent": None,
+            "mismatches": [],
+            "checked_against": None,
+            "report": "库里**没有任何一条路段**配了坐标基准 —— 文件无从比对。"
+                      "这不是「一致」，是「没得比」。",
+        })
+
+    db_side = {"epsg": picked.get("crs_epsg"),
+               "zone_number": picked.get("crs_zone_number"),
+               "central_meridian_deg": picked.get("crs_central_meridian_deg"),
+               "assumed": picked.get("crs_assumed")}
+    # ★ `crs_evidence` **故意不放进** `db_side`：M6 的两条 HTTP 通路都不带它
+    #   （它在 M6 那边被 `_CRS_ROW_KEYS` 剥掉了）。放一个 `None` 进去会被
+    #   当成「库里是空的」而报一条**假的不一致**；不放，`compare_detailed`
+    #   就会把它列进 `skipped`，报告上写清「这个通道看不到它」。
+    #   ⇒ 键**在不在**是三态里的第三态，见 crs_drift.ABSENT 那段。
+    mism, skipped = crs_drift.compare_detailed(doc, db_side)
+    return JSONResponse({
+        # ★ 「一致」= 没有冲突 **且** 五项都真的看过了。
+        #   只判 `not mism` 的话，将来 M6 把某个字段删了，这里会**由红转绿**。
+        "consistent": (not mism) and (not skipped),
+        "mismatches": mism,
+        "skipped": skipped,
+        "checked_against": {
+            "section_id": picked.get("id"),
+            "section_name": picked.get("section_name"),
+            "via": "/gw → M6 → M3（M9 不直连数据库）",
+        },
+        "report": crs_drift.describe(mism, source="M6 契约值", skipped=skipped),
+    })
+
+
+
 @app.get("/import", response_class=HTMLResponse, include_in_schema=False)
 def import_page() -> HTMLResponse:
     """设计数据导入页。取数入口是 M2（见 INGEST_BASE 上面那段为什么不经 /gw）。"""

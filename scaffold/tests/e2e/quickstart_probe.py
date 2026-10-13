@@ -86,6 +86,204 @@ ok("清单里的 frame 标记是从 crs.yaml 读的（不是写死的）",
    mani["frame"]["crs_ready"] is _yaml_ready and mani["frame"]["crs_assumed"] is _yaml_assumed,
    f"清单 {mani['frame']} ｜ crs.yaml ready={_yaml_ready} assumed={_yaml_assumed}")
 
+print("\n判据 2b｜crs.yaml 与库一致（SC-012 / FR-014）")
+# ★★ 这一条是 005 的核心后果：`crs.yaml` 从**权威**降为**派生产物**。
+#    于是「文件跟着库走了没有」必须有判据 —— 否则派生物会悄悄漂走，
+#    而读它的那四个消费者一句警告都不会有。
+#
+# ★ 三条通路，各管一段（定义只有一份，在 M9-console/crs_drift.py）：
+#     · M9 `/v1/crs/drift`   → 文件 vs **契约值**（M9 不得直连数据库）
+#     · **本判据**            → 文件 vs **库**（唯一能比全五项的通路）
+#     · test_region_frame §18 → 权威判据（离线、带元测试）
+#   为什么偏偏是这里能比全五项：`crs_evidence` 在 M6 那边被 `_CRS_ROW_KEYS`
+#   剥掉了，两条 HTTP 通路都不带它 ⇒ 只有直接读库这一条路看得到。
+sys.path.insert(0, str(M9))
+import crs_drift  # noqa: E402
+
+import yaml  # noqa: E402
+
+_crs_doc = yaml.safe_load(_crs_text) or {}
+
+
+# ★★ 比**哪一行**？—— 不猜，问文件自己。
+#    导出器在 `generated_from` 里写明了它是从哪个项目导出来的，
+#    那就拿这一行来比。这比"取第一条配了基准的"强：
+#      · 后者在多项目共存时会**拿错行**，然后报告一份假的"不一致"；
+#      · 而 `generated_from` 是导出时真实落盘的出处，是文件的自述。
+#    ★ 顺带：这条判据也就在**替 `generated_from` 背书** —— 它要是写错了，
+#      比对会当场红，而不是让一个错的出处静静躺在文件里。
+_gen18 = {str(d.get("k")): d.get("v")
+          for d in (_crs_doc.get("generated_from") or []) if isinstance(d, dict)}
+_proj_id = _gen18.get("design_project.id")
+ok("crs.yaml 说了自己是从哪个项目导出来的（`generated_from`）",
+   _proj_id is not None, f"generated_from={_gen18}")
+_proj_name = _gen18.get("design_project.project_name", "")
+
+
+def _psql(sql):
+    """在 rp-pg 容器里查一行，返回制表符分隔的字符串。
+
+    ★ 换行必须在 **SQL 侧**转义：`crs_evidence` 是多行 text，
+      `psql -tAc` 会原样输出真换行，于是下游 `split("\t")` 会被打散成
+      七八段、字段全错位 —— 而错位之后**读起来仍然像正常数据**。
+    """
+    return subprocess.run(
+        ["docker", "exec", "rp-pg", "sh", "-c",
+         f'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc {json.dumps(sql)}'],
+        capture_output=True, text=True,
+        env={"DOCKER_CONFIG": str(REPO / ".dockerhome"), "PATH": "/usr/bin:/bin"})
+
+
+# 列顺序：前三列是纯标量，多行 text 放**最后**，即使它意外带换行也只污染自己
+_db_row = _psql(
+    "select coalesce(crs_epsg::text,'') || E'\\t' || coalesce(crs_zone_number::text,'')"
+    " || E'\\t' || coalesce(crs_central_meridian_deg::text,'')"
+    " || E'\\t' || coalesce(crs_assumed::text,'')"
+    f" || E'\\t' || replace(coalesce(crs_evidence,''), E'\\n', E'\\\\n')"
+    f" from design_project where id = {int(_proj_id)};" if _proj_id is not None else "select 1")
+if _proj_id is None or _db_row.returncode != 0 or not _db_row.stdout.strip():
+    ok("从库里取到 crs.yaml 自述的那个项目（否则下面几条全是空转）", False,
+       (_db_row.stdout + _db_row.stderr).strip()[:160])
+else:
+    _f = _db_row.stdout.strip().split("\t")
+    ok("取到的字段个数对得上（多行 text 没把列打散）", len(_f) == 5,
+       f"{len(_f)} 段：{[x[:24] for x in _f]}")
+    _db_side = {
+        "epsg": int(_f[0]),
+        "zone_number": int(_f[1]),
+        "central_meridian_deg": _f[2],
+        "assumed": _f[3] == "t",
+        "evidence": _f[4].replace("\\n", "\n"),
+    }
+    _mis, _skip = crs_drift.compare_detailed(_crs_doc, _db_side)
+    ok(f"crs.yaml 与库**五项全部**一致（比的是它自述的出处：项目 {_proj_id}「{_proj_name}」）",
+       not _mis and not _skip,
+       crs_drift.describe(_mis, source="库里 design_project", skipped=_skip)[:400])
+    # ★ 反向判据要配同向对照：证明「五项真的都看了」，不是「碰巧没冲突」。
+    ok("对照：五项**一项都没跳过**（`crs_evidence` 走库这条路看得到；"
+       "走 M6 那条 HTTP 路看不到 —— 那是通道的局限，不是库的）",
+       not _skip, f"未比对 {_skip}")
+    # ★ 元测试：把库那一侧改坏一处 → 必须变红。**在这里做**是因为本判据
+    #   比的是真库；只在离线测试里做，验不到「这条 SQL 真的取到了值」。
+    _bad = dict(_db_side, epsg=2154)
+    _mis_bad = crs_drift.compare(_crs_doc, _bad)
+    ok("★元测试：库里改成 2154 → 本判据真的会红，且点名 epsg",
+       bool(_mis_bad) and "epsg" in " ".join(_mis_bad), (" ".join(_mis_bad))[:120])
+    # ★ 元测试②：证据少一条必须红 —— 这是「一条不多一条不少」的执行者
+    _bad2 = dict(_db_side, evidence=_db_side["evidence"].splitlines()[1:])
+    _mis2 = crs_drift.compare(_crs_doc, _bad2)
+    ok("★元测试②：库里证据少一条 → 变红且点名 evidence",
+       bool(_mis2) and "evidence" in " ".join(_mis2), (" ".join(_mis2))[:120])
+
+# ★ M9 那条路：证明它**能进容器、能当巡检用**，并证明它如实报出「evidence 没得比」
+_rd = c.get("/v1/crs/drift")
+ok("GET /v1/crs/drift → 200（M9 经 /gw → M6 → M3，自己不碰库）",
+   _rd.status_code == 200, str(_rd.status_code))
+if _rd.status_code == 200:
+    _jd = _rd.json()
+    ok("M9 那条路：五项里看得见的那几项一致，且**如实**把 evidence 列进「未比对」",
+       not _jd["mismatches"] and _jd["skipped"] == ["evidence"],
+       f"不一致 {_jd['mismatches']}；未比对 {_jd['skipped']}")
+    # ★★★ 防滥用：`consistent` 不许在「有未比对项」时为真 ——
+    #     否则将来 M6 少给任何一个字段，这条巡检会**由红转绿**而无人察觉。
+    ok("★★ 而 `consistent` 仍然是 false —— 「没得比」不许被说成「一致」",
+       _jd["consistent"] is False, str(_jd["consistent"]))
+
+
+print("\n判据 2c｜两级不一致时**写入侧**真的会拒（quickstart 第 2 步 / Q1b）")
+# ★★★ 这一条是 005 期间**查出来的漏**，不是照着 spec 抄的。
+#     quickstart 第 2 步主张「给路段配一个不同的基准 → 这条必须失败」。
+#     实测：`UPDATE 1` —— 写入**成功了**。全仓扫过：
+#       · 没有任何触发器；· 没有任何 crs 相关的 check 约束；
+#       · M2 写路径完全不碰 crs 字段。
+#     ⇒ 那个不变量**根本不存在**，只有读取侧的 503 在兜底，
+#       而 quickstart 自己写着「必须在写入侧拦，不能在读路径拦」。
+#     ★ 两个真实后果：
+#       ① 一条矛盾的记录可以**永久躺在库里**，没有任何一层会报错；
+#       ② 更危险 —— **导出器会照着它写出一份错的 `crs.yaml`**（文件是派生产物），
+#          下游那四个消费者一句警告都不会有。
+#     修法：`sql/25_crs_two_level_guard.sql`（写入侧触发器，两张表都挂）。
+#
+# ★ 每条 UPDATE **各起一个事务**：触发器报错会中止整个事务块，
+#   几条挤在一个 BEGIN 里，第二条起就只会报「current transaction is aborted」，
+#   那样测的就不是守卫，是事务语义。
+
+
+def _try_update(sql_text: str) -> tuple[bool, str]:
+    """在一个独立事务里试一次写入，返回 (是否被拒, 合并的错误正文)。"""
+    r = subprocess.run(
+        ["docker", "exec", "-i", "rp-pg", "sh", "-c",
+         'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -f -'],
+        input=f"BEGIN;\n{sql_text}\nROLLBACK;\n",
+        capture_output=True, text=True,
+        env={"DOCKER_CONFIG": str(REPO / ".dockerhome"), "PATH": "/usr/bin:/bin"})
+    out = r.stdout + r.stderr
+    return ("ERROR" in out), out
+
+
+_mine = ("UPDATE road_section SET crs_epsg=4547, crs_zone_number=38, "
+         "crs_central_meridian_deg=114 WHERE id=6;")
+_rejected, _msg = _try_update(_mine)
+ok("★ 态②：给路段配 4547（项目是 4548）→ **被拒**（quickstart 第 2 步的主张）",
+   _rejected, _msg.strip()[:200])
+ok("★ 而且报错里**两级的值都在**（SC-009：只报「基准冲突」不算做对）",
+   "4548" in _msg and "4547" in _msg, _msg.strip()[:200])
+ok("★ 报错里**两级的主体名都在**（项目名、路段名）—— 接手的人要知道往哪边改",
+   "项目" in _msg and "路段" in _msg and "毕设" in _msg, _msg.strip()[:200])
+
+# ★ 对称性：只挂 road_section 是不够的 —— 改**项目**同样能造出一对矛盾，
+#   而且它改的是**全项目所有路段**的依据。
+_mine2 = "UPDATE design_project SET crs_epsg=4547 WHERE id=2;"
+_rej2, _msg2 = _try_update(_mine2)
+ok("★★ 态②**对称**：改项目（让已配好的路段失配）→ 也被拒"
+   "（只挂一张表的守卫拦不住这条路）",
+   _rej2 and "4547" in _msg2 and "4548" in _msg2, _msg2.strip()[:200])
+
+# ★ 反向：只会红不会绿 = 验不出东西。同值的写入**必须照过**。
+_ok_rej, _ok_msg = _try_update("UPDATE road_section SET crs_epsg=4548 WHERE id=6;")
+ok("★★ 对照：写成**相同**的值 → 必须放行"
+   "（一个把所有写入都拒掉的守卫，等于让平台不能用了）",
+   (not _ok_rej) and "UPDATE 1" in _ok_msg, _ok_msg.strip()[:200])
+
+# ★ 反向②：清掉一级 → 必须放行（E2 态③④，缺一边不算冲突）
+_ok3, _ok3msg = _try_update("UPDATE road_section SET crs_epsg=NULL WHERE id=6;")
+ok("★★ 对照：路段级清空（只剩项目级）→ 必须放行 —— E2 态③④ 是合法状态，"
+   "守卫只拦第 ② 态，不做「必须两级都填」",
+   (not _ok3) and "UPDATE 1" in _ok3msg, _ok3msg.strip()[:200])
+
+# ★ 元测试：证明上面那几条真的连到了守卫 —— 把触发器摘掉，同样的写入
+#   必须**变成成功**。否则「被拒」可能是别的原因（外键、权限、语法）。
+_drop = ("DROP TRIGGER IF EXISTS crs_two_level_guard_section ON road_section;")
+_r = subprocess.run(
+    ["docker", "exec", "-i", "rp-pg", "sh", "-c",
+     'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -q -c ' + json.dumps(_drop)],
+    capture_output=True, text=True,
+    env={"DOCKER_CONFIG": str(REPO / ".dockerhome"), "PATH": "/usr/bin:/bin"})
+try:
+    _norej, _nomsg = _try_update(_mine)
+    ok("★元测试：把触发器摘掉后，**同一句 UPDATE 就不再被拒** —— "
+       "证明刚才那次拒绝确实出自这个守卫，不是外键或别的原因",
+       not _norej, _nomsg.strip()[:200])
+finally:
+    # ★ 无论上面断言成不成立，守卫都必须装回去 —— 否则这个 probe 会
+    #   留下一台**没有守卫**的库，而它自己是绿的。
+    _reapply = subprocess.run(
+        ["docker", "exec", "-i", "rp-pg", "sh", "-c",
+         'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -q -f -'],
+        stdin=open(REPO / "scaffold" / "sql" / "25_crs_two_level_guard.sql", encoding="utf-8"),
+        capture_output=True, text=True,
+        env={"DOCKER_CONFIG": str(REPO / ".dockerhome"), "PATH": "/usr/bin:/bin"})
+    ok("★元测试：守卫已**装回**（probe 不许留一台没守卫的库给自己绿）",
+       _reapply.returncode == 0, (_reapply.stdout + _reapply.stderr).strip()[:200])
+    _back, _backmsg = _try_update(_mine)
+    ok("★元测试：装回之后同一句又被拒 —— 收尾闭环",
+       _back, _backmsg.strip()[:200])
+
+_after = _psql("select coalesce(crs_epsg::text,'') from road_section where id=6;")
+ok("★ 全部试完，库里的值**没被改动**（每条都 ROLLBACK 了）",
+   _after.stdout.strip() == "4548", _after.stdout.strip()[:80])
+
+
 print("\n判据 3｜页面 200，且首页链得到")
 r = c.get("/sim")
 ok("GET /sim → 200", r.status_code == 200, str(r.status_code))

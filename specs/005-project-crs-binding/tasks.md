@@ -97,13 +97,13 @@ description: "Task list for 005-project-crs-binding"
 
 ### Tests for User Story 2 ⚠️ 先写，先看它红
 
-- [ ] T020 [P] [US2] 在 `scaffold/tests/contract/test_region_frame.py` 加「**004 精度不退化**」判据（SC-007）：判据是**浮点逐位相同**，不是「误差在容差内」。★ FR-007 的原文就是「判据 = 浮点逐位相同」
-- [ ] T021 [P] [US2] 在 `scaffold/tests/contract/test_region_frame.py` 加「**同一份基准、两级都填、值相等**」判据（data-model E2 第 1 态）：断言通过，且 `crs_source` 仍是 `"project"`。★★ 这一条证明「路段级填了相同的值，也不改变权威来源是项目级」——这正是「路段级是冗余校验」的直接推论
+- [x] T020 [P] [US2] 在 `scaffold/tests/contract/test_region_frame.py` 加「**004 精度不退化**」判据（SC-007）：判据是**浮点逐位相同**，不是「误差在容差内」。★ FR-007 的原文就是「判据 = 浮点逐位相同」
+- [x] T021 [P] [US2] 在 `scaffold/tests/contract/test_region_frame.py` 加「**同一份基准、两级都填、值相等**」判据（data-model E2 第 1 态）：断言通过，且 `crs_source` 仍是 `"project"`。★★ 这一条证明「路段级填了相同的值，也不改变权威来源是项目级」——这正是「路段级是冗余校验」的直接推论
 
 ### Implementation for User Story 2
 
-- [ ] T022 [US2] 在实库给路段 6（`section_id=6`，`design_project_id=2`）填上**与项目相同**的基准（39 / 117 / 4548），作为「两级都填且一致」的真实样本；SQL 写进 `scaffold/sql/98_migrate_v06_crs_binding.sql` 之后另存一份到 `specs/005-project-crs-binding/quickstart.md` 第 2 步旁
-- [ ] T023 [US2] 跑 quickstart.md **第 7 步**并逐条核对：投影往返两位小数不得变、桩号差不得变、`bbox` 四个数不得变。★ 任何一处变了都要停下来查，不许调容差
+- [x] T022 [US2] 在实库给路段 6（`section_id=6`，`design_project_id=2`）填上**与项目相同**的基准（39 / 117 / 4548），作为「两级都填且一致」的真实样本；SQL 写进 `scaffold/sql/98_migrate_v06_crs_binding.sql` 之后另存一份到 `specs/005-project-crs-binding/quickstart.md` 第 2 步旁
+- [x] T023 [US2] 跑 quickstart.md **第 7 步**并逐条核对：投影往返两位小数不得变、桩号差不得变、`bbox` 四个数不得变。★ 任何一处变了都要停下来查，不许调容差
 
 **Checkpoint**: US1 与 US2 同时成立 —— 通用化了，而老路没动。
 
@@ -117,15 +117,15 @@ description: "Task list for 005-project-crs-binding"
 
 ### Tests for User Story 3 ⚠️ 先写，先看它红
 
-- [ ] T024 [P] [US3] 加「**五个消费者全部继续工作**」判据（SC-011）：判据是 `scaffold/simulator/crg/export_viewer_mesh.py` 与 `scaffold/tests/integration/sim_inline_script.mjs` **不连库**，仍能拿到 `ready` / `assumed` 两个值
-- [ ] T025 [P] [US3] 在 `scaffold/tests/contract/test_region_frame.py` 加「**文件与库一致**」判据（SC-012）+ ★ **必须配元测试**（宪法 §V：每条新增的检查必须证明「违规时它真的会红」）：故意改库一处、不同步文件，**断言检查变红**；再断言它说得出**哪一处不一致**
+- [x] T024 [P] [US3] 加「**五个消费者全部继续工作**」判据（SC-011）：判据是 `scaffold/simulator/crg/export_viewer_mesh.py` 与 `scaffold/tests/integration/sim_inline_script.mjs` **不连库**，仍能拿到 `ready` / `assumed` 两个值
+- [x] T025 [P] [US3] 在 `scaffold/tests/contract/test_region_frame.py` 加「**文件与库一致**」判据（SC-012）+ ★ **必须配元测试**（宪法 §V：每条新增的检查必须证明「违规时它真的会红」）：故意改库一处、不同步文件，**断言检查变红**；再断言它说得出**哪一处不一致**
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] 把 `crs.yaml` 改为**从库导出的产物**：加一个导出入口，从 `design_project` / `road_section` 读出基准，写成与现状**同形状**的 YAML（含 `local_frame` / `geographic_frame` / `evidence` 三段）
-- [ ] T027 [US3] 在 `scaffold/modules/M9-console/app.py` 与 `scaffold/tests/e2e/quickstart_probe.py` 加「**文件与库一致**」检查的实现。★ 它 MUST 在 `ready` / `assumed` / `zone_number` / `central_meridian_deg` / `epsg` 五项上比对，且不一致时 MUST 说清哪个字段、库里是什么、文件里是什么
-- [ ] T028 [US3] ★ **`crs_evidence` 必须随基准存进库里**（FR-015）：把 `crs.yaml` 那 8 条 `evidence` 搬进 `design_project` 第 2 行的 `crs_evidence`。★ 「确认的还是推断的」及其依据 MUST NOT 只留在文件里
-- [ ] T029 [US3] 实测确认**另外四个消费者一个都没改**：`grep -n 'crs.yaml' scaffold/simulator/crg/export_viewer_mesh.py scaffold/tests/integration/sim_inline_script.mjs scaffold/modules/M9-console/app.py` —— 三处都必须仍指向文件
+- [x] T026 [US3] 把 `crs.yaml` 改为**从库导出的产物**：加一个导出入口，从 `design_project` / `road_section` 读出基准，写成与现状**同形状**的 YAML（含 `local_frame` / `geographic_frame` / `evidence` 三段）
+- [x] T027 [US3] 在 `scaffold/modules/M9-console/app.py` 与 `scaffold/tests/e2e/quickstart_probe.py` 加「**文件与库一致**」检查的实现。★ 它 MUST 在 `ready` / `assumed` / `zone_number` / `central_meridian_deg` / `epsg` 五项上比对，且不一致时 MUST 说清哪个字段、库里是什么、文件里是什么
+- [x] T028 [US3] ★ **`crs_evidence` 必须随基准存进库里**（FR-015）：把 `crs.yaml` 那 8 条 `evidence` 搬进 `design_project` 第 2 行的 `crs_evidence`。★ 「确认的还是推断的」及其依据 MUST NOT 只留在文件里
+- [x] T029 [US3] 实测确认**另外四个消费者一个都没改**：`grep -n 'crs.yaml' scaffold/simulator/crg/export_viewer_mesh.py scaffold/tests/integration/sim_inline_script.mjs scaffold/modules/M9-console/app.py` —— 三处都必须仍指向文件
 
 **Checkpoint**: 三个 user story 全部独立成立。
 
@@ -187,6 +187,42 @@ description: "Task list for 005-project-crs-binding"
   ① 契约测试的字段比对**必须同时比类型**，不能只比字段名 ——
      005 之前 §13 只比名字，所以那个字符串缺陷**全绿通过**；
   ② 元测试：故意让一个 numeric 字段以字符串出去，断言比对**变红**。
+
+- [x] T047 ★★★ **写入侧的两级一致守卫**（Q1b 真正落地的地方）。**这条是实测查出来的漏，不是照着 spec 抄的。**
+  跑 quickstart 第 2 步（T023 前后）时实测：`UPDATE road_section SET crs_epsg=4547 WHERE id=6` → **`UPDATE 1`**，
+  ★ **写入成功了**。全仓扫过三处：
+  · `sql/*.sql` —— 没有任何触发器，没有任何 crs 相关 check 约束（只有两条 FK 到 `spatial_ref_sys`）；
+  · M2 写路径 —— `grep -rln 'crs_epsg\|crs_zone_number' modules/M2-ingest/` **零命中**；
+  · 唯一的执行者只有读取侧 M6 的 503。
+  ⇒ **Q1b 的不变量压根不存在**，只有兜底。而 `10_ddl_v0.6.sql` L352 的注释
+    **早就写着**「由写入侧拒绝」—— 所以这不是「还没做」，是**建了一半、另一半没人认领**
+    （`98_migrate_v06_crs_binding.sql` 后记③ 明确把「两级一致检查」推了出去，而没有任何任务接住）。
+  ★★ 两个真实后果：① 一条矛盾的记录能**永久躺在库里**，没有任何一层会报错；
+    ② 更危险 —— **导出器会照着它写出一份错的 `crs.yaml`**（文件是派生产物 T015/T026），
+       它会忠实地把错的抄出去，下游那四个消费者一句警告都不会有。
+  ★★ 而 quickstart 第 2 步自己写着「必须在写入侧拦，**不能**在读路径拦」。
+  **做法**：`scaffold/sql/25_crs_two_level_guard.sql`（新文件）
+  · `crs_pair_must_agree()` —— 只拦 E2 第 ② 态；态①③④⑤ 一律放行（只拦，不填、不选）；
+  · 报错**说得出两级的主体名和值**（SC-009）；`ERRCODE=23514`；
+  · **两张表都挂** BEFORE 触发器 —— 只挂 `road_section` 拦不住 `UPDATE design_project`，
+    而它改的是**全项目所有路段**的依据；
+  · 装之前先查库里**已经**有没有矛盾，有就当场拒绝 ——
+    否则这是个「装的时候库本来就坏」的守卫，表现是**永远绿**；
+  · 幂等（`DROP TRIGGER IF EXISTS` 在前），可重复执行。
+  ★★★ **放哪儿是这条任务的关键**：`sql/25_*.sql` + 挂进 `docker-entrypoint-initdb.d/`。
+    **不许只写进迁移** —— 迁移从不自动执行（compose 只挂 10/20/90），
+    「只写迁移」对全新装等于**没有守卫**，而文件在、代码也「做了」，谁都发现不出来。
+    这与 004 踩的是同一个坑，只换了个对象。
+  ★ 覆盖：US1（两级一致是 Q1b 的核心）。
+  **判据**：① `tests/e2e/quickstart_probe.py` **判据 2c**（行为，10 条）——
+    态②被拒 + 两级值都在 + 两级主体名都在 + **对称性**（改项目也被拒）
+    + 同值必须放行 + 清掉一级必须放行
+    + ★元测试（摘掉触发器后同一句**不再被拒**，证明拒绝确实出自这个守卫，不是外键/权限/语法）
+    + 守卫**装回**且收尾闭环；② `tests/contract/test_region_frame.py` **§18g**（静态，4 条）——
+    文件在 + 两张表都挂 + ★**真的会被跑到**（initdb.d 挂载）+ 元测试（拿掉挂载行必须红）。
+  ★ 坑（已踩）：`RAISE` 的占位符是**裸 `%`**，不是 `%s` —— 写 `%s` 会输出「值 + 字面 s」，
+    **看起来完全正常**；且触发器报错会中止整个事务块，五态必须**各起一个事务**，
+    否则第二条起只会报「current transaction is aborted」，测的就不是守卫。
 
 ---
 

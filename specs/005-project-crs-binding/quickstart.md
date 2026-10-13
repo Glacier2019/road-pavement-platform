@@ -54,31 +54,72 @@ ORDER BY table_name, column_name"
 
 这是 Q1b = B 的核心。**要在库里直接试，而不是相信它会拦。**
 
+★ **前提**：守卫本身要先装上 —— `scaffold/sql/25_crs_two_level_guard.sql`。
+全新装由 initdb.d 自动跑；已装的库手动跑一次（幂等，可重复执行）。
+★ **迁移从不自动执行**，所以这个守卫**刻意不放在迁移里** —— 放迁移里，
+全新装的库会一点保护都没有，而文件在、代码也「做了」，谁都发现不出来。
+
+★★ **路段级的真实样本**：路段 6（`section_id=6`，`design_project_id=2`）已经填了
+**与项目相同**的基准（39 / 117 / 4548），这是 T022 用
+`scaffold/sql/99_seed_crs_39band.sql` §② 造出来的「两级都填且一致」的活样本
+（data-model E2 第 1 态）。它同时是判据 2b 那个「文件与库一致」的比对对象。
+⇒ **所以 2a 不要整行覆写**，那会把 8 条 `crs_evidence` 冲成 1 条，
+连带把判据 2b 搞红。下面改成只补缺的字段。
+
 ```bash
-# 2a. 先给「毕设」项目配上基准（39 带 / CM 117 / EPSG 4548）
+# 2a. 确认「毕设」项目的基准在（若已由 99 号种子填好，这一步是空操作）
 docker exec -i -e PGPASSWORD="$PG_PASSWORD" rp-pg psql -U "$PG_USER" -d "$PG_DB" -c "
 UPDATE design_project SET crs_zone_number=39, crs_central_meridian_deg=117,
-       crs_epsg=4548, crs_zone_width_deg=3.00, crs_assumed=false,
-       crs_evidence='平台方 2026-10-11 确认'
-WHERE id=2"
+       crs_epsg=4548, crs_zone_width_deg=3.00, crs_assumed=false
+ WHERE id=2
+   AND (crs_epsg IS DISTINCT FROM 4548 OR crs_evidence IS NULL)"
 
 # 2b. ★ 给它的路段配一个**不同**的基准 —— 这条必须失败
-docker exec -i -e PGPASSWORD="$PG_PASSWORD" rp-pg psql -U "$PG_USER" -d "$PG_DB" -c "
+#     ★ 各起一个事务：触发器报错会中止整个事务块，几条挤在一起，
+#       第二条起只会报「current transaction is aborted」，
+#       那样测的就不是守卫，是事务语义。
+docker exec -i -e PGPASSWORD="$PG_PASSWORD" rp-pg psql -U "$PG_USER" -d "$PG_DB" <<'SQL'
+BEGIN;
 UPDATE road_section SET crs_zone_number=38, crs_central_meridian_deg=114,
        crs_epsg=4547, crs_zone_width_deg=3.00, crs_assumed=false,
        crs_evidence='故意写错，测一致性'
-WHERE id=6"
+ WHERE id=6;
+ROLLBACK;
+SQL
 ```
 
 **期望**：
-- 2a **成功**
-- 2b ★ **失败**，报错信息里**同时出现 39 和 38**（或 117 和 114）
+- 2a **成功**（已配好的话则是 `UPDATE 0`）
+- 2b ★ **失败**，报错信息里**同时出现 4548 和 4547**，**并且两级的主体名都在**
+  —— 形如：
+  ```
+  坐标基准两级不一致：
+      项目「毕设」（id=2）是 EPSG:4548
+      路段「毕设」（id=6）是 EPSG:4547
+    两级都有值时必须相等。改法：把两级改成同一个，或者清掉其中一级。
+  ```
 
 **看不到就是没做对**：
 - 2b 成功了 ⇒ **不变量不存在**，Q1b 没落地
 - 2b 失败了但只报「基准冲突」⇒ ★ **也算没做对**（SC-009 要求说得出两级的取值各是什么）
 
-★ **这一步必须在写入侧拦**（DB 触发器 / M2 写路径），**不能在读路径拦** —— 读路径拦会让一条路段的坏数据把**整个列表接口**搞挂。
+★★ **还要试反向**：只会红不会绿的守卫，等于让平台不能用了。
+一样的写法，把 2b 的 `4547` 换成 `4548`（与项目相同）→ 必须 `UPDATE 1`。
+把整段 `SET crs_epsg=NULL` 只清掉路段级 → 也必须成功（E2 态③④ 是合法状态，
+守卫**只拦第 ② 态**，不做「必须两级都填」）。
+
+★ **这一步必须在写入侧拦**（DB 触发器 / M2 写路径），**不能在读路径拦** ——
+读路径拦会让一条路段的坏数据把**整个列表接口**搞挂。
+★★ 而 `psql`、`COPY`、后续任何一个模块、任何运维脚本都能写这两张表；
+只在 M2 拦等于只拦住了**门**、没拦住**墙**。所以守卫落在库里，**两张表都挂**：
+只挂 `road_section` 拦不住 `UPDATE design_project` —— 而它改的是全项目所有路段的依据。
+
+★★★ **本条被测到过**：005 实施期间实测 `UPDATE 1`（写入成功了）——
+触发器、check 约束、M2 写路径三处**都没有**这个不变量，
+只有读取侧的 503 在兜底。⇒ 补上了
+`scaffold/sql/25_crs_two_level_guard.sql`。
+行为判据落在 `tests/e2e/quickstart_probe.py` **判据 2c**（含「摘掉触发器后同一句就不再被拒」的元测试），
+静态判据落在 `tests/contract/test_region_frame.py` **§18g**（守「文件在」**且**「有人会跑它」）。
 
 ---
 

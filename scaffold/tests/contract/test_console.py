@@ -460,14 +460,59 @@ def main() -> int:
     ok("/tables 的内容确实是那一页", "数据表盘点" in r.text)
     ok("首页链到 /tables（入口真的点得到）", 'href="/tables"' in client.get("/").text)
     ok("表盘点页链回首页", 'href="/"' in client.get("/tables").text)
-    # 镜像清单：页面文件必须真的被 COPY 进镜像，否则宿主机测试全绿、容器里 500。
+    # 镜像清单：模块里的文件必须真的被 COPY 进镜像，否则宿主机测试全绿、容器里 500。
+    #
+    # ⚠⚠ 这一条原先长这样：
+    #      _missing = [p.name for p in M9_DIR.glob("*.html") if p.name not in _dockerfile]
+    #    两个弱点叠在一起，**正好放走了 005 实际踩到的那一次**：
+    #      ① 只 glob `*.html` —— 它守的是「页面」，而 `.py` 同样会被漏，
+    #         且漏 .py 的表现更隐蔽：整个容器健康检查是绿的，只有**某一个**
+    #         依赖该模块的接口 500（005：新增 `crs_drift.py`，
+    #         `/v1/crs/drift` 直接 500，而 `/healthz` 一切正常）。
+    #      ② 用的是**子串匹配**（`p.name not in _dockerfile`）—— 于是
+    #         Dockerfile 一旦改用通配（`COPY *.html ./`），文件名不再出现，
+    #         六个页面会被**全部**误报成「未 COPY」。
+    #         ★ 一条判据被自己的修复动作搞红，说明它测的是**文本长什么样**，
+    #           而不是**容器里有没有那个文件**。
+    #    ⇒ 现在认通配、并把 `.py` 一起纳入。
     _dockerfile = (M9_DIR / "Dockerfile").read_text(encoding="utf-8")
-    _missing = [p.name for p in M9_DIR.glob("*.html") if p.name not in _dockerfile]
-    ok("每个页面都被 Dockerfile COPY 进镜像（漏了会让容器里 500、宿主机测试却全绿）",
-       not _missing, f"未 COPY：{_missing}")
-    ok("元测试：漏 COPY 时必须被认出来（非摆设）",
-       [p.name for p in M9_DIR.glob("*.html")
-        if p.name not in _dockerfile.replace("COPY tables.html ./", "", 1)] == ["tables.html"])
+
+    def _covered_by(name: str) -> bool:
+        for _ln in _dockerfile.splitlines():
+            _s = _ln.strip()
+            if _s.upper().startswith("COPY "):
+                _srcs = _s[5:].split()[:-1] or _s[5:].split()[:1]
+                for _src in _srcs:
+                    if _src == name:
+                        return True
+                    if _src.startswith("*.") and name.endswith(_src[1:]):
+                        return True
+        return False
+
+    _mods = sorted(p.name for p in M9_DIR.iterdir()
+                   if p.is_file() and p.suffix in (".py", ".html"))
+    _missing = [n for n in _mods if not _covered_by(n)]
+    ok("模块里每个 .py/.html 都被 Dockerfile 覆盖（漏了会让容器里 500、宿主机测试却全绿）"
+       "　★ 含 .py —— 只守页面就会漏掉 `import` 才炸的那一类",
+       _mods and not _missing, f"未 COPY：{_missing}")
+    # ★ 元测试必须**两个方向都走一遍**：一边证明漏了会被认出，
+    #   一边证明改用通配后不会被误报 —— 只做前者，通配化就会把它搞红。
+    #   （★ 这里不许写 `or True` 之类永远为真的东西：宪法 V
+    #     「一个永远不会失败的检查，比没有检查更糟糕」。）
+    _hand = "FROM python:3.11-slim\nCOPY app.py ./\nCOPY tables.html ./\n"
+    _saved, _dockerfile = _dockerfile, _hand
+    try:
+        _miss_hand = [n for n in _mods if not _covered_by(n)]
+    finally:
+        _dockerfile = _saved
+    ok("元测试（负向）：手工清单一喂进去，缺的**必须**被点出来 —— "
+       "而且必须包含 `crs_drift.py`（就是 005 实际踩的那一个）",
+       "crs_drift.py" in _miss_hand
+       and set(_miss_hand) == {n for n in _mods if n not in ("app.py", "tables.html")},
+       f"点出了 {_miss_hand}")
+    ok("元测试（正向）：改成通配后**不许**再误报 —— "
+       "否则「把清单改成通配」这个修复动作本身会把判据搞红",
+       not _missing, f"误报 {_missing}")
 
     # 两个页面互相可达：点得到才算"导航"，不然只是一句口号
     ok("首页链到 /geometry（导航真的连上了）", 'href="/geometry"' in client.get("/").text)

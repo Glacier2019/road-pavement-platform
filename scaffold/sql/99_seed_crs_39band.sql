@@ -88,3 +88,82 @@ SELECT id, project_name, crs_epsg, crs_zone_number, crs_central_meridian_deg,
        crs_zone_width_deg, crs_assumed
   FROM design_project
  ORDER BY id;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ② 路段级：「两级都填、且值相等」的真实样本（T022）
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- ★ T022 原文要求把这段写进 `sql/98_migrate_v06_crs_binding.sql`。
+--   2026-10-13 按「通用商业化优先」（宪法 VI）改放这里，两条理由：
+--
+--     ① **本文件自己已经论证过同一件事**，只是当时说的是项目级。
+--        98 的后记① 逐字写着「不写 update，不给任何现有行填基准……
+--        基准由 T019 作为数据装载单独做」。把路段级塞回 98，
+--        等于同一份迁移里前后自相矛盾。
+--
+--     ② **更重的一条**：路段 6 那组值是本部署的**演示样本**，
+--        不是「任何库升级到 v0.6 都该有的东西」。放进迁移，
+--        每一个商业部署都会凭空多出一条自己没配过的路段级基准 ——
+--        而它看起来完全正常。这正是 004 的教训：看着正常的错值比缺失更危险。
+--
+-- ★ 样本的作用是什么
+--   data-model.md 的 E2 第 1 态：**同一份基准、两级都填、值相等**。
+--   这一条要证明的是「路段级填了相同的值，也不改变权威来源是**项目级**」——
+--   即路段级是**冗余校验**，不是覆盖。判据 SC-012 / T021 要断言
+--   `crs_source` 仍是 `"project"`，而不是 `"section"`。
+--   ★ 没有这一行真实数据，那条判据只能在假仓储上成立。
+--
+-- 幂等：同 ①，`WHERE crs_epsg IS NULL` 让第二次跑更新 0 行，
+--       并且**不覆盖**任何已经存在的路段级基准。
+--
+-- 定位：按业务键 `section_name = '毕设'`，不按 `id = 6`（理由同上面「定位方式」）。
+-- ★ 另加一个**行数守卫**：本段只打算匹配 1 行。匹配到 0 行或 2 行以上时
+--   大声报出来 —— 静默地更新了 0 行，与「本来就该这样」长得一模一样。
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $$
+DECLARE
+    n_hit int;
+BEGIN
+    SELECT count(*) INTO n_hit
+      FROM road_section
+     WHERE section_name = '毕设'
+       AND design_project_id IS NOT NULL;
+
+    IF n_hit <> 1 THEN
+        RAISE WARNING '99_seed_crs_39band ②：期望恰好 1 条「毕设」路段，实际 % 条 —— '
+                      '已跳过路段级样本，不做任何写入', n_hit;
+    ELSE
+        UPDATE road_section
+           SET crs_epsg                = 4548,
+               crs_zone_number         = 39,
+               crs_central_meridian_deg = 117,
+               crs_zone_width_deg      = 3.00,
+               crs_assumed             = false,
+               crs_evidence            = 'T022 样本：与所属项目同值（39 / 117 / 4548），'
+                                         '用于验证 data-model E2 第 1 态 —— '
+                                         '路段级填相同的值不改变权威来源，crs_source 仍为 project'
+         WHERE section_name = '毕设'
+           AND design_project_id IS NOT NULL
+           AND crs_epsg IS NULL;      -- ★ 幂等，且绝不覆盖已定下来的值
+    END IF;
+END $$;
+
+-- 核对：两级的五元组必须**逐位相等**，且 origin 一栏能看出各自来自哪一级。
+SELECT 'project' AS origin,
+       dp.project_name AS name,
+       dp.crs_epsg, dp.crs_zone_number, dp.crs_central_meridian_deg,
+       dp.crs_zone_width_deg, dp.crs_assumed,
+       dp.crs_evidence IS NOT NULL AS has_evidence
+  FROM design_project dp
+ WHERE dp.project_name = '毕设'
+UNION ALL
+SELECT 'section',
+       rs.section_name,
+       rs.crs_epsg, rs.crs_zone_number, rs.crs_central_meridian_deg,
+       rs.crs_zone_width_deg, rs.crs_assumed,
+       rs.crs_evidence IS NOT NULL
+  FROM road_section rs
+ WHERE rs.section_name = '毕设'
+   AND rs.design_project_id IS NOT NULL;
+

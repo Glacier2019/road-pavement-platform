@@ -514,6 +514,7 @@ def main() -> int:
     # ---------------------------------------------------------------- 3) 投影往返
     print("\n=== 3) 投影往返闭合（正算→反算）===")
     worst = 0.0
+    _devs = []
     for lat, lon in [(25.185964, 117.359262), (25.16789, 117.34292),
                      (25.20878, 117.37376), (0.0, 117.0), (45.0, 117.0)]:
         n, e = GEO.forward(lat, lon, 117.0)
@@ -521,7 +522,23 @@ def main() -> int:
         dn = (lat2 - lat) * 111320.0
         de = (lon2 - lon) * 111320.0 * math.cos(math.radians(lat))
         worst = max(worst, math.hypot(dn, de))
+        _devs.append(math.hypot(dn, de) * 1000)
     check(worst < 0.001, "5 个点往返偏差均小于 1 mm", f"最大 {worst * 1000:.6f} mm")
+    # ★★ T023（quickstart 第 7 步）：「004 的精度一位不变」。
+    #    原先这一条只**印出** `最大 0.146233 mm`，靠人眼跟 quickstart 上的
+    #    那个数比 —— 而人眼比对不是判据：换个日子跑、数字变成 0.146234，
+    #    没人会注意到，可 FR-007 要的恰恰是「**逐位**相同」。
+    #    ⇒ 把 004 记录的两个实测值**冻结成断言**。它们变了就必须有人解释。
+    #    ★ 这不是「容差」，是**记录值**：不做区间、不给余量，就是那两个数。
+    #      所以别把它当成可以调松的阈值 —— 它只有「一样」和「不一样」。
+    check(f"{worst * 1000:.6f}" == "0.146233",
+          "★★ 3) T023 · 004 记录的往返**最大**偏差逐位未变"
+          "（FR-007 要的是浮点逐位相同，不是「在容差内」）",
+          f"记录 0.146233 mm，现在 {worst * 1000:.6f} mm")
+    check(f"{_devs[0]:.6f}" == "0.050835",
+          "★★ 3) T023 · 004 记录的**首点**偏差逐位未变（quickstart 第 7 步"
+          "把这两个数并列写着，只冻一个等于只守了一半）",
+          f"记录 0.050835 mm，现在 {_devs[0]:.6f} mm")
 
     # ---------------------------------------------------------------- 4) SC-002
     print("\n=== 4) SC-002 落点包围盒（39 带 / CM 117°E / EPSG:4548）===")
@@ -1519,6 +1536,448 @@ def main() -> int:
               f"不存在={_r5.status_code} vs 没基准={_r3.status_code}")
     finally:
         APP.dao = _orig_dao
+
+    # ═══════════════════════════════════════════════════════════ 18) US2 / US3
+    #   T020 / T021 / T024 / T025。三条判据一次做完：通用化了，老路没动。
+    print("\n=== 18) US2/US3：老路没动 · 两级一致 · 五个消费者 · 文件跟着库走 ===")
+
+    import importlib.util as _ilu  # noqa: E402
+    import subprocess as _sp  # noqa: E402
+
+    # ---- 18a) T020 / SC-007：004 精度不退化，判据是**浮点逐位相同** --------
+    # ★ FR-007 的原文就是「判据 = 浮点逐位相同」，不是「误差在容差内」。
+    #   所以这里用 `==` 和 `repr()` 比，**一次 `abs() < tol` 都不许出现** ——
+    #   容差会把「动了」和「没动」变成同一个答案。
+    #
+    # ★ 怎么才算证明了「没动」？两条独立造出来的基准文档：
+    #     · 文件版：crs.yaml 解析出来（004 一直用的那条路）
+    #     · 库版  ：按 psycopg 从 numeric(9,6) 读出来的**类型和精度**手搓
+    #   同一份线元链、同一批桩号，两边的每一个数**逐位相同** ——
+    #   这才说明「把权威从文件换成库」这件事本身没有挪动任何一个比特。
+    _lib18 = _ilu.spec_from_file_location("_evm18", ROOT / "simulator" / "crg" / "export_viewer_mesh.py")
+    _evm18 = _ilu.module_from_spec(_lib18)
+    _lib18.loader.exec_module(_evm18)
+
+    _gf_file = gf()
+    _gf_db = GEO.load_crs({
+        "geographic_frame": {
+            "ready": True, "ellipsoid": "CGCS2000", "projection": "高斯-克吕格",
+            "zone_width_deg": Decimal("3.00"), "zone_number": 39,
+            "central_meridian_deg": Decimal("117.000000"),
+            "assumed": False, "epsg_after_confirm": 4548,
+        }}, origin="18a 造出来的库版基准（psycopg 会给出的类型）")
+
+    # ★★ 先说清**哪一半老路根本不经过基准** —— 这是 SC-007 最强的一条论据，
+    #    比任何数值比对都硬：`point_north_east` 的签名里**没有 gf**。
+    #    北/东就是设计坐标本身，004 那条几何路径压根不做投影，所以
+    #    「把权威从文件换成库」在结构上**碰不到它**。
+    #    ★ 一条只靠比数值的判据，会在某天有人「顺手」给这个函数加上 gf 时
+    #      继续是绿的（因为此刻两者相等）—— 断言签名才挡得住那次改动。
+    import inspect as _insp  # noqa: E402
+    _sig_pne = _insp.signature(GEO.point_north_east)
+    check(len(_sig_pne.parameters) == 2 and "gf" not in _sig_pne.parameters,
+          "★★ 18a · 设计帧的函数签名里**没有基准参数** —— "
+          "004 的几何路径结构上不经过投影，基准换源碰不到它",
+          f"参数 {list(_sig_pne.parameters)}")
+
+    _els18 = elements()
+    _st18 = [0.0, 137.5, 900.0, 2900.0, 4200.0, 5805.421]
+    _ll_diff = 0
+    for _s in _st18:
+        _la = GEO.station_to_lonlat(_els18, _s, _gf_file)
+        _lb = GEO.station_to_lonlat(_els18, _s, _gf_db)
+        _ll_diff += (repr(_la["lat_deg"]) != repr(_lb["lat_deg"])) + \
+                    (repr(_la["lon_deg"]) != repr(_lb["lon_deg"]))
+    check(_ll_diff == 0,
+          "★★ 18a · T020/SC-007：库版与文件版基准下，6 个桩号的经纬度**逐位相同**",
+          f"差 {_ll_diff} 处")
+
+    # ★ 整条路线 + bbox 一起比 —— 判据是 `repr()` 相等，不是「四个数接近」。
+    #   T023 要核的正是这三个量（往返两位小数、桩号差、bbox 四个数）。
+    _ra18 = GEO.route_lonlat(_els18, _gf_file)
+    _rb18 = GEO.route_lonlat(_els18, _gf_db)
+    check(repr(_ra18) == repr(_rb18) and (_ra18.get("point_count") or 0) > 300,
+          "★★ 18a · T020/T023：整条路线折线 + bbox **整份 repr 相同**"
+          "（bbox 四个数也随之逐位相同）",
+          # ★ 这个 detail 我第一版写成 `len(_ra18.get('points'))` —— `route_lonlat`
+          #   返回的键是 `point_count`，没有 `points`，于是它就印了个「点数 0」。
+          #   判据本身没错（比的是整份 dict），错的是这句话**看着像判据空了**。
+          #   ⇒ 顺带把「点数必须够多」也并进判据：空折线的 repr 当然相等。
+          f"点数 {_ra18.get('point_count')}")
+
+    # 与 §17a 的实测冻结值对一遍 —— 守的是「今天算出来的还是那天那个数」
+    _n18, _e18 = 2786941.4940090827, 536050.8231566962
+    _p18 = GEO.point_north_east(_els18, 2900.0)
+    check(_p18[0] == _n18 and _p18[1] == _e18,
+          "★★ 18a · T020：桩号 2900 的北/东与**实测冻结值**逐位相同（`==`，非容差）",
+          f"实得 {_p18[0]!r} / {_p18[1]!r}")
+
+    # ★ 往返闭合：**不是 0**，实测 0.051 mm。
+    #   我第一版把判据写成「要的是 0」—— 那是我自己想象的精度，不是 004 的。
+    #   004 记的是「往返闭合 ≤ 0.457 mm」，而 `inverse` 走的是子午线弧长级数 +
+    #   迭代反算，所以它本来就不可能逐位回到原值。
+    #   ⇒ 判据锚在 **004 那行已记录的界**上，并把实测值一起印出来 ——
+    #     将来有人把它改坏了，红的那一行会同时给出「实测多少」和「界是多少」。
+    _rt18 = GEO.inverse(_n18, _e18, 117.0)
+    _fw18 = GEO.forward(_rt18[0], _rt18[1], 117.0)
+    _dn18, _de18 = abs(_fw18[0] - _n18), abs(_fw18[1] - _e18)
+    check(_dn18 < 0.457e-3 and _de18 < 0.457e-3,
+          "★★ 18a · 往返闭合在 **004 记录的界（0.457 mm）**之内"
+          "—— ★ 不是「等于 0」，那条级数反算做不到",
+          f"实测 Δ北={_dn18 * 1000:.4f} mm、Δ东={_de18 * 1000:.4f} mm")
+    check(_dn18 > 0 or _de18 > 0,
+          "★★ 18a · 并如实记下「它**不**是逐位闭合的」—— "
+          "若哪天变成 0，说明有人把反算换成了查表，那条要重新审",
+          f"Δ北={_dn18!r}")
+
+    # ---- 18b) T021 / data-model E2 第 1 态：两级都填、值相等 ---------------
+    # ★ 这一条要证明的是「路段级填了相同的值，也**不改变**权威来源是项目级」——
+    #   即路段级是**冗余校验**，不是覆盖。所以判据不只是「200」，
+    #   而是 `crs_source` 必须仍是 `"project"`。
+    _orig_dao18 = APP.dao
+    try:
+        _both18 = {**section_row(), "id": 6, "design_project_id": 2,
+                   "project_crs_epsg": 4548, "project_crs_zone_number": 39,
+                   "project_crs_central_meridian_deg": Decimal("117.000000"),
+                   "project_crs_zone_width_deg": Decimal("3.00"),
+                   "project_crs_assumed": False,
+                   "project_crs_evidence": "项目级依据",
+                   "section_crs_epsg": 4548, "section_crs_zone_number": 39,
+                   "section_crs_central_meridian_deg": Decimal("117.000000"),
+                   "section_crs_zone_width_deg": Decimal("3.00"),
+                   "section_crs_assumed": False,
+                   "section_crs_evidence": "路段级依据（与项目同值）"}
+        APP.dao = _FakeDao(row=_both18)
+        _r18 = c.get("/v1/geometry/sections/6/geo", params={"station_m": 2900.0})
+        _j18 = _r18.json() if _r18.status_code == 200 else {}
+        check(_r18.status_code == 200,
+              "★★ 18b · T021/E2态1：两级都填且相等 → 通过（不是「不一致」那条路）",
+              f"HTTP {_r18.status_code}：{str(_r18.text)[:70]}")
+        check(_j18.get("crs_source") == "project",
+              "★★ 18b · 但 `crs_source` **仍是 `project`** —— "
+              "路段级填同值不夺权威，它是冗余校验",
+              f"实得 {_j18.get('crs_source')!r}")
+        check(_j18.get("epsg") == 4548 and _j18.get("zone_number") == 39,
+              "★★ 18b · 取到的值就是那一个（两级同值，取谁都是它）",
+              f"epsg={_j18.get('epsg')} zone={_j18.get('zone_number')}")
+
+        # 反面对照：**只有路段级有值**，此时权威必须变成 section。
+        # ★ 没有这个对照，「project」可能只是一个被写死的默认值 ——
+        #   而那会让上面那条判据在**任何**实现下都成立。
+        #
+        # ⚠⚠ `_CRS_FILL` 的默认值里 **`project_crs_epsg` 是 4548**（不是 None）：
+        #    那是 §17「应通过侧」要的形态。所以这里必须**显式**把项目级清空，
+        #    不能指望「不写就是没配」。
+        #    ★ 第一版就是栽在这上面：我漏写了 project_* 六个键，于是这一格
+        #      悄悄变成「项目 4548 / 路段 4545」—— **两级不一致**，
+        #      守卫正确地抛了 503。判据红了，而它红得有道理：
+        #      真要测的是「项目没配」，我却造了个「两级打架」。
+        #    ⇒ 夹具的默认值是**有含义的**，写反面用例时必须逐个键压实。
+        _only18 = {**section_row(), "id": 6, "design_project_id": 2,
+                   "project_crs_epsg": None, "project_crs_zone_number": None,
+                   "project_crs_central_meridian_deg": None,
+                   "project_crs_zone_width_deg": None,
+                   "project_crs_assumed": None, "project_crs_evidence": None,
+                   "section_crs_epsg": 4545, "section_crs_zone_number": 36,
+                   "section_crs_central_meridian_deg": Decimal("108.000000"),
+                   "section_crs_zone_width_deg": Decimal("3.00"),
+                   "section_crs_assumed": False,
+                   "section_crs_evidence": "仅路段级"}
+        APP.dao = _FakeDao(row=_only18)
+        _r18b = c.get("/v1/geometry/sections/6/geo", params={"station_m": 2900.0})
+        _j18b = _r18b.json() if _r18b.status_code == 200 else {}
+        check(_r18b.status_code == 200 and _j18b.get("crs_source") == "section",
+              "★★ 18b · 对照组：项目级没填、只有路段级 → 权威变成 `section`"
+              "（证明 `project` 不是写死的默认）",
+              f"HTTP {_r18b.status_code} source={_j18b.get('crs_source')!r}")
+        check(_j18b.get("epsg") == 4545,
+              "★★ 18b · 对照组取到的确实是路段级那个 EPSG（4545，不是项目的 4548）",
+              f"实得 {_j18b.get('epsg')!r}")
+    finally:
+        APP.dao = _orig_dao18
+
+    # ---- 18c) T024 / SC-011：五个消费者一个都没坏，且两个离线消费者**仍不连库**
+    _evm_file = ROOT / "simulator" / "crg" / "export_viewer_mesh.py"
+    _sim_mjs = ROOT / "tests" / "integration" / "sim_inline_script.mjs"
+    _m9_app = ROOT / "modules" / "M9-console" / "app.py"
+    _probe = ROOT / "tests" / "e2e" / "quickstart_probe.py"
+
+    _flags18 = _evm18._read_crs_flags(CRS_PATH)
+    check(_flags18 == (True, False),
+          "★★ 18c · T024/SC-011：`export_viewer_mesh._read_crs_flags` **真函数**"
+          "读真文件 → (ready, assumed)",
+          f"实得 {_flags18!r}")
+
+    # node 侧：把 `.mjs` 里那个真实的 `parseCrsYaml` 抠出来，用真 node 跑真文件。
+    # ★ 抄一份逻辑进测试是不行的 —— 抄的那份会与页面用的那份各自演进而无人察觉。
+    _mjs_txt = _sim_mjs.read_text(encoding="utf-8")
+    _h = _mjs_txt.find("function parseCrsYaml(")
+    _fn = ""
+    if _h >= 0:
+        _depth, _i = 0, _mjs_txt.find("{", _h)
+        for _j in range(_i, len(_mjs_txt)):
+            if _mjs_txt[_j] == "{":
+                _depth += 1
+            elif _mjs_txt[_j] == "}":
+                _depth -= 1
+                if _depth == 0:
+                    _fn = _mjs_txt[_h:_j + 1]
+                    break
+    check(bool(_fn) and len(_fn) > 200,
+          "★★ 18c · 从 .mjs 里抠出了 `parseCrsYaml` 的源码（抠不到就没法测真函数）",
+          f"取到 {len(_fn)} 字节")
+
+    _node18 = ("const fs=require('fs');"
+               + _fn
+               + "const d=parseCrsYaml(fs.readFileSync(process.argv[1],'utf8'));"
+               + "const g=d.geographic_frame||{};"
+               + "console.log(JSON.stringify({ready:g.ready,assumed:g.assumed,"
+                 "zone:g.zone_number,cm:g.central_meridian_deg}));")
+    _p18 = _sp.run(["node", "-e", _node18, str(CRS_PATH)],
+                   capture_output=True, text=True, timeout=60)
+    _ok18 = False
+    _det18 = _p18.stderr.strip()[:120]
+    if _p18.returncode == 0:
+        import json as _json18  # noqa: E402
+        _nd = _json18.loads(_p18.stdout.strip())
+        _ok18 = _nd.get("ready") is True and _nd.get("assumed") is False \
+            and _nd.get("zone") == 39
+        _det18 = str(_nd)
+    check(_ok18,
+          "★★ 18c · node 侧真 `parseCrsYaml` 读真文件也拿得到 ready/assumed/zone",
+          _det18)
+
+    # ★★ 扫「有没有连库」不能用 `in` 扫全文 —— 我在 §15 已经栽过一次同类的跟头：
+    #    散文里写着「M9 没有任何 PG_DSN」，`"PG_DSN" in 源码` 就命中了**那句话本身**，
+    #    于是一条**守护得正好的**硬线被判成了违规。
+    #    ⇒ 用 AST 只看**代码**：`Name` 节点、`import`、以及**不是 docstring 的字符串字面量**
+    #      （`os.environ["PG_DSN"]` 的键是字符串字面量，所以字符串不能一律跳过）。
+    #      注释与 docstring 由 AST 天然排除。
+    def _db_usage_py(path, names):
+        _t = path.read_text(encoding="utf-8")
+        _tree = _ast18.parse(_t)
+        _docs = set()
+        for _n in _ast18.walk(_tree):
+            if isinstance(_n, (_ast18.Module, _ast18.FunctionDef,
+                               _ast18.AsyncFunctionDef, _ast18.ClassDef)):
+                _b = getattr(_n, "body", [])
+                if _b and isinstance(_b[0], _ast18.Expr) and \
+                        isinstance(_b[0].value, _ast18.Constant) and \
+                        isinstance(_b[0].value.value, str):
+                    _docs.add(id(_b[0].value))
+        _hits = set()
+        for _n in _ast18.walk(_tree):
+            if isinstance(_n, _ast18.Name) and _n.id in names:
+                _hits.add(_n.id)
+            elif isinstance(_n, (_ast18.Import, _ast18.ImportFrom)):
+                _mod = getattr(_n, "module", "") or ""
+                for _a in _n.names:
+                    if "psycopg" in (_a.name + _mod):
+                        _hits.add("psycopg")
+            elif isinstance(_n, _ast18.Constant) and isinstance(_n.value, str) \
+                    and id(_n) not in _docs:
+                for _k in names:
+                    if _k in _n.value:
+                        _hits.add(_k + "（字符串字面量里）")
+        return sorted(_hits)
+
+    import ast as _ast18  # noqa: E402
+
+    for _p, _n in ((_evm_file, "export_viewer_mesh.py"),
+                   (_m9_app, "M9 app.py")):
+        _leak = _db_usage_py(_p, ("PG_DSN", "psycopg", "rpdao"))
+        check(not _leak,
+              f"★★ 18c · {_n} **不连库**（AST 判定，散文里的「没有 PG_DSN」不算命中）",
+              f"出现 {_leak}" if _leak else "零命中")
+        check("crs.yaml" in _p.read_text(encoding="utf-8"),
+              f"★★ 18c · {_n} 仍指向**文件**（T029：一个消费者都不许改）")
+
+    _mjs_txt_probe = _sim_mjs.read_text(encoding="utf-8")
+    _mjs_leak = [k for k in ("psycopg", "PG_DSN", "rpdao") if k in _mjs_txt_probe]
+    check(not _mjs_leak,
+          "★★ 18c · sim_inline_script.mjs **不连库**（JS 无 AST 通道，用子串扫）",
+          f"出现 {_mjs_leak}" if _mjs_leak else "零命中")
+    check("crs.yaml" in _mjs_txt_probe,
+          "★★ 18c · sim_inline_script.mjs 仍指向**文件**")
+
+    check(not _db_usage_py(_m9_app, ("PG_DSN", "psycopg")),
+          "★★ 18c · M9 `app.py` 里没有 psycopg / PG_DSN —— "
+          "所以 T027「让 M9 比文件与库」按字面写不成，只能经 /gw 拿值")
+
+    # ---- 18d) T025 / SC-012：文件与库一致 + 元测试 -----------------------
+    sys.path.insert(0, str(ROOT / "modules" / "M9-console"))
+    import crs_drift as _drift18  # noqa: E402
+
+    _doc18 = crs_doc()
+    _db18 = {"epsg": 4548, "zone_number": 39,
+             "central_meridian_deg": Decimal("117.000000"),
+             "assumed": False,
+             # ★ evidence 用**真文件的 8 条**，并按种子的落盘形态加上 `N. ` 编号。
+             #   我第一版在这里手搓了 3 条假依据 —— 于是「一致」那条判据当场红了
+             #   （库里 3 条 vs 文件 8 条）。★ 那不是被测对象有问题，是**夹具在说谎**：
+             #   它声称代表库，而库里从来不是那 3 条。
+             #   ⇒ 夹具要么是实测来的，要么是把真实形态**显式地**重建出来。
+             #     这里选后者：种子写的就是「文件那 8 条 + 行首编号」，
+             #     重建它顺便验了 `parse_evidence` 两侧剥编号是对称的。
+             #   ⚠ 真·文件 vs **真库** 的那条绿色判据在 T026 的
+             #     `tools/export_crs_yaml.py --check`（连库跑，实测已绿）。
+             #     本判据在离线状态下能守住的是「比对逻辑本身」。
+             "evidence": "\n".join(
+                 f"{_i}. {_t}" for _i, _t in
+                 enumerate(_doc18["geographic_frame"]["evidence"], 1))}
+    _doc18 = crs_doc()
+    _mis18 = _drift18.compare(_doc18, _db18)
+    check(not _mis18,
+          "★★ 18d · T025/SC-012：真 crs.yaml 与库取值**一致**",
+          f"{len(_mis18)} 处不一致：{_mis18[:2]}" if _mis18 else "零处")
+
+    # 元测试①：把**文件**里的 assumed 翻掉 → 检查必须变红，且说得出两边各是什么
+    import copy as _copy18  # noqa: E402
+    _bad18 = _copy18.deepcopy(_doc18)
+    _bad18["geographic_frame"]["assumed"] = True
+    _m1_18 = _drift18.compare(_bad18, _db18)
+    check(bool(_m1_18),
+          "★★ 18d · ★元测试①：改**文件**一处（assumed）→ 检查真的变红",
+          f"{_m1_18[:1]}" if _m1_18 else "★ 仍然是绿的 —— 这条检查不会失败")
+    _m1_txt = " ".join(_m1_18)
+    check("assumed" in _m1_txt and "True" in _m1_txt and "False" in _m1_txt,
+          "★★ 18d · 而且它**说得出哪个字段、库里是什么、文件里是什么**"
+          "（只说「不一致」，接手的人还得自己翻两份）",
+          _m1_txt[:110])
+
+    # 元测试②：只改**条数**（多条少条都试）—— 判据比的是集合，不是前缀
+    for _n_ev, _label in ((7, "少一条"), (9, "多一条")):
+        _bad18b = _copy18.deepcopy(_doc18)
+        _ev = list(_bad18b["geographic_frame"]["evidence"])
+        _bad18b["geographic_frame"]["evidence"] = (_ev[:_n_ev] if _n_ev < len(_ev)
+                                                  else _ev + ["凭空多出来的一条"])
+        _m2_18 = _drift18.compare(_bad18b, _db18)
+        check(bool(_m2_18) and "evidence" in " ".join(_m2_18),
+              f"★★ 18d · ★元测试②：依据{_label} → 变红且点名 evidence"
+              "（种子里写死了「一条不多一条不少」，这里就是它的执行者）",
+              (" ".join(_m2_18))[:110])
+
+    # 元测试③：**库**那边动 → 同样必须红。只盯一侧的检查会漏掉一半的漂移方向。
+    _db18b = {**_db18, "epsg": 4545, "zone_number": 36,
+              "central_meridian_deg": Decimal("108.000000")}
+    _m3_18 = _drift18.compare(_doc18, _db18b)
+    check(bool(_m3_18) and "epsg" in " ".join(_m3_18),
+          "★★ 18d · ★元测试③：改**库**一侧 → 同样变红并点名 epsg"
+          "（只测「文件错了」会漏掉「库变了文件没跟上」，而那才是最常见的方向）",
+          (" ".join(_m3_18))[:110])
+
+    _missing18 = _drift18.compare({}, _db18)
+    check(bool(_missing18),
+          "★★ 18d · 文件整份读不到（空文档）→ 也必须红，不许静默通过",
+          f"{len(_missing18)} 处")
+
+    # ---- 18e) 三态：「没得比」必须与「一致」和「不一致」都分开 -----------
+    # ★★ 实测发现：M6 的两条 HTTP 通路**都不带 `crs_evidence`**
+    #    （它在 M6 那边被 `_CRS_ROW_KEYS` 剥掉了）。而 M9 只能经契约通道取值。
+    #    于是「evidence」这一项在 M9 那条路上**永远没得比**。
+    #    ⇒ 把「通道不提供」当成不一致 → 那条巡检永远红；
+    #      当成一致 → 等于宣称「依据也核对过了」，而**根本没看**。
+    #    两条都不行，所以必须有第三态，而且第三态必须**显式报出来**。
+    _no_ev18 = {"epsg": 4548, "zone_number": 39,
+                "central_meridian_deg": Decimal("117.000000"),
+                "assumed": False}          # ← 故意不放 evidence 键
+    _mis_e, _skip_e = _drift18.compare_detailed(_doc18, _no_ev18)
+    check(not _mis_e and _skip_e == ["evidence"],
+          "★★ 18e · 源侧**没有** evidence 这个键 → 不报不一致，但记进「未比对」",
+          f"不一致 {_mis_e}；未比对 {_skip_e}")
+
+    # ★★★ 这一条是**防滥用**：没有它，「跳过」会变成一个能吞掉一切的口子 ——
+    #     将来 M6 少给任何一个字段，巡检都会由红转绿而没人察觉。
+    #     所以边界必须钉死：**键在、值为空** ≠ 「没得比」，那是一条真不一致。
+    _null_ev18 = {**_no_ev18, "evidence": None}
+    _mis_n, _skip_n = _drift18.compare_detailed(_doc18, _null_ev18)
+    check(bool(_mis_n) and not _skip_n,
+          "★★★ 18e · ★元测试（防滥用）：键**在**而值是 None → 是**真不一致**，"
+          "不是「没得比」（空值 ≠ 没去看）",
+          f"不一致 {len(_mis_n)} 条；未比对 {_skip_n}")
+
+    check((not _mis_e) and bool(_skip_e),
+          "★★ 18e · 这组输入**就是**「只判 `not mismatches` 会误报成一致」的那种："
+          "不一致为空，但有未比对项 —— 两者必须都空才算看过",
+          f"不一致 {len(_mis_e)} 条、未比对 {_skip_e}")
+    _rep18 = _drift18.describe(_mis_e, source="M6 契约值", skipped=_skip_e)
+    check("未比对" in _rep18 and "evidence" in _rep18,
+          "★★ 18e · 报告里**写得出**「未比对 evidence」，而且说清是通道的局限",
+          _rep18.splitlines()[-2][:100] if len(_rep18.splitlines()) > 1 else _rep18[:100])
+    check("不是「一致」" in _rep18 or "没得比" in _rep18,
+          "★★ 18e · 报告**不许**把「未比对」说成「一致」",
+          "")
+
+    # 而真源（导出器走 DAO，拿得到 evidence）→ skipped 必须是空的。
+    # ★ 没有这一条，上面那些「跳过」的判据可能在任何输入下都成立。
+    _mis_f, _skip_f = _drift18.compare_detailed(_doc18, _db18)
+    check(not _skip_f,
+          "★★ 18e · 源侧**有** evidence（导出器走 DAO 的那条路）→ 未比对为空，"
+          "于是五项**全部**真的看过了",
+          f"未比对 {_skip_f}")
+
+    # ---- 18f) M9 镜像里必须有目录里的每个 .py/.html ----------------------
+    # ★ 这条判据**不在本文件里**，归属地是 `tests/contract/test_console.py`
+    #   （M9 镜像清单那一段）。同一条性质不许有两份定义 —— 两份会各自漂。
+    #   005 期间就是它抓到了 `crs_drift.py` 没进镜像（`/v1/crs/drift` 500）。
+    #   实测取证留在 quickstart_probe 判据 2b：真容器里拉一次那条路由。
+
+    # ---- 18g) 写入侧守卫：**文件在** 且 **有人会跑它** ---------------------
+    # ★★★ 为什么这条判据要存在 —— 005 期间实测查出来的漏：
+    #     quickstart 第 2 步主张「给路段配一个不同的基准 → 必须失败」。
+    #     实测 `UPDATE 1`：写入**成功了**。全仓扫过 —— 没有触发器、
+    #     没有 crs 相关 check 约束、M2 写路径完全不碰 crs。
+    #     ⇒ 那个不变量**根本不存在**，只有读取侧的 503 在兜底。
+    #     ★ 而 L352 的注释**早就写着**「由写入侧拒绝」——
+    #       所以这不是「还没做」，是「建了一半，另一半没人认领」。
+    #
+    # ★ 这条判据只管**静态的两件事**，行为本身由 probe 判据 2c 实测：
+    #   ① 守卫文件在；
+    #   ② ★★ 它**真的会被跑到** —— 全新装那条路（initdb.d 挂载）。
+    #      ②才是这一条的重点：**迁移从不自动执行**（compose 只挂 10/20/90），
+    #      所以「只写进迁移」对全新装等于没有守卫，而文件存在、
+    #      代码也「做了」，谁都发现不了。
+    #      ★★ 这与 004 踩的是同一个坑，只是换了一个对象。
+    _g_dir = pathlib.Path(__file__).resolve().parents[2] / "sql"
+    _g_sql = _g_dir / "25_crs_two_level_guard.sql"
+    _g_txt = _g_sql.read_text(encoding="utf-8") if _g_sql.is_file() else ""
+    check(_g_sql.is_file() and "crs_pair_must_agree" in _g_txt,
+          "18g · 写入侧守卫的**定义文件**在（sql/25_crs_two_level_guard.sql）",
+          f"{_g_sql} 存在={_g_sql.is_file()}")
+
+    # ★ 两张表都要挂 —— 只挂 road_section 拦不住 `UPDATE design_project`
+    _tc = _g_txt.count("BEFORE INSERT OR UPDATE")
+    check(_tc == 2 and "ON design_project" in _g_txt and "ON road_section" in _g_txt,
+          "★★ 18g · 守卫**两张表都挂**（对称）——只挂路段的话，"
+          "改项目同样能造出一对矛盾的值，而它改的是全项目所有路段的依据",
+          f"BEFORE INSERT OR UPDATE 出现 {_tc} 次")
+
+    # ★★ 最关键的一条：被 initdb 挂载了吗
+    _cmp = (pathlib.Path(__file__).resolve().parents[2]
+            / "docker-compose.skeleton.yml").read_text(encoding="utf-8")
+    _init = [ln for ln in _cmp.splitlines()
+             if "docker-entrypoint-initdb.d" in ln and ".sql:" in ln]
+    _mounted = [ln for ln in _init if "25_crs_two_level_guard.sql" in ln]
+
+    def _mount_guard(text: str) -> bool:
+        return any("docker-entrypoint-initdb.d" in ln
+                   and "25_crs_two_level_guard.sql" in ln
+                   for ln in text.splitlines())
+
+    check(_mount_guard(_cmp),
+          "★★★ 18g · 而它**真的会被跑到**：已挂进 initdb.d，全新装自动执行。"
+          "★ 迁移从不自动执行（只挂 10/20/90）——「文件写了但没人跑」"
+          "等于没有守卫，而且谁都看不出来",
+          f"initdb.d 挂着 {len(_init)} 个 sql："
+          f"{[ln.split('/')[-1].split(':')[0] for ln in _init]}")
+
+    # ★ 元测试：把挂载那一行拿掉 → 必须变红。否则「有人会跑它」这半句是空话。
+    _cmp_nomount = "\n".join(ln for ln in _cmp.splitlines()
+                             if "25_crs_two_level_guard.sql" not in ln)
+    check(not _mount_guard(_cmp_nomount),
+          "★★ 18g · ★元测试：把 initdb.d 那条挂载拿掉 → 上面那条会红。"
+          "（「文件存在」和「有人会跑它」是两件事，这条判据守的是后一件）",
+          f"去掉后仍报已挂载={_mount_guard(_cmp_nomount)}")
 
     print("\n" + "=" * 72)
     if fails:
