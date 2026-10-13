@@ -443,10 +443,26 @@ def list_objects(object_type: str, limit: int = Query(100, ge=1, le=1000)) -> di
     if code is None:
         raise HTTPException(404, f"未登记的对象类型：{object_type}（白名单见 /v1/catalog）")
     try:
-        rows = dao.domain(code).list_objects(object_type, limit=limit)
+        # ★★★ 2026-10-13（D-011 的收尾）：这里原先直接要 `limit` 行，
+        #   而仓储的 SQL 是 `SELECT * FROM 表 ORDER BY id LIMIT n` ——
+        #   **拿满 n 行时它不告诉你后面还有没有**。实测量到的后果：
+        #   `cross_section_ground_point` 有 2215 行、`station_sequence` 与
+        #   `earthwork_section` 各 332 行，接口一律回 `count: 100`，
+        #   而响应里**没有任何字段**说明这是被截断的。
+        #
+        # ★ 修法是**多要一行来探测**：要到 limit+1 行 ⇒ 确实还有更多。
+        #   为什么不去改仓储的签名：`list_objects` 还有别的消费者，
+        #   而 tests/ 下有两个**假仓储**实现它 —— 改签名要连它们一起改，
+        #   那是「为了一个字段动一条公共接口」。探测放在这里，
+        #   **零接口改动**，而且判定是**精确**的（不是「拿满就猜」）。
+        rows = dao.domain(code).list_objects(object_type, limit=limit + 1)
     except DaoError as exc:
         raise _http(exc) from exc
-    return {"object_type": object_type, "domain": code, "count": len(rows), "items": rows}
+    # ★ 探测用的那一行**不进响应** —— 它只回答「有没有更多」。
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"object_type": object_type, "domain": code,
+            "count": len(rows), "truncated": truncated, "items": rows}
 
 
 # --------------------------------------------------------------- 几何查询（GE 域）
@@ -807,10 +823,15 @@ _LIST_PROBE = 100
 def _list_tracked(domain_repo, table: str) -> list[dict[str, Any]]:
     """取整表，**并在被截断时报错而不是少给**。"""
     try:
-        rows = domain_repo.list_objects(table, limit=_LIST_PROBE)
+        # ★★ 同样多要一行。**这不只是加个字段的事，它修掉了一个误报**：
+        #   原先判的是 `len(rows) >= _LIST_PROBE` —— 而「恰好 100 行」的表
+        #   会**拿满 100 行**，于是被判成截断、回 503。
+        #   一张正好 100 行的表本来是能完整取到的，却被拒绝服务。
+        #   ⇒ 探测之后判定变成**精确**的：要到 101 行才叫截断。
+        rows = domain_repo.list_objects(table, limit=_LIST_PROBE + 1)
     except DaoError as exc:
         raise _http(exc) from exc
-    if len(rows) >= _LIST_PROBE:
+    if len(rows) > _LIST_PROBE:
         raise HTTPException(
             503, f"{table} 取数触到仓储上限 {_LIST_PROBE} 行，结果可能不完整；"
                  f"在补齐带条件的取数之前，本接口拒绝返回不完整的结果")

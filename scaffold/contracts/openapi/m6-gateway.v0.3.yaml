@@ -124,7 +124,12 @@ paths:
             maximum: 1000
       responses:
         "200":
-          description: 返回 object_type、domain、count 与 items 数组
+          description: >-
+            返回 object_type、domain、count、truncated 与 items 数组。
+            `truncated: true` 表示**结果被 limit 截断了，后面还有** ——
+            客户端据此翻页或收窄条件；为 false 时 count 就是全部。
+            ★ 此前没有这个字段：拿满 limit 行时响应与「恰好这么多」**完全一样**，
+            调用方无从分辨（实测 2215 行的表回 count=100）。
         "404":
           description: 未登记的对象类型
 

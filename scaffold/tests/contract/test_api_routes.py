@@ -282,8 +282,15 @@ class _FakeGe:
 class _FakeDomain:
     def __init__(self, code): self.code = code
 
+    #: 假想「表里有多少行」。默认 1 —— 与改造前**逐字一致**，
+    #: 所以既有的用例读数不变。§4 会临时把它调大来验截断边界。
+    ROWS: int = 1
+
     def list_objects(self, table, limit=100):
-        return [{"id": 1, "table": table}]
+        # ★ 必须**真的尊重 limit** —— 否则 §4 测不出东西：
+        #   一个忽略 limit、恒回 1 行的假仓储，会让「截断」永远为假。
+        return [{"id": i + 1, "table": table}
+                for i in range(min(self.ROWS, limit))]
 
 
 class _FakeDao:
@@ -414,6 +421,76 @@ def main() -> int:
     else:
         print("  ✗ GE 端点出现了平铺查")
         fails.append("GE 端点出现平铺查")
+
+    # ------------------------------------------------- 4) 截断必须可见
+    print("\n=== 4) 截断必须可见：`truncated` 的边界（D-011 的收尾）===")
+    # ★ 这一组守的是：原先**拿满 limit 行时，响应与「恰好这么多」完全一样**。
+    #   实测量到的后果：`cross_section_ground_point` 有 2215 行，
+    #   接口回 `count: 100`，而响应里**没有任何字段**说明还有更多。
+    #
+    # ★★ 边界表里 (100, 100) 那条是**关键**：一个「拿满就猜」的实现
+    #    （`len(rows) >= limit`）在这里会判 True，而真相是 False ——
+    #    一张正好 100 行的表是**能完整取到**的。
+    #    这条用例就是那个错误实现的回归点。
+    boundary = [
+        # (表里的行数, limit, 期望 truncated, 期望 count)
+        (0,    100, False,   0),
+        (5,    100, False,   5),
+        (100,  100, False, 100),   # ★ 恰好等于 limit —— 不算截断
+        (101,  100, True,  100),   # ★ 多一行就翻面
+        (250,  100, True,  100),
+        (1000,  10, True,   10),
+    ]
+    for rows_n, lim, want_trunc, want_count in boundary:
+        _FakeDomain.ROWS = rows_n
+        body = client.get(f"/v1/objects/road_line?limit={lim}").json()
+        got_trunc = body.get("truncated")
+        got_count = body.get("count")
+        got_len = len(body.get("items", []))
+        ok = (got_trunc is want_trunc and got_count == want_count
+              and got_len == want_count)
+        print(f"  表 {rows_n:>4} 行 / limit {lim:<4} → truncated={got_trunc!s:<5} "
+              f"count={got_count:<4} items={got_len:<4} {'✓' if ok else '✗'}")
+        if not ok:
+            fails.append(f"截断判定错：表 {rows_n} 行 limit {lim} → "
+                         f"truncated={got_trunc} count={got_count}（期望 "
+                         f"{want_trunc}/{want_count}）")
+    _FakeDomain.ROWS = 1        # ★ 还原，别影响别的用例
+
+    # ★ 字段**存在性**单独钉一次：本次缺陷的形态就是「字段不存在」，
+    #   而不是「字段值不对」。只查值的用例挡不住它。
+    _body = client.get("/v1/objects/road_line").json()
+    if "truncated" in _body:
+        print("  ✓ 响应里**存在** `truncated` 字段（缺陷的形态是它不存在）")
+    else:
+        print(f"  ✗ 响应里没有 `truncated` → {sorted(_body)}")
+        fails.append("响应缺 truncated 字段")
+
+    # ---- 4c) ★ `_list_tracked` 的硬线：拒收不完整结果，但**不误伤** ----
+    # ★★ 这一组修的是一个**误报**：它原先判 `len(rows) >= 100`，
+    #    而「恰好 100 行」的表会拿满 100 行 → 被判成截断 → 回 503。
+    #    一张正好 100 行的表本来是**能完整取到**的，却被拒绝服务。
+    #    加了一行探测之后判定变精确：要到 101 行才叫截断。
+    print("\n=== 4c) `_list_tracked`：拒收不完整，但恰好取满不算截断 ===")
+    from fastapi import HTTPException as _HTTPExc
+
+    class _StubRepo:
+        """只有 `list_objects` 一个方法 —— 这正是 `_list_tracked` 用到的全部。"""
+        def __init__(self, n): self.n = n
+        def list_objects(self, table, *, limit=100):
+            return [{"id": i + 1} for i in range(min(self.n, limit))]
+
+    for n, want_status in ((99, None), (100, None), (101, 503)):
+        try:
+            rows = APP._list_tracked(_StubRepo(n), "monitor_cross_section")
+            got, detail = None, f"返回 {len(rows)} 行"
+        except _HTTPExc as exc:
+            got, detail = exc.status_code, f"HTTP {exc.status_code}"
+        ok = got == want_status
+        print(f"  表 {n:>4} 行 → {detail:<16} {'✓' if ok else '✗'} "
+              f"（期望 {'放行' if want_status is None else want_status}）")
+        if not ok:
+            fails.append(f"_list_tracked 表 {n} 行 → {got}（期望 {want_status}）")
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
