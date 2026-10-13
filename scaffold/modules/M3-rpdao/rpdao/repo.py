@@ -919,22 +919,45 @@ class GeRepository(DomainRepository):
          LIMIT %(limit)s
     """
 
-    #: 逐桩表 → 桩号列名。**不是所有表都叫 `station_km`**，见下。
+    #: 逐桩段 → **怎么拿到这一段的桩号**。**不是所有表都叫 `station_km`**，见下。
     #:
     #: ★ 这几张表里大多数是「变化点表」（`station_km`），而
     #:   `station_sequence` 用的是**局部桩号** `station_local_km`（它是基准本身，
     #:   不是“某处的一个变化点”）。混用会得到一个**永远为空**的查询 ——
     #:   而且不报错，只是没数据。
     #:
-    #: ⚠ `superelev_transition` 的区间列是 `start_station_km`（它一行覆盖一段），
-    #:   取 `station_km` 会直接 KeyError -> SQL 报列不存在。
-    SAMPLE_ANCHORS: dict[str, str] = {
-        "station_sequence": "station_local_km",
-        "profile_ground_point": "station_km",
-        "profile_grade_point": "station_km",
-        "roadbed_width": "station_km",
-        "superelev_transition": "start_station_km",
-        "cross_section_ground_point": "station_km",
+    #: ★★★★★ 2026-10-13 修正（此前这张表里 6 条错了 2 条，两条一调就 500）：
+    #:
+    #:   ① `superelev_transition` 原先写 `start_station_km`，注释还振振有词
+    #:      「它一行覆盖一段」。**实测是错的**：那张表有 `station_km`
+    #:      （6 号段 76 行，桩号 0.000 → 5.805，递增），是**逐桩行**，
+    #:      没有 `start_station_km` 这个列。SQL 直接报列不存在 → 500。
+    #:   ② `profile_ground_point` 原先写 `station_km`，但那张表**根本没有桩号列**
+    #:      —— 它只有 `station_id`，外键指向 `station_sequence(id)`。
+    #:      桩号得 JOIN 出来，改个列名不管用。
+    #:
+    #:   ⚠⚠ 两条错误当时都是**看不出来**的：
+    #:     · 契约 `m6-gateway.v0.3.yaml` 里也写着 `start_station_km`，
+    #:       所以「拿契约对代码」两边一致，一起错。
+    #:     · 契约测试只调过 `station_sequence` 一个段，另外五个从没被调过。
+    #:   ⇒ 修完之后补了一条**逐个段真调一遍**的检查（见
+    #:     `tests/contract/test_station_query.py`）。**一张手工维护的对照表
+    #:     必须有人读它**，否则它只是看起来对。
+    #:
+    #: 值的形状：`(桩号表达式, FROM 子句, SELECT 列表)`。
+    #:   · 桩号列就在本表时，FROM 写表名、SELECT 写 `*`。
+    #:   · 要 JOIN 时，FROM 写整段 JOIN、桩号带别名、SELECT 写 `<别名>.*`
+    #:     —— **不写 `*`**，否则 JOIN 进来的列会混进响应里。
+    SAMPLE_ANCHORS: dict[str, tuple[str, str, str]] = {
+        "station_sequence": ("station_local_km", "station_sequence", "*"),
+        "profile_ground_point": (
+            "s.station_local_km",
+            "profile_ground_point g JOIN station_sequence s ON s.id = g.station_id",
+            "g.*"),
+        "profile_grade_point": ("station_km", "profile_grade_point", "*"),
+        "roadbed_width": ("station_km", "roadbed_width", "*"),
+        "superelev_transition": ("station_km", "superelev_transition", "*"),
+        "cross_section_ground_point": ("station_km", "cross_section_ground_point", "*"),
     }
 
     def elements_by_station(self, section_id: int, from_km: float, to_km: float,
@@ -964,15 +987,18 @@ class GeRepository(DomainRepository):
             raise ValueError(
                 f"未知段 {seg!r}；可用：{sorted(self.SAMPLE_ANCHORS)}"
                 "（不接受未知段名 —— 静默返回空会被读成「区间内无数据」）")
-        col = self.SAMPLE_ANCHORS[seg]
-        # 值来自上面的白名单常量，不是外部输入，故 f-string 拼列名是安全的；
+        station_col, from_clause, select_cols = self.SAMPLE_ANCHORS[seg]
+        # 三个片段都来自上面的白名单常量，不是外部输入，故 f-string 拼接是安全的；
         # 参数（区间、路段）一律走占位符。
+        # ★ 2026-10-13：以前这里只有「列名」一个片段，现在多了一个**整段 FROM**
+        #   —— 因为 `profile_ground_point` 的桩号在另一张表里，得 JOIN。
+        #   `select_cols` 跟着来是为了**别把 JOIN 进来的列混进响应**。
         return self._dao.query(
-            f"SELECT * FROM {seg}"
+            f"SELECT {select_cols} FROM {from_clause}"
             " WHERE section_id = %(sid)s"
-            f"   AND {col} >= %(from_km)s::numeric"
-            f"   AND {col} <= %(to_km)s::numeric"
-            f" ORDER BY {col}"
+            f"   AND {station_col} >= %(from_km)s::numeric"
+            f"   AND {station_col} <= %(to_km)s::numeric"
+            f" ORDER BY {station_col}"
             " LIMIT %(limit)s",
             {"sid": section_id, "from_km": from_km, "to_km": to_km, "limit": limit})
 

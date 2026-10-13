@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import pathlib
 
@@ -152,6 +153,91 @@ def main() -> int:
         narrow = ge.samples_by_station(sid, "station_sequence", 0.0, 0.6)
         check("★ 窄区间确实**少于**全区间（区间条件真的生效了）",
               len(narrow) < len(sp), f"{len(narrow)} vs {len(sp)}")
+
+        # ---------------------------------------------------------------- 第 4 组
+        # ★★★★★ 2026-10-13 新增。起因：`SAMPLE_ANCHORS` 那张「段名 → 桩号列」
+        #   的对照表里，**6 条错了 2 条**，两条一调就 500 —— 而这里当时只调过
+        #   `station_sequence` **一个**段，所以一直是绿的。
+        #
+        #   错的两条：
+        #     · `superelev_transition` 写 `start_station_km`，该表根本没这列
+        #       （它是逐桩行，列名就是 `station_km`）。契约里也写着同一个错名字
+        #       —— 契约和代码一起错，对着看是看不出来的。
+        #     · `profile_ground_point` 写 `station_km`，该表没有桩号列，
+        #       桩号得从 `station_sequence` JOIN 出来。
+        #
+        #   ⇒ 这一组**逐个段真调一遍**。段名清单**从代码推**（不在测试里另抄
+        #     一份），所以以后加段自动进网；而「新加的段是错的」会当场红。
+        print("")
+        print("第 4 组  逐桩段：每个段名都要真的能用")
+        _anchors = dict(ge.SAMPLE_ANCHORS)
+        _segs = sorted(_anchors)
+        check("★★ 前置：段名清单非空且取自代码（不在这里另抄一份）",
+              len(_segs) >= 6, f"{len(_segs)} 个：{_segs}")
+
+        _broken: dict[str, str] = {}
+        _nonempty: dict[str, int] = {}
+        for _seg in _segs:
+            try:
+                _rows = ge.samples_by_station(sid, _seg, 0.0, 100.0)
+            except Exception as exc:  # noqa: BLE001 —— 要的就是把任何异常都记下来
+                _broken[_seg] = f"{type(exc).__name__}: {str(exc).splitlines()[0][:80]}"
+                continue
+            _nonempty[_seg] = len(_rows)
+        check("★★★ **每一个**段名都能真的查出来（不是只测第一个）",
+              not _broken, f"坏的：{_broken}" if _broken else f"行数 {_nonempty}")
+        # ★ 前置守卫：至少要有一个段真的取到了行，否则上面那条是空转
+        #   （全都返回空列表也能「不报错」）。
+        check("★★ 前置：至少有一个段**确实取到了行**（否则上一条是空转）",
+              any(v > 0 for v in _nonempty.values()), str(_nonempty))
+
+        # ⚠ JOIN 的那一段**不许**把 JOIN 进来的列漏进响应。
+        #   不加这个守卫的话，写法退化成 `SELECT *` 也没人发现 ——
+        #   而多出来的列会让下游以为这张表自带桩号。
+        _gp = ge.samples_by_station(sid, "profile_ground_point", 0.0, 100.0)
+        if _gp:
+            _leaked = sorted(set(_gp[0]) - {"id", "station_id", "ground_elev_m", "remark"})
+            check("★★ JOIN 取的那一段**不泄漏**被 JOIN 表的列（`g.*` 而不是 `*`）",
+                  not _leaked, f"多出来的列：{_leaked}")
+        else:
+            check("★ 前置：`profile_ground_point` 有行才谈得上检泄漏", False,
+                  "该段 0 行 —— 换一条有数据的路段再跑")
+
+        # ---- 元测试：把对照表改回**当时那个错的**写法，上面那条必须变红 ----
+        #   （宪法 V：「一个永远不会失败的检查，比没有检查更糟糕」。）
+        _saved = _anchors["superelev_transition"]
+        try:
+            # 复刻 2026-10-13 之前的写法
+            ge.SAMPLE_ANCHORS["superelev_transition"] = (
+                "start_station_km", "superelev_transition", "*")
+            try:
+                ge.samples_by_station(sid, "superelev_transition", 0.0, 100.0)
+                _meta_red = False          # 居然没报 —— 说明新判据抓不住旧错误
+            except Exception:              # noqa: BLE001
+                _meta_red = True
+        finally:
+            ge.SAMPLE_ANCHORS["superelev_transition"] = _saved
+        check("★★ 元测试：把 `superelev_transition` 改回 `start_station_km`，"
+              "上面那种查法**必须**报错 —— 否则这套新检查抓不住今天修的那个错",
+              _meta_red, "已确认能抓住" if _meta_red else "改回错写法之后居然还能查通")
+
+        # ---- 契约 ↔ 代码：两边列的段名必须是**同一个集合** ----
+        #   ★ 这不是重复检查。今天的教训正是「契约和代码一起错」，
+        #     所以必须有一条**把两边摆到一起比**的判据。
+        _contract = ROOT / "contracts" / "openapi" / "m6-gateway.v0.3.yaml"
+        _advertised: set[str] = set()
+        if _contract.exists():
+            _txt = _contract.read_text(encoding="utf-8")
+            _m = re.search(r"段名（([^）]+)）", _txt)
+            if _m:
+                _advertised = {s.strip() for s in _m.group(1).split("/") if s.strip()}
+        check("★★ 前置：契约里能读到它公布的段名清单（否则下一条是空转）",
+              len(_advertised) >= 6, f"{sorted(_advertised)}")
+        check("★★★ 契约公布的段名 == 代码认的段名（**相等**，不是子集 —— "
+              "契约多写一个会 422，少写一个没人知道）",
+              _advertised == set(_segs),
+              f"契约独有 {sorted(_advertised - set(_segs))}；"
+              f"代码独有 {sorted(set(_segs) - _advertised)}")
     finally:
         d.close()
 

@@ -336,9 +336,15 @@ paths:
         空列表会被读成「这段在区间内没有数据」（数据缺口），
         而实际是「段名写错了」（调用错误）。这两件事在下游的处置完全不同：
         前者要去找源文件，后者要改代码。
-        ⚠ 各段的桩号列**不统一**：`station_sequence` 用 `station_local_km`
-        （它是基准本身），其余变化点表用 `station_km`，`superelev_transition`
-        用 `start_station_km`。这一层按段名自动选列，调用方不必知道。
+        ⚠ 各段的桩号**不统一**，这一层按段名自动处理，调用方不必知道：
+        `station_sequence` 用 `station_local_km`（它是基准本身，
+        不是“某处的一个变化点”）；变化点表用 `station_km`；
+        `profile_ground_point` **没有桩号列**，桩号要从 `station_sequence`
+        JOIN 出来（它的 `station_id` 是指向那张表的外键）。
+        📌 2026-10-13 修正：本文件此前写着「`superelev_transition` 用
+        `start_station_km`」—— **那是错的**。该表是逐桩行，列名就是
+        `station_km`，并没有 `start_station_km` 这一列。当时契约与代码
+        一起错，所以「拿契约对代码」看着一致，实际一调就是 500。
       parameters:
         - name: section_id
           in: path
