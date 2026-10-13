@@ -294,7 +294,7 @@ export DOCKER_CONFIG=/data/cy/shujuku/.dockerhome
 ./run_contract_tests.sh
 ```
 
-**期望**：全部套件绿（2026-10-11 实测 **通过 21 ｜ 失败 0 ｜ 跳过 0**）。
+**期望**：全部套件绿 —— ★ 判据是 **失败 0 ｜ 跳过 0**（2026-10-11 当时实测通过数为 21，但那不是判据，且早已不是这个数）。
 本 feature 新增的是 `test_region_frame.py`，并扩充 `test_console.py`。
 
 ★ 注意：`test_region_frame.py` 里**每条检查都要配一条元测试** ——
