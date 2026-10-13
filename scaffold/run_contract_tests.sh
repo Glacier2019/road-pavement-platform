@@ -37,6 +37,24 @@ API_DEPS=(--with fastapi==0.115.6 --with httpx --with "psycopg[binary,pool]==3.2
 CONSOLE_DEPS=(--with fastapi==0.115.6 --with httpx --with pyyaml==6.0.2)
 
 # name | 说明 | 负责模块 | 依赖 | 测试文件
+  # ★★ 005（坐标基准绑定）**没有新增一行**，这是有意的，不是漏了：
+  #   它新增的判据全部落在**已经注册的文件里** ——
+  #     · test_region_frame.py §18a–§18h（区域帧那条套件）
+  #     · test_console.py（m9-集成面）
+  #     · test_dao_contract.py 第 4 组（m3-dao）
+  #   ⇒ 不需要新桶、不需要新依赖，加进来即跑。
+  #   ★ 同一条性质不许有两份定义 —— 另起一个文件反而会漂。
+  #
+  # ★★ 而 **005 的验收探针不在本表里，也不能在本表里**：
+  #     tests/e2e/quickstart_probe.py（八条判据，含「两级不一致必须被写入侧拒」）
+  #   它要**活着的 pg + api + console**，而本运行器的约定是**离线**
+  #   （见文件头：不启容器、不连库）。把它塞进来会让离线套件依赖在线服务，
+  #   那是拿一个契约换一个更差的契约。
+  #   跑法（需要容器已起）：
+  #     export DOCKER_CONFIG=$PWD/../.dockerhome
+  #     uv run --with httpx --with jsonschema --with pyyaml \
+  #       python tests/e2e/quickstart_probe.py
+  #   ★ 它在 tests/e2e/ 下、由 run_e2e_smoke.sh 那一类**在线**运行器管。
 TESTS=(
   "m2-报文|报文 Schema 与 Pydantic 双实现一致性|M2|PY|tests/contract/test_wim_contract.py"
   "m2-造数器|造数器产出的报文必须过契约|M2|PY|tests/contract/test_simulator_contract.py"

@@ -204,22 +204,67 @@ PY
 ★★ **实测：平台今天只有一个项目**（`design_project` 1 行），而且**只有一条路段有坐标**，它属于那个项目。**多项目这件事没有任何真实数据在跑** —— 所以这一步只能造。
 
 ```bash
-# 6a. 造第二个项目（36 带 / CM 108）和它的一个路段
-docker exec -i -e PGPASSWORD="$PG_PASSWORD" rp-pg psql -U "$PG_USER" -d "$PG_DB" -c "
+# 6a–6c 全在一个事务里，跑完 ROLLBACK —— 库里不留垃圾。
+# ★★ 为什么必须回滚：这一步**故意造**第二个项目，而平台真实状态是「只有一个项目」。
+#    留着它，后续任何「库里有一个项目」的判据都会变成假的。
+set -a; . ./.env; set +a
+docker exec -i -e PGPASSWORD="$PG_PASSWORD" rp-pg psql -U "$PG_USER" -d "$PG_DB" -f - <<'SQL'
+BEGIN;
+-- 6a. 造第二个项目：36 带 / CM 108 / EPSG 4545
 INSERT INTO design_project (project_uid, project_name, project_type, station_interval_m,
                             crs_zone_number, crs_central_meridian_deg, crs_epsg,
                             crs_zone_width_deg, crs_assumed, crs_evidence)
 VALUES (gen_random_uuid(), '多基准验证项目', '公路主线', 20,
-        36, 108, 4545, 3.00, true, '为了验证多基准共存而造的数据')
-RETURNING id"
+        36, 108, 4545, 3.00, true, '为了验证多基准共存而造的数据');
+
+-- 6b. 给它一个路段，**路段级一个字都不填** ⇒ 基准只能来自项目级
+INSERT INTO road_section (line_id, section_name, design_project_id,
+                          crs_zone_number, crs_central_meridian_deg, crs_epsg,
+                          crs_zone_width_deg, crs_assumed, crs_evidence)
+SELECT s.line_id, '多基准验证路段', d.id, NULL, NULL, NULL, NULL, NULL, NULL
+  FROM road_section s, design_project d
+ WHERE s.id = 6 AND d.project_name = '多基准验证项目';
+
+-- 6c. 同一段取值逻辑（路段有则取路段、否则取项目），两个项目必须给出两个答案
+SELECT s.section_name,
+       coalesce(s.crs_epsg, p.crs_epsg)                                 AS 生效epsg,
+       coalesce(s.crs_central_meridian_deg, p.crs_central_meridian_deg) AS 生效CM,
+       CASE WHEN s.crs_epsg IS NOT NULL THEN 'section' ELSE 'project' END AS crs_source
+  FROM road_section s LEFT JOIN design_project p ON p.id = s.design_project_id
+ WHERE s.section_name IN ('毕设', '多基准验证路段')
+ ORDER BY 生效CM DESC;
+ROLLBACK;
+SQL
 ```
 
-**期望**：
-- **两条 UPDATE 都成功**，谁都不影响谁
-- 6b 的两行：同一个桩号，**`zone_number` 一个 39 一个 36**，`lon_deg` **相差约 9°**（3 个带 × 3°）
-- 6c：两个项目的 `crs_source` 都等于 `"project"`
+**期望** —— 6c 必须正好是这两行（2026-10-13 实测输出）：
 
-**看不到就是没做对**：如果两个项目的 `lon_deg` 相同 ⇒ ★★ **基准根本没有跟着项目走**，005 的核心判据失败。
+```
+   section_name   | 生效epsg |   生效CM   | crs_source
+------------------+----------+------------+------------
+ 毕设             |     4548 | 117.000000 | section
+ 多基准验证路段   |     4545 | 108.000000 | project
+```
+
+- **两条 INSERT 都成功**，谁都不影响谁
+- 同一个「路段」概念，**`生效epsg` 一个 4548 一个 4545，`生效CM` 一个 117 一个 108**
+- `crs_source`：一个 `section`、一个 `project` ——
+  ★ **两种来源都出现过**，这才是完整的；两行都是同一个值，说明另一条路没被走到
+
+★★ **6b 的 `line_id` 那个坑**（实测踩过）：
+`INSERT ... SELECT` 里**未限定**的 `line_id` 会被解析到**目标表**，
+报 `column "line_id" does not exist ... but it cannot be referenced from this part of the query`。
+必须写成 `SELECT s.line_id ... FROM road_section s`。★ 它长得像「列不存在」，其实列在。
+
+★ **`lon_deg` 相差约 9°（3 带 × 3°）** 那半句在哪里验：
+那是 **geo.py 层**的事，已由 `区域帧` 套件 **§17** 钉死 ——
+同一份线元、两份基准文档，实测 `−9.000000000000°`。
+本条（第 6 步）验的是**库层**：基准真的挂在项目上、取值逻辑真的分两级。
+
+★★ **注意 `ROLLBACK` 对判据无影响**：6c 读的是事务内的行，
+而 `crs_pair_must_agree` 是 `BEFORE` 触发器，`INSERT` 当时就已经放行或拒绝过了。
+
+**看不到就是没做对**：如果两行的 `生效CM` 相同 ⇒ ★★ **基准根本没有跟着项目走**，005 的核心判据失败。
 
 ★★ **这一步是把「通用性」变成可观测的东西**：同一个桩号，在两个项目里**本来就该是两个不同的经纬度**。在 004 的形态下这是**做不到**的，而它**不会报任何错**。
 
@@ -275,18 +320,37 @@ cd /data/cy/shujuku/scaffold
 ./run_contract_tests.sh 2>&1 | tail -20
 ```
 
-**期望**：★ **通过 21 ｜ 失败 0 ｜ 跳过 0**（新增的套件会让总数上升，但**不许有失败、不许有跳过**）。
+**期望**：★ **失败 0 ｜ 跳过 0**。
+（通过数会随套件增减而变 —— 005 落地时实测是 **通过 21**，
+但**判据是「失败 0 且跳过 0」，不是某个写死的数字**。
+★ 本文件先前把 21 写成了判据，那和宪法里那个过期的「12/12」是同一个毛病：
+一个写死的数字，一定会过期，而没有任何检查在读它。
+「新增的套件会让总数上升」这句话本身就对 —— 所以判据只能是失败数和跳过数。）
 
-★★ 特别要看这三条守卫还在：
+★★ 特别要看这三条老守卫还在：
 - `test_sim_track.py`：「crs.yaml 存在（带号是配置项，不是代码里的常量）」
 - `test_region_frame.py` §8：「`assumed` ↔ `evidence` 的不变量」
 - `quickstart_probe.py`：「清单里的 frame 标记 == crs.yaml 里的标记」
 
-★ 再加 **两条新的**：
-- `geo.py` 里不得出现 psycopg（★ 现有断言**只扫 `app.py`**，而 005 最容易在 `geo.py` 里破线）
-- 文件与库一致性检查的**元测试**：故意造不一致，断言必须变红
+★ 再加 **两条新的**（005 期间都已完成）：
+- `m3-dao` 第 4 组：`geo.py` / `gaps.py` / `crs_drift.py` 里不得出现 psycopg。
+  ★ 原来这条**只扫 `app.py`**，靠的是一份「文件名单」；
+  005 恰恰最容易在 `geo.py` 里破线。现在改成了清单 + **清单完整性检查**
+  （M6-api 下每个 .py 要么在清单里、要么写明豁免理由）——
+  ★ 那条完整性检查**当场就抓出了一个我原本不知道的 `gaps.py`**。
+  另配元测试：5 种直连库写法必须全被认出；只在**文档字符串**里提到不算证据。
+- 文件与库一致性检查的**元测试**：故意造不一致，断言必须变红，改回去必须重新干净。
+  ★ 两个方向都实测过（改库不动文件 → 红；改回 → 绿）。
+  ★★ **只会红不会绿的检查，不算通过。**
+
+★★ **写入侧两级守卫**也要在这一步里被跑到（它挂在内核套件上）：
+`区域帧` 那条里的 §18g（文件在 + 两张表都挂 + **真的会被 initdb.d 跑到**）、
+§18h（挂的宿主文件**对容器可读**）、以及判据 2c 的行为元测试。
 
 **看不到就是没做对**：任何一条被删掉或被放宽 ⇒ 通用化不是免费的，代价就是这些守卫。
+★★ 而 005 自己就吃过一次这个亏：`98_` 迁移的后记③ 把「两级一致检查」推给了写入侧，
+**没有任何任务接住**，于是它整整缺席了一轮 —— 直到实测才发现写进去也没人拦。
+⇒ 「推迟」如果没有第二个地方接住，就是「取消」。
 
 ---
 

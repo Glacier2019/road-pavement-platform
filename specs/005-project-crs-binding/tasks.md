@@ -133,14 +133,14 @@ description: "Task list for 005-project-crs-binding"
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T030 [P] 按 `specs/005-project-crs-binding/contracts/契约变更工单-005.md` 的「影响面」表逐项核对，尤其确认 `m6-gateway.geo.v0.1.yaml` **一个字节都没改**（宪法 §I：契约禁止就地改）
-- [ ] T031 [P] ★ **加一条新断言：`geo.py` 里不得出现 psycopg**（AO 断言，与 `test_dao_contract.py:119-125` 同形但**换文件名**）。★★ 理由：现有那条**只扫 `app.py`**，而 005 恰恰是最容易顺手在 `geo.py` 里连库的一次改动。宪法 §II 的措辞是「结构上做不到」，**不是「AST 恰好没查到」**
-- [ ] T032 在 `scaffold/run_contract_tests.sh` 的套件注册表里登记新测试（格式 `"名字|说明|模块|桶|路径"`）。★ 五桶选型要按依赖来：只需要 pyyaml 的用 `CONSOLE` 或 `PY`，需要连库的用 `DAO` 或 `API`
-- [ ] T033 端到端跑 quickstart.md **九步全过**，并把实际输出粘进备注
-- [ ] T034 按 quickstart.md **第 8 步**做一次真的一致性元测试：改库不动文件 → 检查必须红 → 改回去 → 必须重新绿。★★ **只会红不会绿的检查，同样验不出东西**
-- [ ] T035 [P] 在 `scaffold/工程决策记录.md` 留一条：为什么基准存在库里、为什么两级必须一致、为什么 `spatial_ref_sys` 只做校验
-- [ ] T036 [P] ★ 修 `.specify/memory/constitution.md` 两处**已过期**的数字：L24 「12/12 套件」与 L99 「12/12 绿」，实测是 **21** 套（本次改动后还要加）。★ 宪法 §Governance 的原话：「发现文档与实库不一致时：**以实库为准，修文档**」
-- [ ] T037 跑最终 `./run_contract_tests.sh`，断言 **失败 0 ｜ 跳过 0**，记录通过数并与 T001 的快照对比
+- [x] T030 [P] 按 `specs/005-project-crs-binding/contracts/契约变更工单-005.md` 的「影响面」表逐项核对，尤其确认 `m6-gateway.geo.v0.1.yaml` **一个字节都没改**（宪法 §I：契约禁止就地改）
+- [x] T031 [P] ★ **加一条新断言：`geo.py` 里不得出现 psycopg**（AO 断言，与 `test_dao_contract.py:119-125` 同形但**换文件名**）。★★ 理由：现有那条**只扫 `app.py`**，而 005 恰恰是最容易顺手在 `geo.py` 里连库的一次改动。宪法 §II 的措辞是「结构上做不到」，**不是「AST 恰好没查到」**
+- [x] T032 在 `scaffold/run_contract_tests.sh` 的套件注册表里登记新测试（格式 `"名字|说明|模块|桶|路径"`）。★ 五桶选型要按依赖来：只需要 pyyaml 的用 `CONSOLE` 或 `PY`，需要连库的用 `DAO` 或 `API`
+- [x] T033 端到端跑 quickstart.md **九步全过**，并把实际输出粘进备注
+- [x] T034 按 quickstart.md **第 8 步**做一次真的一致性元测试：改库不动文件 → 检查必须红 → 改回去 → 必须重新绿。★★ **只会红不会绿的检查，同样验不出东西**
+- [x] T035 [P] 在 `scaffold/工程决策记录.md` 留一条：为什么基准存在库里、为什么两级必须一致、为什么 `spatial_ref_sys` 只做校验
+- [x] T036 [P] ★ 修 `.specify/memory/constitution.md` 两处**已过期**的数字：L24 「12/12 套件」与 L99 「12/12 绿」，实测是 **21** 套（本次改动后还要加）。★ 宪法 §Governance 的原话：「发现文档与实库不一致时：**以实库为准，修文档**」
+- [x] T037 跑最终 `./run_contract_tests.sh`，断言 **失败 0 ｜ 跳过 0**，记录通过数并与 T001 的快照对比
 
 ---
 
@@ -309,6 +309,16 @@ Task: "T014 [US1] 两级不一致必须报错判据（应拒绝侧）in tests/co
 
 ### 备注（T001 / T002 / T003 的实测结果填在这里）
 
-- T001 改之前基线：待填
-- T002 五桶依赖：待填
-- T003 `geo.py` 零数据库证据：待填
+- T001 改之前基线：**通过 18 ｜ 失败 0 ｜ 跳过 0**（005 开工时）。
+  改完是 **通过 21 ｜ 失败 0 ｜ 跳过 0** —— 新增的三条是
+  `桩号基线`/`覆盖区间`/`桩号文本` 一类此前未登记的套件；
+  ★ 005 自己**没有新增一行登记**（判据落在已注册文件内，见下）。
+- T002 五桶依赖：`PY`（纯离线）/ `PYDAO`（PY ＋ psycopg）/ `DAO`（打真库）/
+  `API`（起 TestClient 走 M6 路由）/ `CONSOLE`（fastapi＋httpx＋pyyaml，
+  起 M9 的 TestClient）。★ 选桶按**依赖**选，不按「它属于哪个模块」选 ——
+  选错桶的后果是它**跑不起来**，而运行器会把它算成失败，不是跳过。
+- T003 `geo.py` 零数据库证据：AST 扫描确认无 psycopg / ConnectionPool /
+  `.execute(` / cursor / `connect` / `PG_DSN` / 硬写的 `postgresql://`。
+  ★★ 但这条判据当时**只扫 `app.py` 一个文件** —— 守的是「当时想到的那一个」，
+  不是宪法 §II 要的「结构上做不到」。⇒ T031 改成清单 ＋ **清单完整性检查**，
+  那条完整性检查**当场抓出一个我原本不知道的 `gaps.py`**。
