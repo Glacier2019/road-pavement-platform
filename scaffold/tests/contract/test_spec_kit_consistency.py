@@ -238,6 +238,50 @@ def main() -> int:
           "★ 模板表里每一条原则都带了名字（不是光一个罗马数字）",
           f"模板 {len(_names_in_tmpl)} 个名字 ｜ 宪法 {len(ids)} 条")
 
+    # ---- 4b) ★★ 模板里那条原则**展开的子条款数**必须与宪法一致 ----
+    # ★★★ 2026-10-13 加 VI.4 时当场撞上的：`plan-template.md` 的 VI 行把原则
+    #    展开成 `①②③`，宪法加了第 4 条之后这行就**过期了** —— 而 §2 只读行标签
+    #    `VI`，**不读内容**，所以它**不会红**。
+    #    ⇒ 又是一次「手工维护的展开，配一个只读标签的检查」。
+    #    ★ 这一条就是原则 VI.4 的**首个通用落地**：模板与宪法是两份各自
+    #      手工维护的东西，光「条数对得上」（§2）不构成证据，
+    #      还要「**展开的内容**对得上」。
+    _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+
+    def _vi_body(text: str) -> str:
+        """取宪法里原则 VI 的正文（到下一个 `###`/`##` 标题为止）。"""
+        m = re.search(r"^### VI\..*?$", text, re.M)
+        if not m:
+            return ""
+        rest = text[m.end():]
+        nxt = re.search(r"^(?:###|##) ", rest, re.M)
+        return rest[:nxt.start()] if nxt else rest
+
+    def _tmpl_row(text: str, pid: str) -> str:
+        for ln in text.splitlines():
+            if re.match(rf"^\|\s*\*\*{pid}\.\s", ln):
+                return ln
+        return ""
+
+    _con_n = len(re.findall(r"^(\d+)\.\s", _vi_body(con), re.M))
+    _row_vi = _tmpl_row(tmpl, "VI")
+    _row_n = sum(1 for ch in _row_vi if ch in _CIRCLED)
+    check(_con_n >= 3,
+          "★ 4b · 前置：宪法原则 VI 的正文里数到了编号条款（否则下一条是空转）",
+          f"宪法 VI 有 {_con_n} 条")
+    check(_row_n == _con_n,
+          "★★ 4b · 模板的 VI 行**展开的子条款数 == 宪法 VI 的子条款数**"
+          "（只对标签不对内容的话，加了子条款也没人知道）",
+          f"模板展开 {_row_n} 条 ｜ 宪法 {_con_n} 条")
+
+    # ★ 元测试：把模板 VI 行的最后一条删掉 → 计数必须不等
+    _cut_row = re.sub(r"[④⑤⑥⑦⑧⑨⑩]", "", _row_vi, count=1)
+    _cut_n = sum(1 for ch in _cut_row if ch in _CIRCLED)
+    check(_cut_n != _con_n,
+          "★★ 4b · ★元测试：从模板 VI 行删掉一个子条款 → 计数必须变红"
+          "（否则 §4b 是摆设）",
+          f"删后 {_cut_n} vs 宪法 {_con_n}")
+
     # ══════════════════════════════════════════════════ 5) 不许把套件数写成判据
     print("\n=== 5) 规范性文档里不许出现写死的套件数 / 通过数 ===")
     # ★★★ 为什么这一条值得单列：本仓有一个**反复复发**的毛病 ——
