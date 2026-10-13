@@ -92,6 +92,44 @@ _RUNNER_ROW = re.compile(r'^\s*"([^"|]+)\|([^"|]+)\|([^"|]+)\|([^"|]+)\|([^"]+)"
 _MOUNT_LINE = re.compile(r'\./sql/([\w.]+\.sql)\s*:\s*/docker-entrypoint-initdb\.d/')
 
 
+ENV_EXAMPLE = ROOT / ".env.example"
+
+# ★★★★★ 2026-10-13（丁）：compose 引用了 24 个键，而 `.env.example` 只声明 18 个。
+#   差的 6 个是 M4/M5/M7/M8/M9/M10 各自的宿主端口（GOVERNANCE/FUSION/SEMANTIC/
+#   APPS/CONSOLE/AGENT_PORT），它们在 2026-09-15 的 b9b9df2 里**一次性**进了 compose，
+#   而 `.env.example` 自 2026-09-14 的 9935616 起**再没被打开过**。
+#
+#   ★★ 为什么两年都没人发现：那 6 个全都写了 `:-` 默认值。**不声明照样跑**，
+#      所以缺失**不产生任何信号**。带默认值的缺失，从构造上就是隐形的。
+#   ★★★ 而 `.env.example` 被 12 份文档引用（含全部 6 个模块的 README，
+#      每份都写「首次 cp .env.example .env」）—— **文档在教人用它，它却答不全。**
+#
+#   ⇒ 这是本文件守的那个性质的**第三份清单**：compose 是需求方，
+#     `.env.example` 是说明书，两份都是手写的，中间**没有任何东西在读**。
+#
+# ★★★★★ 匹配必须**整键**，不能子串 —— 这是实测踩到的坑：
+#   子串匹配 `CONSOLE_PORT` 会**顺带命中** `${MINIO_CONSOLE_PORT:-9003}`，
+#   而后者明明是**已声明**的，于是会把一个正确的键报成缺失（反向误报）。
+#   `(?=[:\}])` 这个边界钉住的就是这件事；§4b 有元测试专门守它。
+_ENV_REF = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?=[:\}])")
+_ENV_DECL = re.compile(r"^([A-Z_][A-Z0-9_]*)\s*=", re.M)
+
+
+def env_referenced(compose_text: str) -> set[str]:
+    """compose 里 `${X}` / `${X:-…}` / `${X:?…}` 引用的键名（整键）。"""
+    return set(_ENV_REF.findall(compose_text))
+
+
+def env_declared(example_text: str) -> set[str]:
+    """`.env.example` 里声明的键名。"""
+    return set(_ENV_DECL.findall(example_text))
+
+
+def env_undeclared(compose_text: str, example_text: str) -> list[str]:
+    """★ 纯函数：compose 要了、但说明书没写的键。§4b 要喂它捏造的输入。"""
+    return sorted(env_referenced(compose_text) - env_declared(example_text))
+
+
 def _read(p: pathlib.Path) -> str:
     return p.read_text(encoding="utf-8")
 
@@ -305,6 +343,49 @@ def main() -> int:
             if not re.search(r"\.(md|py|sh|yml|sql)|§|见 |README", v)]
     check(not weak, "每条豁免的理由都**指向了证据**（不是一句「这是有意的」）",
           "无" if not weak else "★ 理由太薄：" + "、".join(weak))
+
+    # =====================================================================
+    print("\n=== 4) `.env.example` 说明书：compose 要的每个键，说明书都得写 ===")
+    ex_text = _read(ENV_EXAMPLE)
+    ref_keys = env_referenced(cmp_text)
+    decl_keys = env_declared(ex_text)
+    check(len(ref_keys) > 0, "compose 的 ${…} 引用解析成功（不是空表）",
+          f"{len(ref_keys)} 个键")
+    check(len(decl_keys) > 0, ".env.example 的声明解析成功", f"{len(decl_keys)} 个键")
+
+    miss_env = env_undeclared(cmp_text, ex_text)
+    check(not miss_env, "compose 引用的键，`.env.example` 里全都写了",
+          f"两边各 {len(ref_keys)} / {len(decl_keys)} 个，完全对齐" if not miss_env
+          else "★ 说明书漏了：" + "、".join(miss_env)
+               + "　（不声明也跑得起来，因为有 `:-` 默认值 —— 所以它不会自己响）")
+
+    # ★ 反向：说明书写了但没人引用 —— 那是另一个方向的失联（键改名后最容易漏）。
+    stale_env = sorted(decl_keys - ref_keys)
+    check(not stale_env, "`.env.example` 里没有没人引用的死键",
+          "无" if not stale_env else "★ 死键：" + "、".join(stale_env))
+
+    # ---- 4b) ★元测试：这个检测器**真的能红**，而且**不会反向误报** ------
+    print("\n=== 4b) ★元测试：捏造一个未声明的键，§4 必须报出来 ===")
+    doctored_cmp = cmp_text.replace("PG_DB: road_pavement",
+                                    "PG_DB: road_pavement\n      NEVER_DECLARED_PORT: 9999",
+                                    1)
+    if "NEVER_DECLARED_PORT" not in doctored_cmp:
+        # 上面的替换依赖具体写法，换一种更稳的捏造：直接拼一个引用进去。
+        doctored_cmp = cmp_text + "\n# ${NEVER_DECLARED_PORT:-9999}\n"
+    red_env = env_undeclared(doctored_cmp, ex_text)
+    check("NEVER_DECLARED_PORT" in red_env,
+          "★ 捏造一个未声明的键之后，它被报出来了（检测器不是摆设）",
+          "、".join(red_env) if red_env else "★ 仍然报「全对齐」 —— 检测器形同虚设")
+
+    # ★★ 4b-2) 反向元测试：**子串陷阱** —— `MINIO_CONSOLE_PORT` 已声明，
+    #    绝不能因为键名里含 `CONSOLE_PORT` 就被报成缺失。
+    #    这条元测试钉住的是「整键匹配」这件事本身；它红了说明匹配退化成子串了。
+    check("MINIO_CONSOLE_PORT" in decl_keys,
+          "前置：MINIO_CONSOLE_PORT 确实是已声明的（否则下一条无意义）")
+    check("MINIO_CONSOLE_PORT" not in red_env,
+          "★★ 子串陷阱：MINIO_CONSOLE_PORT 没被误报成缺失（整键匹配成立）",
+          "未被误报" if "MINIO_CONSOLE_PORT" not in red_env
+          else "★ 反向误报：一个正确的键被报成缺失 —— 匹配退化成子串了")
 
     print("")
     if fails:

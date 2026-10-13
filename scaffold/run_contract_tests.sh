@@ -138,7 +138,7 @@ TESTS=(
   #    ★ 离线（纯文本解析），放 PY 桶。
   #    ★★ 它还**显式记下自己查不了什么**（迁移 vs 种子没有机器判据，
   #       实测三条候选规则全不成立）—— 见文件里 §2c 的注释。
-  "清单完整|运行器登记表 ↔ tests/ + initdb.d 挂载表 ↔ sql/：不许有孤儿，豁免须写明理由|全组|PY|tests/contract/test_runner_completeness.py"
+  "清单完整|三份手写清单都要有人校：运行器 ↔ tests/ + initdb.d ↔ sql/ + compose ↔ .env.example|全组|PY|tests/contract/test_runner_completeness.py"
   # ── v0.6（T045/T046）数字必须以数字出去 ────────────────────────────────
   #   ★ 起因：FastAPI 把**带返回注解**的路由交给 pydantic 序列化，而 pydantic 的
   #     `Decimal` JSON 序列化保精度 ⇒ 输出**字符串**。M6 的 20 条路由全带
