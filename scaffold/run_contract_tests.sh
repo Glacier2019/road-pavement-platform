@@ -127,6 +127,17 @@ TESTS=(
   #    ★★ 它还**显式记下自己查不了什么**（迁移 vs 种子没有机器判据，
   #       实测三条候选规则全不成立）—— 见文件里 §2c 的注释。
   "清单完整|运行器登记表 ↔ tests/ + initdb.d 挂载表 ↔ sql/：不许有孤儿，豁免须写明理由|全组|PY|tests/contract/test_runner_completeness.py"
+  # ── v0.6（T045/T046）数字必须以数字出去 ────────────────────────────────
+  #   ★ 起因：FastAPI 把**带返回注解**的路由交给 pydantic 序列化，而 pydantic 的
+  #     `Decimal` JSON 序列化保精度 ⇒ 输出**字符串**。M6 的 20 条路由全带
+  #     `-> dict[str, Any]`，实测 **10 条**把数字发成了字符串。
+  #   ★★ 而它此前**全绿通过** —— 因为 §13 只比字段名，不比类型。
+  #      一份声明了 `type: number` 却没人读的契约，和没声明是一样的。
+  #   ★ 修法是结构性的：`app.router.route_class = NoResponseModel`（见 jsonnum.py），
+  #     一条改动覆盖全部路由 + 以后新增的每一条。
+  #   ⚠ 这个测试走 API 桶（要 fastapi/httpx）。§1 §2 离线always-run；
+  #     §3 打活服务，服务没起会**大声跳过**并在结果里说明，不假装通过。
+  "数字类型|numeric 列必须以 JSON 数字出去：机制 + 全部路由 response_model 为 None + 活服务实测|M6|API|tests/contract/test_json_numeric_types.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

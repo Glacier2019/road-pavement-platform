@@ -1058,6 +1058,39 @@ def main() -> int:
         return set(_d["paths"][path]["get"]["responses"]["200"]
                    ["content"]["application/json"]["schema"]["properties"])
 
+    def _declared_props(path: str, doc_: dict | None = None) -> dict:
+        """契约声明的 200 响应字段 → 它的 schema（含 `type`）。
+
+        ★ 与 `_declared` 的区别：后者只要**名字**，这里要**名字 + 类型**。
+        """
+        _d = doc if doc_ is None else doc_
+        return (_d["paths"][path]["get"]["responses"]["200"]
+                ["content"]["application/json"]["schema"]["properties"])
+
+    def _type_mismatches(props: dict, payload: dict) -> list:
+        """契约说 `number`/`integer` 的字段，响应里必须是数字。
+
+        ★★★ 抽成**纯函数**是为了元测试：喂一个人造的 payload 进来，
+           证明它真的会报红。夹在流程里的检查没法这样测。
+
+        ⚠ 只查**声明了类型**的字段。没写 `type` 的、以及 `boolean`/`string`/
+          `array`/`object` 的，本节不管 —— 不假装全类型都校验了。
+        """
+        out = []
+        for k, spec in props.items():
+            if not isinstance(spec, dict):
+                continue
+            want = spec.get("type")
+            if want not in ("number", "integer") or k not in payload:
+                continue
+            v = payload[k]
+            # ★ bool 是 int 的子类，必须排掉 —— 否则 `True` 会被当成数字放行
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                out.append(f"{k}={v!r}（声明 {want}，实为 {type(v).__name__}）")
+            elif want == "integer" and not float(v).is_integer():
+                out.append(f"{k}={v!r}（声明 integer，实为小数）")
+        return out
+
     #    路径模板 → (实际请求 URL, 查参, **允许缺失的条件字段**)
     #    ★ 条件字段列出来是**声明**，不是放行：FR-010 要求
     #      lat_deg/lon_deg 在算不出来时**必须缺席**，
@@ -1088,6 +1121,17 @@ def main() -> int:
         extra = sorted(got - want_f)
         check(not extra, f"13 · {tpl} 没有未声明的字段",
               f"★ 响应里有但契约没声明：{extra}")
+        # ---- ③ ★ 类型也要比（T046①）。契约里 `type: number` / `integer`
+        #   的字段，响应里就必须是**数字**，不能是字符串。
+        #
+        #   ★★★★★ 这一条为什么必须补：契约里**本来就写着** `type: number`，
+        #     但 005 之前这里只比**字段名**，于是 `central_meridian_deg` 从
+        #     `117` 变成 `"117.000000"` 的时候，**全绿通过**。
+        #     一份声明了类型却没人读的契约，和没声明是一样的。
+        prop = _declared_props(tpl)
+        bad_t = _type_mismatches(prop, resp.json())
+        check(not bad_t, f"13 · {tpl} 声明了类型的字段，类型都对得上",
+              "★ " + "；".join(bad_t))
 
     # ---- 元测试：把契约里 `station_m` 改名成 `x`，上面第①条必须红。
     #    ★ 这是本节存在的**唯一理由** —— 证明它读的真是契约里的名字，
@@ -1117,6 +1161,35 @@ def main() -> int:
     check("x" in (_bwant2 - _bgot),
           "★ 元测试：把契约里的 station_m 改名成 x 之后，比对立刻发现「声明了但没有」",
           f"改名后差集 = {sorted(_bwant2 - _bgot)}")
+
+    # ---- 元测试（T046①）：类型比对必须抓得住「声明 number、实为字符串」。
+    #
+    # ★★★★ 这个元测试的形状很关键：**注入的是响应侧，不是契约侧**。
+    #   因为缺陷的形态就是「契约没写错（`type: number` 一直是对的），
+    #   是**实现**把数字发成了字符串」。若只注入契约，测的就不是这条判据了。
+    #   ⇒ 所以这里直接拿 `_type_mismatches` 这个纯函数，
+    #     喂一份**模拟 005 之前那个真实响应**的 payload（117 是字符串）。
+    _mp = _declared_props("/v1/geometry/sections/{section_id}/geo")
+    check(_mp.get("central_meridian_deg", {}).get("type") == "number",
+          "元测试前置：契约的 central_meridian_deg 确实声明成 number",
+          f"实际 {_mp.get('central_meridian_deg')!r}")
+    # ★ 这一份就是**当年真实发出去的样子** —— 值对、类型错，所以只比名字的判据全绿。
+    _old_payload = {"section_id": 6, "station_m": 300.0, "zone_number": 39,
+                    "central_meridian_deg": "117.000000",
+                    "epsg": 4548, "crs_assumed": False}
+    _mt = _type_mismatches(_mp, _old_payload)
+    check(any("central_meridian_deg" in s for s in _mt),
+          "★ 元测试：把 central_meridian_deg 发成字符串（005 之前的真实形态），"
+          "类型比对立刻报红",
+          f"实际 {_mt}")
+    # ---- 反向：值对、类型也对 ⇒ 不许误报
+    _ok_payload = dict(_old_payload, central_meridian_deg=117.0)
+    check(not _type_mismatches(_mp, _ok_payload),
+          "★ 元测试反向：值对类型也对时，类型比对**不许误报**",
+          f"实际 {_type_mismatches(_mp, _ok_payload)}")
+    # ---- 反向：bool 不是数字（`True` 会被 isinstance(x, int) 放行，必须排掉）
+    check(bool(_type_mismatches({"epsg": {"type": "integer"}}, {"epsg": True})),
+          "★ 元测试：bool 不许被当成数字（`isinstance(True, int)` 是 True，得专门排）")
 
     # ================================================================ 14) 五态
     # ★ v0.6（契约变更工单 005）T012。
@@ -1401,18 +1474,54 @@ def main() -> int:
               f"★★ {_tpl} 的 central_meridian_deg 是 JSON 数字",
               f"实际 {_j.get('central_meridian_deg')!r}")
 
-    # --- 16d) 元测试：把 `_num` 摘掉，16c 必须变红 ---------------------------
-    # ★ 宪法 §V：「每条新增的检查，必须配一个元测试」。
-    #   没有它，16c 就只是一句"现在是数字"的观察 —— 而观察不是守卫。
+    # --- 16d) 两层守卫：`_num` 是**层内**的，`NoResponseModel` 是**全局**的 -----
+    #
+    # ★★★★★ 2026-10-13 T045 改写了这一节，原因值得记下来：
+    #   原先这里摘掉 `_num`、断言「值**确实**变成字符串」。那是当时的事实 ——
+    #   让 `Decimal` 变字符串的**唯一**原因是 `_num` 在转换。
+    #   T045 把 `app.router.route_class = NoResponseModel` 挂上之后，
+    #   **`_num` 不再是那个原因了**：就算摘掉它，全局那一层照样把值发成数字。
+    #   ⇒ 于是这条元测试**红了，而且是真阳性** —— 它守的那个前提已经不存在。
+    #
+    #   ★ 修法不是"把它改松"，是**把它改成现在的事实**：
+    #     ① 摘掉 `_num` ⇒ 仍是数字 —— 这是 T045 的**收益**，值得写成判据；
+    #     ② 再单独证明「数字 vs 字符串」确实由 route_class 决定（元测试）。
+    #   ①② 合起来才说得清「现在到底靠哪一层」。只留①会变成一句没人验的观察。
     _keep = APP._num
     try:
         APP._num = lambda v: v          # 还原成"不转换"
-        _bad = c.get("/v1/geometry/sections").json()["items"][0]["crs_central_meridian_deg"]
+        _naked = c.get("/v1/geometry/sections").json()["items"][0]["crs_central_meridian_deg"]
     finally:
         APP._num = _keep
-    check(isinstance(_bad, str),
-          "★★★ 元测试：摘掉 `_num` 之后，那个值**确实**变成字符串",
-          f"实际 {_bad!r} —— 若仍是数字，说明 16c 测的不是它声称要测的东西")
+    check(isinstance(_naked, (int, float)) and not isinstance(_naked, bool),
+          "★★★ 摘掉 `_num` 之后，值**仍然是数字** —— 全局的 route_class 接住了",
+          f"实际 {_naked!r}（{type(_naked).__name__}）—— 若变回字符串，说明全局那层失效了")
+
+    # ② 元测试：现场搭两个 mini app，同一条 `-> dict[str, Any]` 路由返回同一个
+    #    `Decimal`，只差挂不挂 `NoResponseModel`。
+    #    ★ 这才证明「数字 vs 字符串」是由 route_class 决定的 —— 而不是碰巧。
+    from decimal import Decimal  # noqa: E402
+    from typing import Any  # noqa: E402
+
+    from fastapi import FastAPI  # noqa: E402
+    from jsonnum import NoResponseModel  # noqa: E402
+
+    def _mini(guarded: bool):
+        _a = FastAPI()
+        if guarded:
+            _a.router.route_class = NoResponseModel
+
+        @_a.get("/m")
+        def _h() -> dict[str, Any]:
+            return {"central_meridian_deg": Decimal("117.000000")}
+        return _a
+
+    import json as _json  # noqa: E402
+    _g = _json.loads(TestClient(_mini(True)).get("/m").text)["central_meridian_deg"]
+    _p = _json.loads(TestClient(_mini(False)).get("/m").text)["central_meridian_deg"]
+    check(isinstance(_g, (int, float)) and isinstance(_p, str),
+          "★★★ 元测试：同一条路由，挂 route_class → 数字；不挂 → 字符串",
+          f"挂了={_g!r}（{type(_g).__name__}） 不挂={_p!r}（{type(_p).__name__}）")
 
     # ================================================================ 17) T013/T014/T018
     # ★ 上一段（§16）测的是「形状对不对」，这一段测的是「行为对不对」——

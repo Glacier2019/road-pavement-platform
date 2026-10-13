@@ -205,6 +205,11 @@ def main() -> int:
         #   扫描器也确认清白。★ 这就是 4b 存在的意义：
         #   清单漏一个文件，比清单里某一行不干净更隐蔽。
         ("api/gaps.py", ROOT / "modules" / "M6-api" / "gaps.py"),
+        # ★ jsonnum.py 是 4b **第二次**当场抓出来的（2026-10-13，T045）。
+        #   它只 import fastapi，做的是「让返回注解不触发 pydantic 序列化」，
+        #   与取数无关 —— 所以本来就该在这张「不得连库」的表里，
+        #   而不是我新加一个文件就绕过它。★ 这条检查值了两次。
+        ("api/jsonnum.py", ROOT / "modules" / "M6-api" / "jsonnum.py"),
         ("console/crs_drift.py", ROOT / "modules" / "M9-console" / "crs_drift.py"),
     ]
 

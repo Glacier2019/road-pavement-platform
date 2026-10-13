@@ -28,6 +28,11 @@ from fastapi import FastAPI, HTTPException, Query
 
 import gaps
 
+# ★★★ `NoResponseModel` 是本文件**最重要的一行配置**，别动它。
+#   没有它，`-> dict[str, Any]` 会让 FastAPI 把返回交给 pydantic，于是每个
+#   `numeric` 列都以**字符串**出去（实测：10/20 条路由中招）。见 jsonnum.py。
+from jsonnum import NoResponseModel
+
 from rpdao import (
     ALL_TABLES,
     CROSS_TABLES,
@@ -68,6 +73,16 @@ app = FastAPI(
                 "一律通过本服务访问数据，不允许直连库。数据访问全部经 M3（rpdao）。",
     lifespan=lifespan,
 )
+
+# ★★★★★ 必须写在这里，**不能**写成 `FastAPI(route_class=...)`。
+#   `FastAPI.__init__` **没有** `route_class` 这个形参（实测
+#   `"route_class" in inspect.signature(FastAPI.__init__).parameters` → False），
+#   多传的 kwarg 会被 Starlette 当 `**extra` **静默吞掉**：
+#       FastAPI(route_class=NoResponseModel)   → {"v":"117.000000"}  字符串 ✗
+#       app.router.route_class = NoResponseModel → {"v":117.0}        数字 ✓
+#   ★ 我第一版就是这么写错的，而且**看起来像修好了** —— 是逐条实测探测才抓出来。
+#   ⇒ 覆盖全部路由 + 以后新增的每一条。根因与代价见 jsonnum.py。
+app.router.route_class = NoResponseModel
 
 
 def _crs_message(exc: CrsBindingError) -> str:
@@ -639,7 +654,12 @@ def _geo_crs(section_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
 
     doc = {"geographic_frame": {
         "zone_number": eff["zone_number"],
-        # ⚠ `_num` 不能省：这两列是 `numeric`，不转就会以**字符串**出去。
+        # ★ `_num` 存在的理由变了（2026-10-13，T045）：`app.router.route_class`
+        #   挂上 `NoResponseModel` 之后，**全局**已经保证 numeric 以数字出去，
+        #   这里不再"不转就出错"。保留是为了**双保险**。
+        #   ⚠ 但别再靠它 —— 它只覆盖**手写到的地方**，而漏的那 10 条路由就是证据。
+        #     ★ 实测过：摘掉 `_num`，这两列**仍然是数字**（全局那层接住）。
+        #       见 tests/contract/test_region_frame.py §16d 的两层判据。
         "central_meridian_deg": _num(eff["central_meridian_deg"]),
         "zone_width_deg": _num(eff["zone_width_deg"]),
         "assumed": eff["assumed"],

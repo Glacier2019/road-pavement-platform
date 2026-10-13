@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY modules/M3-rpdao/rpdao /app/rpdao
 
 COPY modules/M6-api/app.py ./
+# ★★★ numeric 列必须以**数字**出去（T045）。独立成文件是为了让契约测试
+#   能离线 import 它、并对「取消这个修法 ⇒ 判据变红」做元测试。
+#   它只依赖 fastapi，不拖 rpdao / psycopg。
+COPY modules/M6-api/jsonnum.py ./
 # 空表缺口归因（纯拼装：无 SQL、不 import M2）——独立成文件便于单测
 COPY modules/M6-api/gaps.py ./
 # 区域帧：桩号 ↔ 经纬度（004）。投影是手写的，几何全部委托 m2geom。
