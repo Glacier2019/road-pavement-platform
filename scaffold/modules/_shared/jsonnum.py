@@ -1,5 +1,23 @@
 """让 `numeric` 列以**数字**出去，而不是字符串。
 
+==================== 它是**共享**的，8 个模块同一份（2026-10-13）====================
+
+位置：`modules/_shared/jsonnum.py` —— 全仓库**只有这一份**。
+每一份 Dockerfile 都 `COPY modules/_shared/jsonnum.py ./`，所以容器里
+`from jsonnum import NoResponseModel` 能用。
+
+★ 为什么不做成每个模块一份副本：8 份**内容相同、各自演化**的文件，
+  就是我们已经栽过三次的那个缺陷类（多份手抄的清单，没有任何检查在读它）。
+  一份源文件就不需要「保持它们一致」这件事。
+
+★ 配套一条判据（`tests/contract/test_json_numeric_types.py` §2b）：
+  模块清单**从文件系统推**（`modules/*/app.py` 里凡是建 FastAPI 的），
+  逐个检查：守卫挂上了、Dockerfile 拷了共享文件、compose 的构建上下文
+  够得着 `modules/_shared/`。**以后新加一个模块，它自动进网。**
+
+⚠ 直接单跑测试（不走 `run_contract_tests.sh`）时要自己带
+  `PYTHONPATH=modules/_shared` —— 跑测器里已经设了。
+
 ==================== 这个文件为什么存在（实测，不是风格）====================
 
 `geo.py` / `app.py` 里有个 `_num()`，它的 docstring 记着同一件事。但 `_num()`

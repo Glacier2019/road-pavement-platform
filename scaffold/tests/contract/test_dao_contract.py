@@ -209,7 +209,9 @@ def main() -> int:
         #   它只 import fastapi，做的是「让返回注解不触发 pydantic 序列化」，
         #   与取数无关 —— 所以本来就该在这张「不得连库」的表里，
         #   而不是我新加一个文件就绕过它。★ 这条检查值了两次。
-        ("api/jsonnum.py", ROOT / "modules" / "M6-api" / "jsonnum.py"),
+        #   ★★ 它后来搬了家（M6-api/ → _shared/，8 个模块共用一份），
+        #      所以路径跟着改；**没有**从清单里删掉 —— 删掉就是把检查改松。
+        ("shared/jsonnum.py", ROOT / "modules" / "_shared" / "jsonnum.py"),
         ("console/crs_drift.py", ROOT / "modules" / "M9-console" / "crs_drift.py"),
     ]
 

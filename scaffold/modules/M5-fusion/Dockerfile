@@ -8,12 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY modules/M5-fusion/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py ./
+COPY modules/M5-fusion/app.py ./
+COPY modules/_shared/jsonnum.py ./
 # 配置外置：config/ 随镜像带默认值，生产由 volume/环境变量覆盖（五件套第 3 件）
-COPY config/ ./config/
+COPY modules/M5-fusion/config/ ./config/
 
 EXPOSE 8000
 

@@ -87,6 +87,32 @@ if not d:
 统一策略是另一件事，需要单独决定。所以"同一性质仍有多处定义"这件事
 **尚未结清**，工程决策记录 D-009 里如实记着。
 
+## `modules/_shared/` —— 共享模块（跑测器统一加进 `PYTHONPATH`）
+
+`run_contract_tests.sh` 里有一行：
+
+```bash
+export PYTHONPATH="$PWD/modules/_shared${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+**为什么在这儿而不是各个测试里**：全仓库有 24 处手写 `sys.path.insert(0, …)`。
+共享目录要是也照那个办法补，就得在每条会 import 到它的测试里各补一行 ——
+又是一份**没人校的清单**，正是我们栽过三次的缺陷类。
+设在跑测器上，**以后新增的测试自动进网**。
+
+★ 它对应的是各 Dockerfile 里的 `COPY modules/_shared/jsonnum.py ./`：
+容器里 `/app/jsonnum.py` 可 import，测试进程里靠这一行等价。
+
+⚠ **直接单跑**（`uv run python tests/contract/xxx.py`）**没有**这一层，
+要自己带上：
+
+```bash
+uv run --with "fastapi==0.115.6" --with httpx --with pyyaml==6.0.2 \
+  env PYTHONPATH=modules/_shared python tests/contract/test_json_numeric_types.py
+```
+
+漏了它的症状很好认：`ModuleNotFoundError: No module named 'jsonnum'`。
+
 ## 纪律
 
 - **每条新增的检查必须配一个元测试**（constitution Principle V）：

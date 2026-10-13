@@ -1,0 +1,61 @@
+# scaffold/.dockerignore —— 根上下文构建时，不发给 docker 的东西
+#
+# ★ 为什么现在才需要它（2026-10-13，T045 收尾）：
+#   原先 6 个模块（M4/M5/M7/M8/M9/M10）的构建上下文是**模块目录自己**，
+#   发过去的只有几十 KB。为了让 8 个模块共用**一份** `modules/_shared/jsonnum.py`，
+#   这 6 个的上下文改成了 scaffold 根目录 —— 于是整个仓库都会被发过去。
+#   本文件把它收回来。
+#
+# ★★ 排除项的判据：**没有任何 Dockerfile 的 COPY 源指向它**。
+#   实测各 Dockerfile 的 COPY 源全集只有两类：
+#       modules/…                      （模块代码、requirements、config、共享文件）
+#       contracts/design-import        （M2 的导入契约）
+#   所以下面这些可以安全排掉。**改 Dockerfile 的 COPY 时必须回来读这段。**
+#
+# ★★★ 顺带办了一件该办的事：`.env` 里是数据库口令。原先默认的 `.dockerignore`
+#    不存在，用根上下文的 M2/M6 一直在把它发进构建上下文（虽然没 COPY 进镜像，
+#     但它确实到了 docker daemon 那边）。现在挡住了。
+
+# ---- 凭据：绝对不进构建上下文
+.env
+*.pem
+*.key
+
+# ---- 测试与产物
+tests/
+artifacts/
+*.log
+
+# ---- 本阶段不参与容器化的目录
+ops/
+tools/
+simulator/
+services/
+packages/
+sql/
+
+# ---- 构建/运行脚手架与文档
+docker-compose*.yml
+run_contract_tests.sh
+run_e2e_smoke.sh
+verify.sh
+*.md
+核查.sql
+# ⚠ 故意**不**排 `Dockerfile*`：`docker compose` 指定
+#   `dockerfile: modules/M4-governance/Dockerfile` 时，那个文件是**从上下文里读**的。
+#   排掉它会让构建直接失败（"Cannot locate specified Dockerfile"）。
+#   实测取舍：多传几个几百字节的文本，换构建不炸。
+
+# ---- 语言的垃圾
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---- 本机工具缓存（如果谁在 scaffold 里跑过 uv / node）
+.uvcache/
+.uvpython/
+.dockerhome/
+node_modules/

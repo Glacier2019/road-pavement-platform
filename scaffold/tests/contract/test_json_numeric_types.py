@@ -40,6 +40,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -50,7 +51,10 @@ import types
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 APP_PATH = ROOT / "modules" / "M6-api" / "app.py"
-JSONNUM_PATH = ROOT / "modules" / "M6-api" / "jsonnum.py"
+# ★ 2026-10-13（T045 收尾）：jsonnum.py 从 M6-api/ 搬到 _shared/ ——
+#   一份源文件、8 个模块共用。原先 7 个模块各自留副本的方案被否掉了：
+#   8 份副本就是我们已经栽过三次的那个缺陷类（多份手抄的清单，没人读）。
+JSONNUM_PATH = ROOT / "modules" / "_shared" / "jsonnum.py"
 CRS_PATH = ROOT / "modules" / "M9-console" / "config" / "crs.yaml"
 
 _FAILS: list[str] = []
@@ -142,7 +146,10 @@ def _stub_pg() -> None:
 def load_app():
     _stub_pg()
     os.environ.setdefault("RP_CRS_CONFIG", str(CRS_PATH))
-    for p in (ROOT / "modules" / "M3-rpdao", ROOT / "modules" / "M6-api"):
+    # ★ `_shared/` 也要进 path —— M6 的 app.py 里是 `from jsonnum import ...`，
+    #   而 jsonnum.py 住在 modules/_shared/（8 个模块共用一份）。
+    for p in (ROOT / "modules" / "M3-rpdao", ROOT / "modules" / "M6-api",
+              ROOT / "modules" / "_shared"):
         if str(p) not in sys.path:
             sys.path.insert(0, str(p))
     spec = importlib.util.spec_from_file_location("jsonnum_api_app", APP_PATH)
@@ -266,6 +273,133 @@ def section2() -> None:
           "如果这条红了，说明 FastAPI 改了行为 —— 请重新验证 jsonnum.py 的用法说明")
 
 
+# ════════════════════════════════════════════════════════ §2b 全部模块（不许只守 M6）
+#
+# ★★★★★ 为什么这一节必须存在（2026-10-13，T045 收尾）：
+#   §2 只守 M6 —— 而**同一个坑在另外 7 个模块里也架着**（M2/M4/M5/M7/M8/M9/M10）。
+#   它们当时不返回 `Decimal`，所以没响；哪天有人加一个，就重演一遍。
+#
+# ★★ 判据的形状：模块清单**从文件系统推**（`modules/*/app.py` 里凡是建 FastAPI 的），
+#   不手写。手写清单我们已经栽过三次 —— 每加一个模块，它不会自己长出来。
+#
+# ★★★ 为什么能**离线**判：`route_class` 是在**注册那一刻**被读的，
+#   所以「挂晚了」和「没挂」是同一种失败。这一条静态就能判死，不必起服务。
+#   （真跑一遍的证据另见 git 记录里的 8 镜像实测；这里守的是**回归**。）
+#
+# ★ 这一节还顺手钉住三件配套的事：Dockerfile 拷了共享文件、compose 的构建
+#   上下文够得着它、以及**共享文件只有一份**（不是 8 份副本）。
+
+
+def _guard_findings(src: str) -> list[str]:
+    """这段 app.py 里「守卫没挂对」的证据；空列表 = 合格。
+
+    ★ 抽成纯函数是为了让元测试能喂人造源码进来 —— 见下面 section2b 末尾。
+    """
+    bad: list[str] = []
+    tree = ast.parse(src)
+    imported: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module == "jsonnum":
+            imported |= {a.asname or a.name for a in n.names}
+    if "NoResponseModel" not in imported:
+        bad.append("没有 `from jsonnum import NoResponseModel`")
+    assign_line: int | None = None
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1:
+            t = n.targets[0]
+            if (isinstance(t, ast.Attribute) and t.attr == "route_class"
+                    and isinstance(t.value, ast.Attribute)
+                    and t.value.attr == "router"
+                    and isinstance(n.value, ast.Name)
+                    and n.value.id in imported):
+                assign_line = n.lineno
+    if assign_line is None:
+        bad.append("没有 `app.router.route_class = <jsonnum 里那个类>`"
+                   "（写成 `FastAPI(route_class=...)` 不算 —— 那个 kwarg 会被静默吞掉）")
+    first_route: int | None = None
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in n.decorator_list:
+                if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                        and d.func.attr in ("get", "post", "put", "delete", "patch")
+                        and isinstance(d.func.value, ast.Name)
+                        and d.func.value.id == "app"):
+                    first_route = d.lineno if first_route is None else min(first_route, d.lineno)
+    if assign_line is not None and first_route is not None and assign_line > first_route:
+        bad.append(f"守卫在第 {assign_line} 行，但第一条路由在第 {first_route} 行"
+                   " —— `route_class` 是注册那一刻读的，挂晚了等于没挂")
+    return bad
+
+
+def section2b() -> None:
+    print("\n=== 2b) 全部模块：凡是建 FastAPI 的，守卫都要挂上、挂对、挂得早 ===")
+    import yaml
+
+    mods = sorted(p for p in (ROOT / "modules").glob("*/app.py"))
+    apps = [p for p in mods if "app = FastAPI(" in p.read_text(encoding="utf-8")]
+    print(f"       从文件系统推出 {len(mods)} 个 app.py，其中 {len(apps)} 个建了 FastAPI："
+          f"{[p.parent.name for p in apps]}")
+    # ---- 前置断言：枚举本身不能走空。★ 少了这句，glob 写错就是「永远通过」。
+    check(len(apps) >= 8,
+          "2b · 枚举到的 FastAPI 模块不少于 8（枚举没走空）", f"实际 {len(apps)}")
+
+    for p in apps:
+        name = p.parent.name
+        bad = _guard_findings(p.read_text(encoding="utf-8"))
+        check(not bad, f"2b · {name} 的守卫挂好了", "；".join(bad))
+
+    # ---- 配套：Dockerfile 必须拷共享文件
+    shared = ROOT / "modules" / "_shared" / "jsonnum.py"
+    check(shared.is_file(), "2b · 共享文件 modules/_shared/jsonnum.py 存在")
+    for p in apps:
+        name = p.parent.name
+        df = (p.parent / "Dockerfile").read_text(encoding="utf-8")
+        check("COPY modules/_shared/jsonnum.py ./" in df,
+              f"2b · {name} 的 Dockerfile 拷了共享文件",
+              "★ 没拷的话镜像里 `from jsonnum import ...` 直接 ImportError")
+
+    # ---- 配套：compose 里这些模块的构建上下文要够得着 modules/_shared/
+    #   ★ 这一步是**必须的**：上下文若是模块目录自己，就够不到上一级，
+    #     构建会以「找不到 COPY 源」失败 —— 而失败信息很难读。
+    comp = yaml.safe_load((ROOT / "docker-compose.skeleton.yml").read_text(encoding="utf-8"))
+    ctxs: dict[str, str] = {}
+    for svc, cfg in (comp.get("services") or {}).items():
+        b = cfg.get("build")
+        if isinstance(b, dict):
+            ctxs[(b.get("dockerfile") or "").strip()] = str(b.get("context", ""))
+        elif isinstance(b, str):
+            ctxs[f"{b.strip().rstrip('/')}/Dockerfile"] = b.strip()
+    for p in apps:
+        name = p.parent.name
+        rel = f"modules/{name}/Dockerfile"
+        ctx = ctxs.get(rel)
+        if ctx is None:
+            check(False, f"2b · {name} 在 compose 里有构建配置",
+                  f"★ 没找到 {rel} —— 要么服务漏了，要么 dockerfile 路径改了")
+        else:
+            check(ctx == ".",
+                  f"2b · {name} 的构建上下文是根目录（够得着 modules/_shared/）",
+                  f"实际 {ctx!r}")
+
+    # ---- ★ 元测试：假源码必须被人造出来
+    #   ★★ 没有这一段，`_guard_findings` 退化成「永远返回空列表」也没人知道。
+    HEAD = "from fastapi import FastAPI\nfrom jsonnum import NoResponseModel\napp = FastAPI()\n"
+    ROUTE = "@app.get('/x')\ndef h():\n    return {}\n"
+    good = HEAD + "app.router.route_class = NoResponseModel\n" + ROUTE
+    late = HEAD + ROUTE + "app.router.route_class = NoResponseModel\n"
+    kwarg = "from fastapi import FastAPI\nfrom jsonnum import NoResponseModel\napp = FastAPI(route_class=NoResponseModel)\n" + ROUTE
+    noimp = "from fastapi import FastAPI\napp = FastAPI()\napp.router.route_class = NoResponseModel\n" + ROUTE
+    check(not _guard_findings(good), "★ 元测试：挂对了的假源码，判据判「干净」")
+    check(bool(_guard_findings(late)),
+          "★ 元测试：守卫挂在路由**之后**，判据必须报红", "；".join(_guard_findings(late)))
+    check(bool(_guard_findings(kwarg)),
+          "★ 元测试：只写 `FastAPI(route_class=...)`，判据必须报红",
+          "；".join(_guard_findings(kwarg)))
+    check(bool(_guard_findings(noimp)),
+          "★ 元测试：没 import 就用，判据必须报红", "；".join(_guard_findings(noimp)))
+
+
+
 # ════════════════════════════════════════════════════════ §3 端到端载荷（打活服务）
 #
 # ★★★★★ 这一节为什么改成「打活服务」而不是「假 DAO + TestClient」：
@@ -354,6 +488,7 @@ def main() -> int:
     print("=" * 78)
     section1()
     section2()
+    section2b()
     ran = section3()
     print("\n" + "=" * 78)
     if _FAILS:
@@ -363,7 +498,7 @@ def main() -> int:
         return 1
     if not ran:
         # ★ 跳到过的检查不许报「全部通过」 —— 那正是「假绿」。
-        print("通过（§1 §2 全绿）；§3 **跳过**（活服务不可达，见上）")
+        print("通过（§1 §2 §2b 全绿）；§3 **跳过**（活服务不可达，见上）")
         return 0
     print("全部通过 ✓")
     return 0

@@ -8,10 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY modules/M9-console/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py ./
+COPY modules/M9-console/app.py ./
+COPY modules/_shared/jsonnum.py ./
 # 各页面：自包含 HTML（内联 JS/CSS，无构建步骤），随镜像一起带。
 #
 # ⚠⚠ 这里原先是一行一个文件（`COPY geo.html ./`、`COPY geometry.html ./` …）。
@@ -25,10 +26,10 @@ COPY app.py ./
 #    ★ 一份要人手维护的清单，就是一份迟早会漏的清单。所以这里改成**通配**：
 #      新增 .py / .html **不需要动这个文件**，这一类故障从根上消失。
 #      （对应宪法 VI 第①条：不许把平台自身的组成写成手工清单。）
-COPY *.py ./
-COPY *.html ./
+COPY modules/M9-console/*.py ./
+COPY modules/M9-console/*.html ./
 # 配置外置：config/ 随镜像带默认值，生产由 volume/环境变量覆盖（五件套第 3 件）
-COPY config/ ./config/
+COPY modules/M9-console/config/ ./config/
 
 EXPOSE 8000
 

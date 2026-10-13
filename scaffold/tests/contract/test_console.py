@@ -483,9 +483,17 @@ def main() -> int:
             if _s.upper().startswith("COPY "):
                 _srcs = _s[5:].split()[:-1] or _s[5:].split()[:1]
                 for _src in _srcs:
-                    if _src == name:
+                    # ★★★ 比**文件名**，不比路径（2026-10-13，T045 收尾）。
+                    #   起因：构建上下文从「模块目录」改成 scaffold 根目录后，
+                    #   `COPY *.py ./` 变成了 `COPY modules/M9-console/*.py ./`，
+                    #   于是这条判据红了 —— **红得对**，但它红的原因是
+                    #   「文本长什么样变了」，而不是「容器里有没有那个文件」。
+                    #   ★ 这正是本函数上面那段注释警告过的同一个毛病，我又踩了一次。
+                    #   ⇒ 取 basename 之后，两种写法都认，判据测的是**文件名**。
+                    _base = pathlib.PurePosixPath(_src).name
+                    if _base == name:
                         return True
-                    if _src.startswith("*.") and name.endswith(_src[1:]):
+                    if _base.startswith("*.") and name.endswith(_base[1:]):
                         return True
         return False
 
@@ -513,6 +521,23 @@ def main() -> int:
     ok("元测试（正向）：改成通配后**不许**再误报 —— "
        "否则「把清单改成通配」这个修复动作本身会把判据搞红",
        not _missing, f"误报 {_missing}")
+    # ★ 元测试（第三个方向）：**带目录前缀**的写法也要认。
+    #   2026-10-13 构建上下文统一成 scaffold 根目录之后，M9 的
+    #   `COPY *.py ./` 变成 `COPY modules/M9-console/*.py ./` ——
+    #   判据当时红了，而且红在「文本变了」而不是「文件没进镜像」。
+    #   ★ 这一条钉住它：换上下文、换前缀，判据都不许跟着抖。
+    _prefixed = ("FROM python:3.11-slim\n"
+                 "COPY modules/M9-console/app.py ./\n"
+                 "COPY modules/M9-console/*.py ./\n"
+                 "COPY modules/M9-console/*.html ./\n")
+    _saved, _dockerfile = _dockerfile, _prefixed
+    try:
+        _miss_pref = [n for n in _mods if not _covered_by(n)]
+    finally:
+        _dockerfile = _saved
+    ok("元测试（第三个方向）：带 `modules/M9-console/` 前缀的 COPY 也认 —— "
+       "构建上下文换了，判据不许跟着抖",
+       not _miss_pref, f"误报 {_miss_pref}")
 
     # 两个页面互相可达：点得到才算"导航"，不然只是一句口号
     ok("首页链到 /geometry（导航真的连上了）", 'href="/geometry"' in client.get("/").text)

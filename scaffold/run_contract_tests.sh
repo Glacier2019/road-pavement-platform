@@ -22,6 +22,18 @@ cd "$(dirname "$0")"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$PWD/../.uvcache}"
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PWD/../.uvpython}"
 
+# ★★★★★ 共享模块目录必须可 import（2026-10-13，T045 收尾）。
+#   各 Dockerfile 都把 `modules/_shared/jsonnum.py` 拷到镜像的 `/app/`，
+#   于是容器里 `from jsonnum import ...` 能用。测试进程里没有那一步，
+#   所以这里补上 —— **一处**，覆盖全部测试以及**以后新增的每一条**。
+#
+#   ★ 为什么不改在各测试里：全仓库有 24 处手写 `sys.path.insert(0, …)`，
+#     照着补 4 处就是又抄一份**没人校的清单** —— 正是我们栽过三次的缺陷类。
+#     改在跑测器上，新测试自动进网。
+#   ⚠ 直接 `uv run python tests/contract/xxx.py` 单跑时**没有**这一层，
+#     需要自己带 `PYTHONPATH=modules/_shared`；见 tests/README.md。
+export PYTHONPATH="$PWD/modules/_shared${PYTHONPATH:+:$PYTHONPATH}"
+
 PY_DEPS=(--with jsonschema --with pyyaml --with pydantic)
 DAO_DEPS=(--with "psycopg[binary,pool]==3.2.3")
 # ★★ PYDAO = PY 依赖 + psycopg。

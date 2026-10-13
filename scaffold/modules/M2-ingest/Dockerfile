@@ -36,6 +36,7 @@ COPY modules/M2-ingest/adapters /app/adapters
 #   **陈旧镜像会把"新代码没进镜像"这类错误整个盖住**。
 #   顶层 .py 恰好就是全部运行时模块，通配可杜绝再次漏列；
 #   子目录 tools/ 不受 `*.py` 影响，仍按下方说明刻意不进镜像。
+COPY modules/_shared/jsonnum.py ./
 COPY modules/M2-ingest/*.py ./
 
 # 一次性转换工具 tools/tsf2txt.py **刻意不进镜像**：它是运维在导入前手工跑的

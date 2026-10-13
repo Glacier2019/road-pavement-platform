@@ -8,12 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY modules/M4-governance/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 配置外置：规则文件随镜像带上作为**默认**，生产由 volume/环境变量覆盖
-COPY app.py ./
-COPY config/ ./config/
+COPY modules/M4-governance/app.py ./
+COPY modules/_shared/jsonnum.py ./
+COPY modules/M4-governance/config/ ./config/
 
 EXPOSE 8000
 

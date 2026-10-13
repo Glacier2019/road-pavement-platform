@@ -35,6 +35,7 @@ from adapters.errors import ImportError_, ParseBlocked, SourceInvalid  # noqa: F
 from design_import import LoadError
 from models import SCHEMA_VERSION, WimEvent
 import violations
+from jsonnum import NoResponseModel  # noqa: E402
 
 LOG = logging.getLogger("ingest")
 logging.basicConfig(
@@ -377,6 +378,15 @@ app = FastAPI(
                 "契约见 contracts/topics.yaml 与 contracts/messages/wim_axle.v1.schema.json",
     lifespan=lifespan,
 )
+
+# ★★★★★ numeric 列必须以**数字**出去（2026-10-13，T045）。
+#   FastAPI 会把**带返回注解**的路由交给 pydantic 序列化，而 pydantic 的
+#   `Decimal` JSON 序列化保精度 ⇒ 输出**字符串**。实测 M6 有 10 条路由中招。
+#   本模块目前不返回 Decimal，所以**没响** —— 但坑是架着的，今天先拆掉。
+#   ★ 必须写在这里，**不能**写成 `FastAPI(route_class=...)`：`FastAPI.__init__`
+#     没有这个形参，多余的 kwarg 被 Starlette 当 `**extra` **静默吞掉**，
+#     不报错、不警告、看着像好了。实测对比见 modules/_shared/jsonnum.py。
+app.router.route_class = NoResponseModel
 
 
 @app.get("/healthz", summary="健康检查（含依赖自检）")
