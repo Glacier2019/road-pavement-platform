@@ -187,27 +187,130 @@ def main() -> int:
     print("\n=== 4) M6（api）不得直连存储 —— 这是 M3 落地的意义所在 ===")
     # 用 AST 判定而非正则：正则会把注释/文档字符串里的词误判成代码
     # （本次自测就踩到过——"骨架期本文件自己持有 ConnectionPool" 是句注释）。
-    tree = ast.parse(API_APP.read_text(encoding="utf-8"))
-    problems: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            problems += [f"import {a.name}" for a in node.names if a.name.split(".")[0] == "psycopg"]
-        elif isinstance(node, ast.ImportFrom):
-            if (node.module or "").split(".")[0] == "psycopg":
-                problems.append(f"from {node.module} import ...")
-        elif isinstance(node, ast.Name) and node.id == "ConnectionPool":
-            problems.append("用 ConnectionPool")
-        elif isinstance(node, ast.Attribute) and node.attr == "execute":
-            problems.append("直接调 .execute(")
-        elif isinstance(node, ast.Name) and node.id in ("cursor",):
-            problems.append("持有 cursor")
-    if problems:
-        for q in sorted(set(problems)):
-            print(f"  ✗ {q} → M6 又回去直连库了")
-            fails.append(f"api/app.py 直连存储：{q}")
+    #
+    # ★★ 005 T031：**原来这条只扫 app.py 一个文件**，靠的是「文件名单」。
+    #    而 005 恰恰是最容易顺手在别的文件里连库的一次改动：
+    #      · `geo.py` —— 读坐标基准，最短的偷懒路径就是自己查一下 design_project；
+    #      · `M9-console/crs_drift.py` —— 它要做「文件 vs 库」的比对，
+    #        最直接的写法就是自己去连库（M9 的硬线是**不得直连数据库**，
+    #        它必须经 /gw → M6 → M3）。
+    #    ★ 宪法 §II 的措辞是「**结构上做不到**」，不是「AST 恰好没查到」。
+    #      只扫一个文件名，守的是「当时想到的那一个」，不是「结构」。
+    #    ⇒ 改成一张**清单**，并且把「清单本身是不是全」也变成判据（见下面 4b）。
+    _NO_DB_FILES = [
+        ("api/app.py", API_APP),
+        ("api/geo.py", ROOT / "modules" / "M6-api" / "geo.py"),
+        # ★ gaps.py 是 4b 那条覆盖率检查**当场抓出来的** ——
+        #   我原本不知道有这个文件。它自己声明「不碰数据库，只做拼装」，
+        #   扫描器也确认清白。★ 这就是 4b 存在的意义：
+        #   清单漏一个文件，比清单里某一行不干净更隐蔽。
+        ("api/gaps.py", ROOT / "modules" / "M6-api" / "gaps.py"),
+        ("console/crs_drift.py", ROOT / "modules" / "M9-console" / "crs_drift.py"),
+    ]
+
+    def _scan_no_db_src(src: str) -> list[str]:
+        """返回这段源码里「直连存储」的证据；空列表 = 干净。"""
+        found: list[str] = []
+        t = ast.parse(src)
+        # ★ 文档字符串里的词不算证据（用节点 id 精确排除，不用正则）
+        doc_ids = set()
+        for n in ast.walk(t):
+            if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                d = ast.get_docstring(n, clean=False)
+                if d is not None and n.body and isinstance(n.body[0], ast.Expr):
+                    doc_ids.add(id(n.body[0].value))
+        for node in ast.walk(t):
+            if isinstance(node, (ast.Constant,)) and id(node) in doc_ids:
+                continue
+            if isinstance(node, ast.Import):
+                found += [f"import {a.name}" for a in node.names
+                          if a.name.split(".")[0] == "psycopg"]
+            elif isinstance(node, ast.ImportFrom):
+                if (node.module or "").split(".")[0] == "psycopg":
+                    found.append(f"from {node.module} import ...")
+            elif isinstance(node, ast.Name) and node.id == "ConnectionPool":
+                found.append("用 ConnectionPool")
+            elif isinstance(node, ast.Attribute) and node.attr == "execute":
+                found.append("直接调 .execute(")
+            elif isinstance(node, ast.Name) and node.id in ("cursor",):
+                found.append("持有 cursor")
+            # ★ 还有两条更隐蔽的：dsn/连接串这类字符串常量，和 connect()
+            elif isinstance(node, ast.Name) and node.id in ("connect", "PG_DSN"):
+                found.append(f"用 {node.id}")
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and "postgresql://" in node.value:
+                found.append("硬写 postgresql:// 连接串")
+        return found
+
+    for _label, _p in _NO_DB_FILES:
+        if not _p.is_file():
+            print(f"  ✗ {_label} 不存在 —— 清单里点了名却没有，"
+                  f"说明这条判据在守一个不存在的东西（rename 后最容易漏）")
+            fails.append(f"{_label} 不存在，第 4 条判据失效")
+            continue
+        _probs = _scan_no_db_src(_p.read_text(encoding="utf-8"))
+        if _probs:
+            for q in sorted(set(_probs)):
+                print(f"  ✗ {_label}: {q} → 又回去直连库了")
+                fails.append(f"{_label} 直连存储：{q}")
+        else:
+            print(f"  ✓ {_label}：无 psycopg import、无 ConnectionPool、"
+                  f"无 .execute(、无 cursor、无连接串")
+    if not any(f.startswith(tuple(f"{l} " for l, _ in _NO_DB_FILES)) for f in fails):
+        print("  ✓ 结论：这几个文件只能经 rpdao / HTTP 取数，**结构上**无法直连库")
+
+    # ---- 4b) ★ 元测试：清单是不是「全」的 ---------------------------------
+    # ★★ 光有清单还不够 —— 上面那段守的是「清单里那几个文件干净」，
+    #    而 005 之前的毛病正是**清单漏了一个文件**（app.py 干净，
+    #    geo.py 没人看）。所以必须再守一句：清单**覆盖了该覆盖的**。
+    #    判据：M6-api 目录下每个 .py，要么在清单里，要么明确被排除。
+    # ★ 被排除的要写出理由，不是默默跳过 —— 默默跳过就是漏的下一次。
+    _EXEMPT: dict[str, str] = {}  # 目前没有豁免项
+    _m6_dir = ROOT / "modules" / "M6-api"
+    _listed = {p.resolve() for _, p in _NO_DB_FILES}
+    _m6_py = sorted(p for p in _m6_dir.glob("*.py") if p.name != "__init__.py")
+    _uncovered = [p.name for p in _m6_py
+                  if p.resolve() not in _listed and p.name not in _EXEMPT]
+    if _uncovered:
+        print(f"  ✗ M6-api 下这些 .py 既不在「不得连库」清单里、也没写豁免理由："
+              f"{_uncovered}")
+        fails.append(f"第 4 条判据的文件清单不全：{_uncovered}")
     else:
-        print("  ✓ 无 psycopg import、无 ConnectionPool、无 .execute(、无 cursor")
-        print("  ✓ 结论：M6 只能经 rpdao 取数，**结构上**无法直连库")
+        print(f"  ✓ 清单完整性：M6-api 下 {len(_m6_py)} 个 .py 全部有归属"
+              f"（{'、'.join(p.name for p in _m6_py)}）")
+
+    # ---- 4c) ★ 元测试：扫描器本身灵不灵 --------------------------------
+    # ★★ 一个永远返回「干净」的扫描器，会让上面整段**全绿**。
+    #    所以两个方向都要试：
+    #      ① 真连库的源码 → 必须报红（否则它是个摆设）；
+    #      ② 只在**文档字符串**里提到 psycopg → 必须不报
+    #         （这正是本判据当初改用 AST 而不用正则的原因，004 踩过）。
+    _must_flag = [
+        ("import psycopg", "import"),
+        ("from psycopg.rows import dict_row", "from import"),
+        ("pool = ConnectionPool(conninfo=dsn)", "ConnectionPool"),
+        ("cur = dao.cursor()\ncur.execute('select 1')", ".execute("),
+        ("conn = connect('postgresql://rp:x@h/db')", "连接串 + connect"),
+    ]
+    _missed = [why for src, why in _must_flag if not _scan_no_db_src(src)]
+    if _missed:
+        print(f"  ✗ 元测试：下面这些「直连库」写法**没被认出来**：{_missed}")
+        fails.append(f"第 4 条扫描器漏判：{_missed}")
+    else:
+        print(f"  ✓ 元测试：{len(_must_flag)} 种直连库写法**全部**被认出来")
+
+    _must_not_flag = [
+        '"""本模块不得直连库：不许 import psycopg，也不许 ConnectionPool。"""\nx = 1\n',
+        'def f():\n    """走 rpdao，不要 cursor"""\n    return 1\n',
+    ]
+    _false_alarms = [s.strip().splitlines()[0][:30]
+                     for s in _must_not_flag if _scan_no_db_src(s)]
+    if _false_alarms:
+        print(f"  ✗ 元测试：只在文档字符串里提到的**被误判**成证据：{_false_alarms}")
+        fails.append(f"第 4 条扫描器误报：{_false_alarms}")
+    else:
+        print("  ✓ 元测试：只在文档字符串里提到 psycopg/ConnectionPool **不算**证据"
+              "（AST 判定，不是正则）")
 
     # ------------------------------------------------------ 5) SQL 参数类型回归
     print("\n=== 5) 可选筛选项必须显式 cast（骨架期恒定 500 的根因）===")
