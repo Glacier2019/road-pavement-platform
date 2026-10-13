@@ -585,6 +585,27 @@ class GeRepository(DomainRepository):
     #: 只读、单列、单值。**不接受任意列名** —— 那会把这条通道变回通用查询。
     _SRID_EXISTS_SQL = "SELECT 1 AS ok FROM spatial_ref_sys WHERE srid = %(srid)s::int"
 
+    #: 从 `proj4text` 里取出**投影族**（`+proj=tmerc` → `tmerc`）。
+    #:
+    #: ★★ 2026-10-13（005 / T043）：这一列是**手写换算能不能算**的唯一判据来源。
+    #:    `T003` 实测发现的那个洞：数据模型按宪法 §VI 接受了**任意 SRID**，
+    #:    而 `geo.py` 的手写换算**只实现了高斯-克吕格**。
+    #:    `crs_epsg` 被填成 `2154`（Lambert，`+proj=lcc`）时，旧代码会
+    #:    把它喂进高斯-克吕格公式，**产出一个看起来完全正常的错值**。
+    #:
+    #: ★ 为什么不写一张「支持哪些 SRID」的白名单：
+    #:    白名单要手维护，加一个新带号就得改代码；而 **`proj4text` 是 PROJ 自己维护的**，
+    #:    它说什么族就是什么族。★ 而且白名单会漏 —— 漏掉的那个 SRID 不会报错，
+    #:    它只是**不做检查**（同 §4「文件名单」的失效形状）。
+    #:
+    #: ★★ 为什么不按投影的**人类名字**去查（如「高斯-克吕格」）：
+    #:    `spatial_ref_sys` 里同样的拼写有好几种，`srid=4524` 与 `4548` 的
+    #:    `srtext` 措辞并不一致。**只有 `proj4text` 的 `+proj=` 是机器可判的。**
+    _SRID_FAMILY_SQL = (
+        "SELECT substring(proj4text from '\\+proj=([a-z0-9_]+)') AS fam "
+        "FROM spatial_ref_sys WHERE srid = %(srid)s::int"
+    )
+
     def srid_exists(self, srid: int) -> bool:
         """这个 SRID 在 PostGIS 的坐标系登记表里查得到吗？（FR-005 / I1）
 
@@ -602,6 +623,40 @@ class GeRepository(DomainRepository):
           只在换基准时静默算错。
         """
         return self._dao.query_one(self._SRID_EXISTS_SQL, {"srid": int(srid)}) is not None
+
+    def crs_family(self, srid: int) -> str | None:
+        """这个 SRID 用的是**哪个投影族**？（005 / T043）
+
+        返回 `'tmerc'` / `'lcc'` / `'utm'` / `'longlat'` …；
+        SRID 查不到、或它的 `proj4text` 里没有 `+proj=`，返回 `None`。
+
+        ★★★ 为什么这个方法是「看着正常的错值」那类缺陷的解药
+        ---------------------------------------------------
+        数据模型按宪法 §VI **接受任意 SRID**（这是对的 —— 通用产品不能被
+        自己的实现限制住入库）。但手写换算**只实现了高斯-克吕格**。
+        两者合起来的旧行为是：填一个 `2154`（Lambert），代码**不报错**，
+        把 Lambert 的参数当高斯-克吕格算，**输出一个量级正常、位置错掉几百米的坐标**。
+
+        ★★ 这正是 004 立下的那条教训的形状 ——
+          「**看着正常的错值比缺失更危险**」：
+          缺失会被发现（503、空值、报错），错值不会，它会一路流到放样桩上。
+
+        ★ 所以职责划分是：**「能入库」和「能算」是两件事，中间必须有人说话。**
+          · 数据库层（FK + 守卫）：只保证 SRID **存在**
+          · 这一层：把「存在」翻译成「它是什么族」
+          · `geo.py`：声明**自己实现了哪些族**，不在列就抛错
+          · `app.py`：把那个错翻成 503，并在消息里**说出 SRID**
+
+        ★ 为什么不在这里判「支持不支持」：
+          那样 M3 就得知道 M6 实现了什么，两个模块会**互相锁死** ——
+          改 `geo.py` 支持的族，还得回来改 M3。族是**客观事实**（PROJ 说的），
+          「支持」是**某个实现的属性**，所以它们属于不同的层。
+        """
+        row = self._dao.query_one(self._SRID_FAMILY_SQL, {"srid": int(srid)})
+        if row is None:
+            return None
+        fam = row.get("fam")
+        return str(fam) if fam else None
 
     @staticmethod
     def check_i1(row: dict[str, Any], effective: dict[str, Any],

@@ -614,8 +614,28 @@ def _geo_crs(section_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
         #   而那个窗口的后果是两级看似一致、其实不等。
         row = dao.ge.section(section_id)
         eff = dao.ge.effective_crs(row)
+        # ★★ 005 / T043：把「这个 SRID 是什么投影族」问出来（M3 是唯一有连接的层）。
+        #    ★ 它必须在**同一个 try** 里：不然数据库一断，上面两次读抛 DaoError、
+        #      这一次会漏出去变成一个 500 —— 同一类故障出现两种状态码。
+        _fam = None if eff["epsg"] is None else dao.ge.crs_family(eff["epsg"])
     except DaoError as exc:
         raise _http(exc) from exc
+
+    # ★ `assumed: true`（值是猜的）**没有 EPSG**，所以没有族可查。
+    #   但这不算「猜」：在这套模型里，「假定值」**只能**用「带号 + 中央子午线」
+    #   表达，而那套表达就是高斯-克吕格。所以这是**声明**，不是推断。
+    #   ★ 反过来说：如果哪天模型允许「假定值 + 别的投影」，这一行就是错的 ——
+    #     所以它写在这里、只有一个地方，而不是散在四条路由里。
+    if _fam is None and eff["epsg"] is None:
+        _fam = "tmerc"
+    if _fam is None:
+        # EPSG 在库里（外键保证），但 `spatial_ref_sys` 里取不到 `+proj=`。
+        # ★ 这是「**不知道**它是什么族」，不是「支持」。不许放行。
+        raise HTTPException(503, (
+            f"坐标基准不可用：路段 {section_id} 的 crs_epsg={eff['epsg']}，"
+            "但在 `spatial_ref_sys` 里取不到它的投影族（`proj4text` 里没有 `+proj=`）。"
+            "**「不知道」不是「支持」** —— 不猜，拒绝计算。"
+        ))
 
     doc = {"geographic_frame": {
         "zone_number": eff["zone_number"],
@@ -627,11 +647,28 @@ def _geo_crs(section_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
         #   库里它就是权威字段本身，所以这里是**映射，不是改名** ——
         #   目的是让 `load_crs` 的校验逻辑与 004 逐字一致，一个字都不用动。
         "epsg_after_confirm": eff["epsg"],
+        # ★★ 005 / T043：本实现算不算得了它，由 `load_crs` 里的
+        #    `require_family` 判 —— 族不在 `IMPLEMENTED_FAMILIES` 里就抛 CrsError，
+        #    下面翻成 503。
+        #    ★ 现场：数据模型接受**任意 SRID**（宪法 §VI），而手写换算
+        #      **只实现了高斯-克吕格**。填 `2154`（Lambert）时旧代码不报错，
+        #      会算出一个量级正常、位置错掉几百米的坐标。
+        "projection_family": _fam,
     }}
     try:
         return geo_mod.load_crs(doc, origin=f"路段 {section_id} 的生效基准"), eff
     except geo_mod.CrsError as exc:
-        raise HTTPException(503, f"坐标基准不可用：{exc}") from exc
+        # ★★ 005 / T043：消息里**必须说出那个 SRID 是什么**。
+        #    · `require_family` 报的是**族**（`lcc`）—— 那是「算法层」的说法；
+        #      而运维/数据录入的人手里看到的是 **EPSG 编码**。
+        #      只说族，他要先去查「lcc 对应哪个 SRID」才能动手；
+        #      只说 SRID，他不知道为什么不行。**两个都要说。**
+        #    · ★ 兜底那句话也不能省：一个没有内容的 503 会被人当成
+        #      「服务挂了」，然后去重启 —— 而真正要改的是那一行的 `crs_epsg`。
+        _srid_txt = ("未填 EPSG" if eff["epsg"] is None else f"EPSG:{eff['epsg']}")
+        raise HTTPException(503, (
+            f"坐标基准不可用：路段 {section_id} 的 {_srid_txt} —— {exc}"
+        )) from exc
 
 
 def _geo_elements(section_id: int) -> list[dict[str, Any]]:

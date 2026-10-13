@@ -150,19 +150,19 @@ description: "Task list for 005-project-crs-binding"
 
 **★ 标尺只在测试里用，不在生产路径上。** 生产仍是手写算、不连库。
 
-- [ ] T038 在 `scaffold/tests/contract/test_region_frame.py` 加一段**独立对拍**：取路线两端与中心共三个点，把手写 `forward()` 的结果与数据库里 `ST_Transform(ST_SetSRID(ST_MakePoint(lon,lat),4326), 4548)` 逐点比对。★ 桶必须选**连库的那个**（`DAO` 或 `CONSOLE`），不能选 `PY` —— 否则这条测试跑不起来
-- [ ] T039 给 T038（`scaffold/tests/contract/test_region_frame.py`）定容差并写明依据：基线是 **9 µm**（north）、**逐位相同**（east），实测于 2026-10-12。★ 容差取 **1e-4 m（0.1 mm）**，比实测基线宽一个量级；**不许取 1e-9** —— 那是拿浮点噪声当判据
-- [ ] T040 ★ 给 T038 **配一个元测试**（宪法 §V）：把 `geo.py` 里某个系数注入一个可观偏差（如 `Y0 = 500000.0` 改成 `500001.0`），**断言对拍变红**。★★ 不做这一步，就无从知道这条测试是「真的在比」还是「两边都调了同一个函数」
-- [ ] T041 ★ 在 `scaffold/tests/contract/test_region_frame.py` 里 T038 那段旁边写下**这条判据的适用边界**：它只在**同基准**变换（CGCS2000 → CGCS2000）上成立。**跨基准时**（如 WGS84 → CGCS2000）两个实现**可能合法地不一致**，那时不能简单判红，得先判「谁该对」。★ 不写这一句，将来会有人拿它去判一个它管不了的案子
-- [ ] T042 在 `specs/005-project-crs-binding/quickstart.md` 末尾加**第 10 步**：跑一次对拍，并把 north/east 的实际差值与 9 µm 基线并列打印 ★ 让「它有多准」变成一个每次验收都看得见的数
-- [ ] T043 ★★★ **声明手写路径到底能算哪些投影族**，算不了的**当场报错（503），MUST NOT 沉默**。★★ 分工按宪法 II（读只经 M3），**不是全放 geo.py**：
+- [x] T038 在 `scaffold/tests/contract/test_region_frame.py` 加一段**独立对拍**：取路线两端与中心共三个点，把手写 `forward()` 的结果与数据库里 `ST_Transform(ST_SetSRID(ST_MakePoint(lon,lat),4326), 4548)` 逐点比对。★ 桶必须选**连库的那个**（`DAO` 或 `CONSOLE`），不能选 `PY` —— 否则这条测试跑不起来
+- [x] T039 给 T038（`scaffold/tests/contract/test_region_frame.py`）定容差并写明依据：基线是 **9 µm**（north）、**逐位相同**（east），实测于 2026-10-12。★ 容差取 **1e-4 m（0.1 mm）**，比实测基线宽一个量级；**不许取 1e-9** —— 那是拿浮点噪声当判据
+- [x] T040 ★ 给 T038 **配一个元测试**（宪法 §V）：把 `geo.py` 里某个系数注入一个可观偏差（如 `Y0 = 500000.0` 改成 `500001.0`），**断言对拍变红**。★★ 不做这一步，就无从知道这条测试是「真的在比」还是「两边都调了同一个函数」
+- [x] T041 ★ 在 `scaffold/tests/contract/test_region_frame.py` 里 T038 那段旁边写下**这条判据的适用边界**：它只在**同基准**变换（CGCS2000 → CGCS2000）上成立。**跨基准时**（如 WGS84 → CGCS2000）两个实现**可能合法地不一致**，那时不能简单判红，得先判「谁该对」。★ 不写这一句，将来会有人拿它去判一个它管不了的案子
+- [x] T042 在 `specs/005-project-crs-binding/quickstart.md` 末尾加**第 10 步**：跑一次对拍，并把 north/east 的实际差值与 9 µm 基线并列打印 ★ 让「它有多准」变成一个每次验收都看得见的数
+- [x] T043 ★★★ **声明手写路径到底能算哪些投影族**，算不了的**当场报错（503），MUST NOT 沉默**。★★ 分工按宪法 II（读只经 M3），**不是全放 geo.py**：
   · `scaffold/modules/M3-rpdao/rpdao/repo.py`：从 `spatial_ref_sys.proj4text` 取出**投影族**（`+proj=tmerc` → `tmerc`），放进 `effective_crs()` 的返回值 —— **只有它有连接**
   · `scaffold/modules/M6-api/geo.py`：声明 `IMPLEMENTED_FAMILIES = {"tmerc"}`，族不在此列就抛 `CrsError` —— **它零数据库**（T003 实测：`geo.py` 765 行，`psycopg|connect|PG_DSN|cursor|execute` 只命中 1 处，是 L176 的 docstring）
   · `scaffold/modules/M6-api/app.py`：`CrsError` → 503（`_geo_crs()` L466-474 **已经是这个形状**，不必新加机制）
   ★ 现场：数据模型现在接受**任意 SRID**（宪法原则 VI），但手写换算**只实现了高斯-克吕格**。若 `crs_epsg` 被填成 `2154`（Lambert），今天的代码会**把它喂进高斯-克吕格公式，产出一个看起来正常的错值**。
   ★★ 这正是 004 那条教训的形状 —— **「看着正常的错值比缺失更危险」**。
   ★ 判据：`crs_epsg` 不在已实现集合内时，`_geo_crs()` 抛 503，**错误信息 MUST 说出那个 SRID 是什么**（与 T018 同形）
-- [ ] T044 ★ 给 `scaffold/tests/contract/test_region_frame.py` 里的 T043 **配一个元测试**（宪法 §V）：把 `crs_epsg` 改成 `2154`，**断言接口返回 503 且错误信息里含 `2154`**，而不是返回一个坐标
+- [x] T044 ★ 给 `scaffold/tests/contract/test_region_frame.py` 里的 T043 **配一个元测试**（宪法 §V）：把 `crs_epsg` 改成 `2154`，**断言接口返回 503 且错误信息里含 `2154`**，而不是返回一个坐标
   ★★ 不做这一步，就无从知道那个「算不了」的判断是**真的在执行**，还是只是写在注释里
 
 **★ 为什么这一段值这个位置**：现在那四十行只实现**一个投影族**（高斯-克吕格）。有了标尺，将来加 UTM / Lambert 就是「加一个 SRID + 让同一套比对去验它」；没有标尺，每加一个族就是新写一份**没有独立核对**的实现。

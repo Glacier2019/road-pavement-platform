@@ -46,6 +46,7 @@ from m2geom import geom
 
 __all__ = [
     "CrsError", "StationOutsideAlignment",
+    "IMPLEMENTED_FAMILIES", "require_family",
     "load_crs", "crs_path",
     "turn_sign", "as_adapter_element", "as_adapter_elements",
     "inverse", "forward",
@@ -63,6 +64,66 @@ class CrsError(RuntimeError):
       调用方正常工作，只在换基准时静默算错。错带号的特征是纬度不变、
       经度整体平移一个带宽 —— 谁也不会觉得奇怪。
     """
+
+
+#: 本模块的手写换算**实现了哪些投影族**（005 / T043）。
+#:
+#: ★★★ 这个集合是**自述**，不是能力声明 —— 它必须与文件里真实存在的那套公式一致。
+#:     现在它是 `{"tmerc"}`，因为下面那四十行就是 3 度带高斯-克吕格。
+#:     **加一个族，就要同时加一份对拍**（见 `tests/contract/test_region_frame.py` §19）
+#:     —— 否则新族就是一份**没有独立核对**的实现，而那正是 §19 存在的理由。
+#:
+#: ★★ 为什么需要这个集合：数据模型按宪法 §VI **接受任意 SRID**，
+#:    而 `crs_epsg` 一旦被填成 `2154`（Lambert，`+proj=lcc`），
+#:    旧代码会把它喂进下面的高斯-克吕格公式，**算出一个看着正常的错值**。
+#:    「看着正常的错值比缺失更危险」—— 这正是 004 立下的那条教训。
+#:
+#: ★ 为什么不在这里写一张「支持的 SRID」白名单：
+#:    · 白名单要手维护，加一个带号就得改代码；族是 PROJ 说的客观事实，不用我们记
+#:    · 白名单会漏。漏掉的 SRID **不报错**，它只是不做检查 ——
+#:      和「不得连库」那份文件名单是**同一种失效形状**（见 §4b 的教训）
+#:    · `4548` 与 `4524` 是同一个族，列两遍就是两份会漂的真相
+#:    ⇒ **只声明族，不声明 SRID。**
+IMPLEMENTED_FAMILIES = frozenset({"tmerc"})
+
+
+def require_family(gf: Mapping[str, Any], *, origin: str) -> str:
+    """核对 `gf["projection_family"]` 是否在 :data:`IMPLEMENTED_FAMILIES` 里。
+
+    返回该族；算不了就抛 :class:`CrsError`，**消息里必须说出是哪个族**。
+
+    ★★ 为什么「族缺失」也**报错**，而不是放行
+    ----------------------------------------
+    放行等于说「没告诉我族 = 我算得了」。这和下面两种情况是同一件事：
+    一个没配基准的路段静默用 117°E、一个没进名单的文件静默不检查。
+    **「不知道」和「支持」必须分开** —— 前者不是通过的证据。
+
+    ★ 与宪法 §VI 第②条的关系（这条我专门对过）：
+      那一条说的是「国际标准标识符（EPSG/SRID/ISO）为权威，**本地记法**可空；
+      可空字段缺失时 MUST NOT 报错」。`projection_family` **不是本地记法** ——
+      它是从 `spatial_ref_sys.proj4text` 里由 PROJ 自己维护的 `+proj=`
+      取出来的，是那个国际标识符的**派生物**。所以它不适用「缺失不报错」。
+      ★ 而且这里真正能缺的那个（EPSG 本身）在 `assumed: true` 时确实缺 ——
+        那条路径由调用方显式**声明** `tmerc`（假定值只用带号+中央子午线表达，
+        而那套表达就是高斯-克吕格），所以它也不是「不声明就放行」。
+    """
+    fam = gf.get("projection_family")
+    if fam is None:
+        raise CrsError(
+            f"{origin} 没有声明 `projection_family`，"
+            "所以无法判断本实现算不算得了它。"
+            "**「不知道」不是「支持」** —— 不声明一律拒绝，不猜。"
+        )
+    fam = str(fam)
+    if fam not in IMPLEMENTED_FAMILIES:
+        raise CrsError(
+            f"{origin} 的投影族是 `{fam}`，而本实现只实现了 "
+            f"{sorted(IMPLEMENTED_FAMILIES)}。"
+            "拒绝计算 —— 拿别的族的参数套高斯-克吕格公式，"
+            "会算出一个量级正常、位置却错掉几百米的坐标，"
+            "而它看起来完全正常。"
+        )
+    return fam
 
 
 class StationOutsideAlignment(ValueError):
@@ -348,6 +409,14 @@ def load_crs(doc: Mapping[str, Any], *,
             f"{origin}：assumed 为 false（值已确认）却没填 epsg_after_confirm。"
             "已确认就该能说出是哪个 EPSG 编码。"
         )
+
+    # ★★ 005 / T043：最后一关 —— **这个基准算不算得了**。
+    #    前面两条查的是「配置自不自洽」，这条查的是「本实现能不能算」。
+    #    ★ 顺序有意放在最后：一个自相矛盾的配置，比一个算不了的配置更该先报，
+    #      因为前者说明**数据录入就错了**，后者可能只是平台还没实现那个族。
+    #    ★★ 它是 `load_crs` 的一部分，不是调用方的事 —— 放在调用方，
+    #      就会有第二个调用方忘记加（而忘记加的后果是静默算错）。
+    require_family(gf, origin=origin)
     return gf
 
 

@@ -280,6 +280,19 @@ class _FakeGe:
     #      调用时 `self` 会被塞进 `row` 的位置，然后报一个与真因无关的 TypeError。
     effective_crs = staticmethod(GeRepository.effective_crs)
 
+    #: ★★ 005 / T043：SRID → 投影族。**假的也要有这个口** ——
+    #:    和 `list_objects` 同理：真 `dao.ge` 现在有 `crs_family`，
+    #:    假的不带，新代码就直接 `AttributeError`；更坏的是有人为了让它不响，
+    #:    把生产代码改成「不查族」—— 那就把 T043 整个绕掉了。
+    #:    · 默认空表 ⇒ 一切 SRID 都当 `tmerc`（夹具本来就是 39 带高斯-克吕格）。
+    #:    · T044 的元测试往这里塞 `{2154: "lcc"}`，断言接口返回 503。
+    #:    ★★ **改它必须还原** —— 它是类属性，会污染同进程里后面所有用例，
+    #:       而那些用例会红在一个跟本次断言毫无关系的地方。
+    FAMILY_BY_SRID: dict[int, str] = {}
+
+    def crs_family(self, srid):
+        return self.FAMILY_BY_SRID.get(int(srid), "tmerc")
+
     def list_objects(self, table, *, limit=100):
         if table != "monitor_cross_section":
             raise UnknownTable(f"GE 域无此表：{table}")
@@ -337,7 +350,16 @@ def gf():
       （`sql/99_seed_crs_39band.sql`），两者此刻相等。
       Phase 3（T013）会造**第二个**项目，那时两套基准才真正分开走。
     """
-    return GEO.load_crs(crs_doc(), origin="crs.yaml（派生产物）")
+    _doc = crs_doc()
+    # ★★ 005 / T043：`projection_family` **故意不写进 `crs.yaml`**。
+    #    · 它是 `spatial_ref_sys.proj4text` 里 `+proj=` 的直接派生物，
+    #      而文件里已经有 `epsg_after_confirm: 4548` —— 族由 SRID 唯一决定。
+    #    · 往文件里再抄一份，就是**同一件事的第二个真相来源**；
+    #      两者会漂：改了 SRID 而忘了改族，文件就自相矛盾。
+    #    · M6 已经**不读这个文件**（Q3 裁决），所以它不构成生产依赖。
+    #    ⇒ 所以由**使用方**声明，而不是让文件携带。
+    _doc["geographic_frame"]["projection_family"] = "tmerc"
+    return GEO.load_crs(_doc, origin="crs.yaml（派生产物）")
 
 
 def grid_points():
@@ -688,7 +710,17 @@ def main() -> int:
                                     (True, None, False)):
         doc = {"geographic_frame": {"zone_number": 39, "central_meridian_deg": 117,
                                     "assumed": assumed,
-                                    "epsg_after_confirm": epsg}}
+                                    "epsg_after_confirm": epsg,
+                                    # ★★ 005 / T043：`load_crs` 现在还查
+                                    #    「本实现算不算得了这个基准」。
+                                    #    ★ 这三条测的是 **assumed ↔ epsg 的不变量**，
+                                    #      不是族检查 —— 所以这里把族填成合法的，
+                                    #      让它们继续只测自己那一件事。
+                                    #    ★★ 族检查**另有其测**（§20 / T044）：
+                                    #      那里专门喂一个 `lcc` 进去断言被拒。
+                                    #      ★ 两件事不塞进同一个用例，是因为那样
+                                    #        失败时分不清是谁错了。
+                                    "projection_family": "tmerc"}}
         try:
             GEO.load_crs(doc)
             got_err = False
@@ -1416,6 +1448,7 @@ def main() -> int:
         "ready": True, "ellipsoid": "CGCS2000", "projection": "高斯-克吕格",
         "zone_width_deg": 3, "zone_number": 36, "central_meridian_deg": 108,
         "assumed": False, "epsg_after_confirm": 4545,
+          "projection_family": "tmerc",
         "evidence": ["T013 造的第二个项目：36 带，中央子午线 108°"],
     }}
     _gf36 = GEO.load_crs(_DOC_36, origin="T013 造的第二个项目")
@@ -1565,6 +1598,7 @@ def main() -> int:
             "zone_width_deg": Decimal("3.00"), "zone_number": 39,
             "central_meridian_deg": Decimal("117.000000"),
             "assumed": False, "epsg_after_confirm": 4548,
+            "projection_family": "tmerc",
         }}, origin="18a 造出来的库版基准（psycopg 会给出的类型）")
 
     # ★★ 先说清**哪一半老路根本不经过基准** —— 这是 SC-007 最强的一条论据，
@@ -2014,6 +2048,263 @@ def main() -> int:
           "★★ 18h · ★元测试：喂一个 600 的权限位 → 判据会红"
           "（否则这条永远绿：`0o044` 的判定写错了也看不出来）",
           f"0o600 & 0o044 = {0o600 & 0o044}")
+
+    # ═══════════════════════════════════════════════════════════ 19) T038–T041
+    #   独立对拍：手写投影 vs PostGIS（PROJ）—— **本仓唯一一份外部证据**。
+    print("\n=== 19) 独立对拍：手写高斯-克吕格 vs PostGIS 的 ST_Transform（SC-003）===")
+
+    # ---- 19 之前的自问：为什么非要一个「外部」参考？ ------------------------
+    # ★★ 因为在这条判据之前，「投影是准的」这件事的全部证据是
+    #    **我们自己跟自己比**：正算 → 反算 → 回到原点（§18a 那条 0.05 mm）。
+    #    往返闭合只证明 forward 和 inverse **互为逆运算**，
+    #    不证明它们**都对着同一个正确的投影** ——
+    #    两个函数一起偏，往返照样闭合，而且闭合得一样漂亮。
+    #    这与「跑一遍自己的测试全绿」是同一种自证（宪法 §VI 第③条）。
+    #    ⇒ 必须找一个**别人写的、没参与过这段代码**的实现来比。
+    #      PostGIS 里的 PROJ 就是它：它不认识我们，也不认识我们的常数。
+    #
+    # ★ T038 的分工说明：为什么用 `docker exec psql` 而不是 psycopg？
+    #   本套件挂在 `CONSOLE` 桶（fastapi ＋ httpx ＋ pyyaml，**没有 psycopg**）。
+    #   走 psql 就够拿到 PostGIS 的结果，不必为此换桶、加依赖 ——
+    #   ★ 换桶会让这条判据多一个失败理由（依赖装不上），而失败理由越多，
+    #     它真正想说的那件事就越容易被淹没。
+    _pts19 = [
+        ("起点", 25.167892132910886, 117.342920),
+        ("中点", 25.188336000000000, 117.358340),
+        ("终点", 25.208781529761435, 117.373760),
+    ]
+    _CM19, _SRID19 = 117.0, 4548
+
+    def _oracle(_want_srid: int) -> list[dict]:
+        """问 PostGIS 要三点的投影结果。取不到就抛，绝不返回空表。"""
+        _vals = ",".join(f"({la},{lo})" for _, la, lo in _pts19)
+        _q = (
+            "select json_agg(json_build_object("
+            "'n', round(st_y(st_transform(st_setsrid(st_makepoint(lo,la),4326),"
+            f"{_want_srid}))::numeric,9), "
+            "'e', round(st_x(st_transform(st_setsrid(st_makepoint(lo,la),4326),"
+            f"{_want_srid}))::numeric,9))) "
+            f"from (values {_vals}) as t(la,lo)"
+        )
+        _r = _sp.run(
+            ["docker", "exec", "rp-pg", "sh", "-c",
+             f'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "{_q}"'],
+            capture_output=True, text=True, timeout=120,
+        )
+        _out = _r.stdout.strip()
+        if not _out:
+            raise RuntimeError(
+                f"取不到 PostGIS 结果（容器没起？）stderr={_r.stderr.strip()[:200]}")
+        return json.loads(_out)
+
+    # ★★ 「取不到」必须**失败**，不许算通过、也不许算跳过。
+    #    ★ 跳过会被「失败 0 ｜ 跳过 0」这条判据挡住没错，
+    #      但更大的问题是：一个取不到证据的检查如果安静地过去了，
+    #      它下次取不到时也没人会知道。
+    try:
+        _pg19 = _oracle(_SRID19)
+    except Exception as _e19:  # noqa: BLE001
+        check(False, "★★ 19a · T038 能从 PostGIS 取到对拍基准（需要 rp-pg 容器在）",
+              f"取不到：{_e19}")
+        _pg19 = []
+    else:
+        check(True, "★★ 19a · T038 能从 PostGIS 取到对拍基准（需要 rp-pg 容器在）",
+              f"取到 {len(_pg19)} 个点的 ST_Transform 结果")
+
+    # ---- 19b) T038/T039：逐点比，容差 1e-4 m（0.1 mm）---------------------
+    # ★ T039 容差依据（写死在这里，别让它成为传说）：
+    #     · 实测基线：north 最大 **9.246 µm**、east 约 **0.001 µm**（2026-10-13）。
+    #     · 取 **1e-4 m = 100 µm**，比实测宽约一个数量级。
+    #     · **不许取 1e-9** —— 那是拿浮点噪声当判据：
+    #       north 的 9 µm 是**系统性**的（级数截断阶数不同），不是噪声，
+    #       取 1e-9 会让这条判据在正常机器上随机红，然后被人把容差改大，
+    #       连「真的偏了」也一起放过。
+    #     · 也不许取 1e-2 —— 那比 9 µm 宽三个数量级，
+    #       等于说「偏 1 cm 也没关系」，而 1 cm 在路面放样里是有关系的。
+    _TOL19 = 1e-4
+    _worst19_n = _worst19_e = 0.0
+    if _pg19:
+        _rows19 = []
+        for (_nm, _la, _lo), _g in zip(_pts19, _pg19):
+            _n, _e = GEO.forward(_la, _lo, _CM19)
+            _dn, _de = _n - float(_g["n"]), _e - float(_g["e"])
+            _worst19_n = max(_worst19_n, abs(_dn))
+            _worst19_e = max(_worst19_e, abs(_de))
+            _rows19.append((_nm, _n, float(_g["n"]), _dn, _e, float(_g["e"]), _de))
+            print(f"    {_nm}  north 手写 {_n:.6f} / PostGIS {float(_g['n']):.6f} "
+                  f"差 {_dn:+.3e} m")
+            print(f"    {_nm}  east  手写 {_e:.6f} / PostGIS {float(_g['e']):.6f} "
+                  f"差 {_de:+.3e} m")
+        check(_worst19_n <= _TOL19,
+              f"★★ 19b · T038 三点 north 与 PostGIS 一致（容差 {_TOL19:g} m）",
+              f"实测最大差 {_worst19_n:.6f} m（{_worst19_n*1e6:.3f} µm）")
+        check(_worst19_e <= _TOL19,
+              f"★★ 19b · T038 三点 east 与 PostGIS 一致（容差 {_TOL19:g} m）",
+              f"实测最大差 {_worst19_e:.6f} m（{_worst19_e*1e6:.3f} µm）")
+        # ★ 把「有多准」变成一个**每次都被打印出来**的数（T042 的同一件事）
+        print(f"    ★ 实测基线：north 最大 {_worst19_n*1e6:.3f} µm ｜ "
+              f"east 最大 {_worst19_e*1e6:.3f} µm ｜ 容差 {_TOL19*1e6:.0f} µm")
+
+    # ---- 19c) ★ T040 元测试：把假东偏挪 1 m → 对拍**必须变红** --------------
+    # ★★ 不做这一步，就无从知道 19b 是「真的在比」还是「两边都调了同一个函数」。
+    #    004 的往返判据就吃过这个形态的亏：两边共享常数时，它永远是绿的。
+    #    ★ 做法是**临时改掉 `geo._FALSE_EASTING`**（500000 → 500001），
+    #      重算，再改回来。改的是**我们这一侧**的常数 ——
+    #      PostGIS 那边一动不动，所以这正是「两边不是同一个实现」的证明。
+    if _pg19:
+        _old_fe = GEO._FALSE_EASTING
+        try:
+            GEO._FALSE_EASTING = 500001.0
+            _mut_worst = 0.0
+            for (_nm, _la, _lo), _g in zip(_pts19, _pg19):
+                _n2, _e2 = GEO.forward(_la, _lo, _CM19)
+                _mut_worst = max(_mut_worst, abs(_e2 - float(_g["e"])))
+        finally:
+            GEO._FALSE_EASTING = _old_fe
+        check(_mut_worst > _TOL19,
+              "★★ 19c · ★元测试：`_FALSE_EASTING` 挪 1 m → 对拍必须变红"
+              "（否则 19b 可能是在跟自己比）",
+              f"挪后 east 最大差 {_mut_worst:.6f} m，容差 {_TOL19:g} m")
+        # ★ 元测试之后必须确认**改回来了** —— 否则后面所有几何判据都被污染，
+        #   而它们会红在一个跟本次改动毫无关系的地方。
+        # ★ 同时用**行为**验证还原：重算第一点，east 必须回到 PostGIS 那一侧。
+        _n3, _e3 = GEO.forward(_pts19[0][1], _pts19[0][2], _CM19)
+        check(GEO._FALSE_EASTING == _old_fe
+              and abs(_e3 - float(_pg19[0]["e"])) <= _TOL19,
+              "★★ 19c · 元测试后 `_FALSE_EASTING` 已还原（常数 + 行为两侧都对）",
+              f"常数={GEO._FALSE_EASTING}（原 {_old_fe}），"
+              f"重算 east 差 {abs(_e3 - float(_pg19[0]['e'])):.3e} m")
+
+    # ---- 19d) T041：★ 这条判据的**适用边界** ------------------------------
+    # ★★★ 不写这一句，将来一定会有人拿它去判一个它管不了的案子。
+    #    这条对拍只在**同基准**变换上成立：两边都把 4326 的经纬度
+    #    当作 CGCS2000 的经纬度来解释（`ST_SetSRID(...,4326)` 然后直接转 4548），
+    #    而手写的 `forward()` 用的是 GRS80 椭球 + 3 度带高斯。
+    #    ★ 跨基准时（如 WGS84 → CGCS2000），两个实现**可能合法地不一致** ——
+    #      因为差异来自**基准转换参数**（七参数/四参数），
+    #      那不是投影公式的事，两边用的参数集不同、甚至都没配。
+    #      那时**不能简单判红**，得先判「谁该对」。
+    # ★ 换句话说：这条判据守的是「投影公式实现对不对」，
+    #   **不是**「坐标基准换得对不对」。两件事，别混。
+    check(_SRID19 in (4548, 4545, 4524) and _CM19 == 117.0,
+          "★ 19d · T041 适用边界：只在**同基准**（CGCS2000 3 度带）上成立，"
+          "跨基准时两个实现可能合法地不一致 —— 那时先判「谁该对」，不要直接判红",
+          f"本次 SRID={_SRID19} CM={_CM19}，属同基准")
+
+    # ═══════════════════════════════════════════════════════════ 20) T043 / T044
+    #   「算不了的基准，必须当场拒绝，不许算出一个看着正常的错值」。
+    print("\n=== 20) 投影族守卫：填一个本实现算不了的 SRID，接口必须 503（FR-013 / SC-009）===")
+
+    # ---- 20 之前的自问：这个洞到底长什么样？ ------------------------------
+    # ★★★ 数据模型按宪法 §VI **接受任意 SRID** —— 这是对的，
+    #     通用产品不该被自己的实现限制住入库。
+    #     但手写换算**只实现了高斯-克吕格**。
+    #     两者合起来的旧行为是：`crs_epsg` 填成 `2154`（Lambert，`+proj=lcc`），
+    #     代码**不报错**，把 Lambert 的参数当高斯-克吕格算，
+    #     输出一个**量级正常、位置错掉几百米**的坐标。
+    # ★★ 这正是 004 那条教训的形状 ——「**看着正常的错值比缺失更危险**」。
+    #     缺失会被发现（503 / 空值 / 报错），错值不会，它会一路流到放样桩上。
+    # ★ 所以下面 20b 断的是**行为**（503），20c 断的是**对照**（换个能算的 SRID 就 200），
+    #   20d 断的是**那个 SRID 真的就是 lcc**（去问真库，不靠假仓储自证）。
+
+    # ---- 20a) `geo.py` 层：族不在已实现集合里 → 抛 CrsError ---------------
+    _raised = None
+    try:
+        GEO.require_family({"projection_family": "lcc"}, origin="T044 元测试")
+    except GEO.CrsError as _e:
+        _raised = str(_e)
+    check(_raised is not None and "lcc" in _raised,
+          "★★ 20a · T043 `geo.py` 层：族 `lcc` 不在 `IMPLEMENTED_FAMILIES` 里 → 抛 CrsError",
+          f"消息：{(_raised or '（没抛！）')[:110]}")
+    check(GEO.IMPLEMENTED_FAMILIES == frozenset({"tmerc"}),
+          "★ 20a · 本实现自述只实现了 `tmerc`（这份自述就是那条四十行公式的写照）",
+          f"IMPLEMENTED_FAMILIES={sorted(GEO.IMPLEMENTED_FAMILIES)}")
+
+    # ★★ 「不声明」也**必须**报错 —— 「不知道」不是「支持」。
+    #    ★ 这条单独测，因为它最容易被人为了方便而改掉（「没写就当 tmerc 吧」）。
+    _raised2 = None
+    try:
+        GEO.require_family({}, origin="T044 元测试")
+    except GEO.CrsError as _e2:
+        _raised2 = str(_e2)
+    check(_raised2 is not None and "不知道" in _raised2,
+          "★★ 20a · 没声明族 → 也报错（**「不知道」不是「支持」**）",
+          f"消息：{(_raised2 or '（放行了！）')[:110]}")
+
+    # ---- 20b) 接口层：`crs_epsg=2154` → 503，且消息里说出那个 SRID --------
+    _row2154 = {**FIX["road_section"][0], "id": 6, **_CRS_FILL,
+                "project_crs_epsg": 2154,
+                "project_crs_zone_number": 39,
+                "project_crs_central_meridian_deg": Decimal("117.000000"),
+                "project_crs_zone_width_deg": Decimal("3.00"),
+                "project_crs_assumed": False,
+                "project_crs_evidence": "T044 元测试：故意填一个 Lambert 的 SRID"}
+    _old_fam = dict(_FakeGe.FAMILY_BY_SRID)
+    try:
+        _FakeGe.FAMILY_BY_SRID = {2154: "lcc"}
+        APP.dao = _FakeDao(row=_row2154)
+        _c20 = TestClient(APP.app)
+        _r2154 = _c20.get("/v1/geometry/sections/6/geo", params={"station_m": 2900.0})
+        check(_r2154.status_code == 503,
+              "★★ 20b · T044 元测试：`crs_epsg=2154`（Lambert）→ **503**",
+              f"HTTP {_r2154.status_code}")
+        _d20 = str(_r2154.json().get("detail", ""))
+        check("2154" in _d20,
+              "★★ 20b · 那句话里**说出了那个 SRID**（`2154`）—— 否则运维不知道去改哪一行",
+              f"原话：{_d20[:150]}")
+        check("lcc" in _d20,
+              "★★ 20b · 那句话里也说了**族**（`lcc`）—— 只说 SRID 他不知道为什么不行",
+              f"原话：{_d20[:150]}")
+        # ★★ 最重要的一条：**不许返回坐标**。
+        #    503 的响应体里出现经纬度，就是「拒绝了但还是算了一个」。
+        _banned20 = {"lat_deg", "lon_deg", "north_m", "east_m",
+                     "zone_number", "central_meridian_deg", "epsg"}
+        check(not (_banned20 & set(_r2154.json())),
+              "★★ 20b · 响应里 MUST NOT 出现任何经纬度 / 平面坐标字段",
+              f"★ 出现了：{sorted(_banned20 & set(_r2154.json()))}")
+
+        # ---- 20c) 对照：同一行形状，只把 SRID 换成能算的 → 必须 200 --------
+        # ★★ 没有这一条，20b 可以通过而真实原因是「这个假仓储根本不服务路段 6」
+        #    或「这行的线元不对」—— 测到的就不是「族算不了」这件事。
+        _row4548 = {**_row2154, "project_crs_epsg": 4548,
+                    "project_crs_evidence": "T044 对照：同一个形状，换一个能算的 SRID"}
+        APP.dao = _FakeDao(row=_row4548)
+        _r4548 = TestClient(APP.app).get(
+            "/v1/geometry/sections/6/geo", params={"station_m": 2900.0})
+        check(_r4548.status_code == 200,
+              "★★ 20c · ★对照：**同一个行形状**只把 SRID 换成 4548（tmerc）→ 200",
+              f"HTTP {_r4548.status_code}：{str(_r4548.text)[:90]}")
+        check("lat_deg" in _r4548.json(),
+              "★ 20c · 对照那一侧**真的返回了坐标**（不是又一次 503）",
+              f"键：{sorted(_r4548.json())[:8]}")
+    finally:
+        # ★★ 类属性，必须还原 —— 否则后面所有用例都把 2154 当 lcc，
+        #    而它们会红在一个跟 T044 毫无关系的地方。
+        _FakeGe.FAMILY_BY_SRID = _old_fam
+        APP.dao = _FakeDao()
+    check(_FakeGe.FAMILY_BY_SRID == {} or _FakeGe.FAMILY_BY_SRID is _old_fam,
+          "★★ 20c · 元测试后 `FAMILY_BY_SRID` 已还原（不污染后面的用例）",
+          f"当前={_FakeGe.FAMILY_BY_SRID}")
+
+    # ---- 20d) ★ 去真库核对：`2154` 到底是不是 `lcc` -----------------------
+    # ★★ 为什么非要问真库：上面的假仓储是**我自己写的** `{2154: "lcc"}`。
+    #    如果我在假仓储里写 `{2154: "tmerc"}`，20b 会照样红、20c 会照样绿，
+    #    而**生产里根本没有这个判断** —— 这就是「自证不算证据」（宪法 §VI ③）。
+    #    ⇒ 至少要有**一处**是真的从 `spatial_ref_sys.proj4text` 里取出来的。
+    try:
+        _fams20 = json.loads(_sp.run(
+            ["docker", "exec", "rp-pg", "sh", "-c",
+             'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "'
+             "select json_object_agg(srid, "
+             "coalesce(substring(proj4text from '\\\\+proj=([a-z0-9_]+)'), '?')) "
+             'from spatial_ref_sys where srid in (2154, 4548)"'],
+            capture_output=True, text=True, timeout=120).stdout.strip())
+    except Exception:  # noqa: BLE001
+        _fams20 = {}
+    check(_fams20.get("2154") == "lcc" and _fams20.get("4548") == "tmerc",
+          "★★ 20d · 去**真库**核对：2154 真的是 `lcc`、4548 真的是 `tmerc`"
+          "（假仓储里的 `{2154: 'lcc'}` 不是我自己编的）",
+          f"实测 {_fams20}")
 
     print("\n" + "=" * 72)
     if fails:

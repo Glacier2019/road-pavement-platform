@@ -214,6 +214,14 @@ class _FakeGe:
     # ★ `staticmethod(...)` 不能省：不加就变实例方法，`self` 会被塞进 `row`。
     effective_crs = staticmethod(GeRepository.effective_crs)
 
+    # ★★ 005 / T043：真 `dao.ge` 现在有 `crs_family`（问 `spatial_ref_sys`
+    #    这个 SRID 是什么投影族），M6 的 `_geo_crs` 每次都会调它。
+    #    假的没有，那条路就直接 `AttributeError` —— 这次的报错位置离真因不远，
+    #    所以它是**响的**；真正危险的是有人为了让它不响而把生产代码改成不查族。
+    #    默认一切 SRID 都是 `tmerc`（这个夹具用的是 4548）。
+    def crs_family(self, srid):
+        return "tmerc"
+
     def sections(self):
         return [self.SECTION]
 
