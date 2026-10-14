@@ -725,7 +725,7 @@ def _geo_elements(section_id: int) -> list[dict[str, Any]]:
 
 
 @app.get("/v1/geometry/sections/{section_id}/geo", tags=["区域帧"],
-         summary="桩号 → 经纬度（单点）")
+         summary="桩号 → 该处几何：坐标 + 方位角 + 曲率（单点）")
 def get_geo_point(
     section_id: int,
     station_m: float = Query(..., description="路段内里程，**米**"),
@@ -738,6 +738,15 @@ def get_geo_point(
 
     ★ `source` 固定为 `"computed_from_station"`：这是**换算**，不是**定位**。
       本平台不声称这条路真的在这个经纬度上（理由见 research.md 的 R7）。
+
+    ★ 2026-10-14 补上三样：`azimuth_deg`（该处切线方位角，正北起顺时针）、
+      `curvature_1pm`（该处曲率，右转为负），外加 `element_seq` / `element_type`
+      （这个桩号落在链上哪一段）。**没有 `h_radius_m`** —— 那个列名在库里指的是
+      元素级的「所属平曲线半径」，与「该点半径」**同名不同义**，宁缺勿混（理由
+      写在 `geo.station_to_lonlat` 返回值那一行的注释里）。
+      有了它们，「在路段任意一点上求坐标与曲率」就是一个请求能答的事。
+      ★ 三者都是**闭式解出来**的，不是拿相邻点插出来的。
+      ★ 桩号出链仍然 400 且**不外推** —— 加了三样不等于开始猜。
     """
     gf, crs = _geo_crs(section_id)
     els = _geo_elements(section_id)

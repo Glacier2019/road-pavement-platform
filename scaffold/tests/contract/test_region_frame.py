@@ -2415,6 +2415,119 @@ def main() -> int:
           "（假仓储里的 `{2154: 'lcc'}` 不是我自己编的）",
           f"实测 {_fams20}")
 
+    # ============================================================ 21
+    print("\n=== 21) 任意桩号处的几何：坐标 + 方位角 + 曲率（一次定位，四样一起出）===")
+    # ★ 这一组守的是「在路段**任意一点**上求坐标与曲率」这件事的**接口契约**：
+    #   给没给、以及给的**是什么语义**。
+    #   数值本身另有更硬的一道门 —— test_geometry_solver.py 第 6 组拿真库的
+    #   逐桩表逐列对质（azimuth 容差 5e-06 度、curvature 容差 5e-11、且第 8 组
+    #   证明那道门真的能红）。**那一组管「算得对不对」，这一组管「给的是什么」。**
+    #   两边都要有：算得对但语义混，调用方照样用错。
+    _els21 = elements()
+    _g21 = gf()
+    _o21 = GEO.station_to_lonlat(_els21, 2000.0, _g21)
+
+    check("azimuth_deg" in _o21 and "curvature_1pm" in _o21,
+          "★ 21a · 桩号处的几何里给了 `azimuth_deg` 与 `curvature_1pm`"
+          "（「任意点求坐标与曲率」缺的就是这两样）",
+          f"键 {sorted(_o21)}")
+
+    # ★★ 这道闸是**故意**的：`geometry_point.h_radius_m` 在库里指的是
+    #    「该线元所属平曲线的半径」（元素级标签 —— 缓和曲线上是常数，等于它
+    #    两端那个圆曲线的 R），**不是**「该点的曲率半径」（= 1/|κ|，沿线变化）。
+    #    同一个名字两个含义比少一个字段更糟：调用方会把 450 当成脚下这段路的
+    #    半径，而该点真实半径可能是 1911 m。谁顺手把它加回来，这里会红。
+    check("h_radius_m" not in _o21,
+          "★★ 21b · 返回里**没有** `h_radius_m`（那名字在库里是元素级标签，"
+          "与「该点半径」同名不同义，宁缺勿混）",
+          f"键 {sorted(_o21)}")
+
+    _bad21, _ncirc21 = [], 0
+    for _e21 in _els21:
+        _mid21 = (_e21["start_station_m"] + _e21["end_station_m"]) / 2.0
+        _k21 = GEO.station_to_lonlat(_els21, _mid21, _g21)["curvature_1pm"]
+        if _e21["type"] == "circular":
+            _ncirc21 += 1
+            _r21 = _e21["radius_start_m"]
+            # ★ κ 是**带符号**的：右转为负、左转为正。所以要比的是 |1/κ| ——
+            #   第一版写成 `1/κ` 直接比 R（正数），四个右转曲线当场报红，
+            #   而**代码是对的、断言是错的**。（本路段 8 个圆曲线里 4 个右转。）
+            if not _k21 or abs(abs(1.0 / _k21) - _r21) > 1e-9:
+                _bad21.append(f"#{_e21['seq']} |1/κ|="
+                              f"{abs(1.0 / _k21) if _k21 else 0} vs R={_r21}")
+        elif _e21["type"] == "line" and _k21 != 0.0:
+            _bad21.append(f"#{_e21['seq']} 直线 κ={_k21!r} 不是 0.0")
+    check(_ncirc21 > 0 and not _bad21,
+          f"★ 21c · 圆曲线中点 1/κ 复现线元半径（{_ncirc21} 个，差 ≤ 1e-9 m）；"
+          "直线上的 κ **恰为 0.0**（不是 1e-18）",
+          f"不符 {_bad21}" if _bad21 else f"圆曲线 {_ncirc21} 个全符")
+
+    _line21 = [e for e in _els21 if e["type"] == "line"]
+    _dmax21 = 0.0
+    for _e21 in _line21:
+        _a21 = (_e21["start_station_m"] + _e21["end_station_m"]) / 2.0
+        _p21a = GEO.point_north_east(_els21, _a21)
+        _p21b = GEO.point_north_east(_els21, _a21 + 1.0)
+        # `point_north_east` 回的是 (北, 东)，方位角自北起顺时针 ⇒ atan2(Δ东, Δ北)
+        _fd21 = math.degrees(math.atan2(_p21b[1] - _p21a[1], _p21b[0] - _p21a[0])) % 360.0
+        _az21 = GEO.station_to_lonlat(_els21, _a21, _g21)["azimuth_deg"]
+        _dmax21 = max(_dmax21, abs((_fd21 - _az21 + 180.0) % 360.0 - 180.0))
+    # ★ 容差 1e-6 度是有依据的，不是随手放的：坐标量级 2.79e6 m，float64 的
+    #   末位约 6.2e-10 m，除以 1 m 的差分步长 ≈ 6.2e-10 rad ≈ 3.6e-08 度。
+    #   第一版写 1e-9 度 —— 比浮点噪声还紧，实测 6.6e-09 度被判红。
+    check(bool(_line21) and _dmax21 < 1e-6,
+          f"★ 21d · 直线上「坐标差分算出的方向」== 报出来的方位角"
+          f"（{len(_line21)} 个线元，差 ≤ 1e-6 度）—— 方位角与坐标同源，不是两张皮",
+          f"最大差 {_dmax21:.3e} 度")
+
+    _tr21 = [e for e in _els21 if e["type"] == "transition"]
+    _rel21, _det21 = 1e9, "无缓和曲线"
+    if _tr21:
+        _e21 = _tr21[0]
+        _a21 = (_e21["start_station_m"] + _e21["end_station_m"]) / 2.0
+        _h21 = 1.0
+        # ★★ 用**中心**差分，不用前向差分。θ(d) 是 d 的二次式（κ 线性 ⇒
+        #    ∫κ ds 二次），而二次式在 [d-h/2, d+h/2] 上的中心差商**恰好等于**
+        #    它在 d 处的导数 —— 这是个恒等式，不是近似。
+        #    ⇒ 残差只剩浮点噪声，容差可以收到 1e-9 相对。
+        #    第一版用前向差分、容差 1%，实测 1.67% 报红；那个 1.67% 是**真误差**
+        #    （O(h) 项 = (κ1-κ0)h/(2L)，本线元 L≈60 m），不是代码错。
+        _t0 = math.radians(GEO.station_to_lonlat(
+            _els21, _a21 - _h21 / 2.0, _g21)["azimuth_deg"])
+        _t1 = math.radians(GEO.station_to_lonlat(
+            _els21, _a21 + _h21 / 2.0, _g21)["azimuth_deg"])
+        _kfd = ((_t1 - _t0 + math.pi) % (2 * math.pi) - math.pi) / _h21
+        _kcf = GEO.station_to_lonlat(_els21, _a21, _g21)["curvature_1pm"]
+        _rel21 = abs(_kfd - _kcf) / abs(_kcf) if _kcf else abs(_kfd)
+        _det21 = (f"#{_e21['seq']} 中心差分 {_kfd:.9e} vs 闭式 {_kcf:.9e} 1/m"
+                  f"（h={_h21} m，二次式上中心差商是恒等式）")
+    check(bool(_tr21) and _rel21 < 1e-9,
+          "★ 21e · 缓和曲线上「方位角中心差商」== 报出来的曲率（相对差 ≤ 1e-9）"
+          "—— 曲率是解出来的，不是搬来的常数",
+          _det21)
+
+    _bad21b = []
+    _lo21 = min(e["start_station_m"] for e in _els21)
+    _hi21 = max(e["end_station_m"] for e in _els21)
+    for _s21 in (_lo21 - 1.0, _hi21 + 1.0):
+        try:
+            GEO.station_to_lonlat(_els21, _s21, _g21)
+            _bad21b.append(f"{_s21:.1f} 没抛")
+        except GEO.StationOutsideAlignment:
+            pass
+    check(not _bad21b,
+          "★ 21f · 桩号出链仍抛 `StationOutsideAlignment`"
+          "（多给了两样，不等于开始猜）",
+          f"{_bad21b}" if _bad21b else f"链覆盖 {_lo21:.3f} .. {_hi21:.3f} m")
+
+    _seam21 = _els21[len(_els21) // 2]
+    _seq21 = GEO.station_to_lonlat(_els21, _seam21["end_station_m"], _g21)["element_seq"]
+    check(_seq21 == _seam21["seq"],
+          "★ 21g · 线元接缝处归**前**一个元素 —— 与 `locate` 同一条规则，"
+          "不另立一套（两种归属差 0.69 mm）",
+          f"接缝 {_seam21['end_station_m']:.3f} m 归 #{_seq21}，"
+          f"期望 #{_seam21['seq']}")
+
     print("\n" + "=" * 72)
     if fails:
         print(f"失败 {len(fails)} 项：")

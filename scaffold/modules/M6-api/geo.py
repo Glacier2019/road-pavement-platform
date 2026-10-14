@@ -422,6 +422,30 @@ def load_crs(doc: Mapping[str, Any], *,
 
 # ============================================================ 业务
 
+
+def _element_at(elements: Sequence[Mapping[str, Any]],
+                station_m: float) -> Mapping[str, Any]:
+    """定位桩号落在哪个线元；落在线元链之外就**抛异常，不外推**。
+
+    ★ 「定位」与「不外推」必须一起做，少一件就错：`geom.point_at` 只认单个
+      线元（直接喂整条链会 `KeyError`），而它对 `d <= 0` 的桩号**直接返回该
+      线元的起点坐标** —— 那不是「这段路上有这个点」，那是「这个点在这段路
+      的起点旁边」。两者在链内桩号上数值相同，在链外桩号上差一整段路。
+
+    ★ 抽出来是因为取坐标、取经纬度、取曲率三处都要它，而**每一处漏掉都会
+      静默算错**（错的是「这个桩号算不算数」，不是数值）。
+    """
+    e = geom.locate(list(elements), station_m)
+    if e is None:
+        lo = min(x["start_station_m"] for x in elements)
+        hi = max(x["end_station_m"] for x in elements)
+        raise StationOutsideAlignment(
+            f"桩号 {station_m:.3f} m 落在线元链之外"
+            f"（链覆盖 {lo:.3f} .. {hi:.3f} m）。不外推。"
+        )
+    return e
+
+
 def point_north_east(elements: Sequence[Mapping[str, Any]],
                      station_m: float) -> tuple[float, float]:
     """桩号 → 平面 **(北坐标, 东坐标)**，单位 m。
@@ -434,14 +458,7 @@ def point_north_east(elements: Sequence[Mapping[str, Any]],
          那不是"这段路上有这个点"，那是"这个点在这段路的起点旁边"。
          两者在链内桩号上数值相同，在链外桩号上差一整段路。
     """
-    e = geom.locate(list(elements), station_m)
-    if e is None:
-        lo = min(x["start_station_m"] for x in elements)
-        hi = max(x["end_station_m"] for x in elements)
-        raise StationOutsideAlignment(
-            f"桩号 {station_m:.3f} m 落在线元链之外"
-            f"（链覆盖 {lo:.3f} .. {hi:.3f} m）。不外推。"
-        )
+    e = _element_at(elements, station_m)
     north, east = geom.point_at(e, station_m)
     return north, east
 
@@ -461,10 +478,19 @@ def station_to_lonlat(elements: Sequence[Mapping[str, Any]],
       没有一个带的落点与设计方地面线形状相关（r 全部接近 0），
       坐标是学生自定的局部坐标、还是地形被学生生成过，两种读法都还开着。
       所以这里只用「换算」这个词，不用「定位」。
+
+    ★ 返回里同时有**方位角与曲率**，所以它是「这个桩号处的几何」而不只是
+      「经纬度」。`azimuth_deg` 正北起顺时针、0..360；`curvature_1pm` 右转为负。
+      两者都由闭式解出，不是拿相邻点插出来的 —— 见 m2geom/geom.py 的
+      `azimuth_at` / `curvature_at`。
     """
-    north, east = point_north_east(elements, station_m)
+    # ★ 这里**不调 `point_north_east`**：那会再 locate 一次，而方位角与曲率
+    #   本来就要那个线元。一次定位，四样东西一起出。
+    e = _element_at(elements, station_m)
+    north, east = geom.point_at(e, station_m)
     cm = float(gf["central_meridian_deg"])
     lat, lon = inverse(north, east, cm)
+    kappa = geom.curvature_at(e, station_m)
     return {
         "station_m": station_m,
         "north_m": north,
@@ -475,6 +501,21 @@ def station_to_lonlat(elements: Sequence[Mapping[str, Any]],
         "central_meridian_deg": cm,
         "zone_number": gf.get("zone_number"),
         "source": "computed_from_station",
+        # ★ 键名照抄 `geometry_point` 表的列名（`azimuth_deg` / `curvature_1pm` /
+        #   `h_radius_m`），**不新造词**。这样「库里逐桩表」与「现算」两边的
+        #   字段能直接对上，不需要一张映射表。
+        "azimuth_deg": geom.azimuth_at(e, station_m),
+        "curvature_1pm": kappa,
+        # ★ 这里**故意不给 `h_radius_m`**。`geometry_point.h_radius_m` 这个列名
+        #   在库里指的是「**该线元所属平曲线的半径**」（元素级标签：缓和曲线上
+        #   是常数，等于它两端那个圆曲线的 R），**不是**「该点的曲率半径」
+        #   （= 1/|κ|，沿缓和曲线线性变化）。
+        #   同名不同义比缺一个字段更糟：调用方会把 450 当成「我脚下这段路的半径」，
+        #   而该点真实半径是 1911 m。要半径就取 `1 / abs(curvature_1pm)`。
+        # 这个桩号落在链上的哪一段。回带它，调用方就不必自己再 locate 一次，
+        # 也就不必自己实现「接缝归前一个元素」那套归属规则（两种归属差 0.69 mm）。
+        "element_seq": e.get("seq"),
+        "element_type": e.get("type"),
     }
 
 

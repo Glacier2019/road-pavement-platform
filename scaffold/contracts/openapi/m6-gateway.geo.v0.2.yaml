@@ -19,13 +19,20 @@
 #
 # ★ 本文件的字段名全部来自**活体实测**（2026-10-11，容器内 rp-api，端口 8001）：
 #     /v1/geometry/sections                    → {count, items[]}
-#     /v1/geometry/sections/{id}/geo           → 10 键
+#     /v1/geometry/sections/{id}/geo           → 10 键（2026-10-14 起 16 键）
 #     /v1/geometry/sections/{id}/geo/reverse   → 14 键
 #     /v1/geometry/sections/{id}/geo/route     → 9 键 + bbox + elements[]
 #     /v1/geometry/sections/{id}/monitor-sections → 7 键 + cross_sections[] + counts_by_source
 #
 # ★ 本文件只声明**实现里存在的东西**。004 犯过一次：在修「声明了但不存在」
 #   的缺陷时，又声明了一条没有实现的路径。**修一条谎的时候最容易再说一条谎。**
+#
+# ★★ 2026-10-14（任意点求几何）：`/geo` 增 4 键 —— `azimuth_deg` /
+#   `curvature_1pm` / `element_seq` / `element_type`。所以 `/geo` 的活体实测
+#   从 10 键变 16 键 = 10 + 本文件早先新增的 crs_source/crs_assumed + 这 4 个。
+#   ★ **没有 `h_radius_m`**：那个列名在库里指的是**元素级**的「该线元所属
+#     平曲线半径」（缓和曲线上是常数，等于两端那个圆曲线的 R），**不是**
+#     「该点的曲率半径」（= 1/|κ|，沿线线性变化）。同名不同义比缺字段更糟。
 # ============================================================================
 
 openapi: 3.0.3
@@ -143,7 +150,7 @@ paths:
   # ==========================================================================
   /v1/geometry/sections/{section_id}/geo:
     get:
-      summary: 桩号 → 经纬度
+      summary: 桩号 → 该处几何：坐标 + 方位角 + 曲率
       parameters:
         - {name: section_id, in: path, required: true, schema: {type: integer}}
         - {name: station_m, in: query, required: true, schema: {type: number}}
@@ -167,6 +174,11 @@ paths:
                   - source
                   - crs_source
                   - crs_assumed
+                  # ---- ★ 2026-10-14 新增（任意点求几何）----
+                  - azimuth_deg
+                  - curvature_1pm
+                  - element_seq
+                  - element_type
                 properties:
                   section_id: {type: integer}
                   lat_deg: {type: number}
@@ -185,6 +197,16 @@ paths:
                     type: string
                     enum: [project, section]
                   crs_assumed: {type: boolean}
+                  # ---- ★ 2026-10-14 新增（任意点求几何）----
+                  #   方位角正北起顺时针、0..360；曲率右转为负、直线恰为 0。
+                  #   两者都由**闭式**解出（m2geom/geom.py 的 azimuth_at /
+                  #   curvature_at），不是拿相邻点插出来的。
+                  azimuth_deg: {type: number}
+                  curvature_1pm: {type: number}
+                  # 这个桩号落在链上哪一段。回带它，调用方就不必自己再 locate
+                  # 一次，也就不必自己实现「接缝归前一个元素」那套规则。
+                  element_seq: {type: integer}
+                  element_type: {type: string}
         '404':
           description: 路段不存在，或该路段没有线形单元
         '503':
