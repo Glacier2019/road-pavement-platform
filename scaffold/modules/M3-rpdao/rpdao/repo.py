@@ -109,7 +109,7 @@ class LoRepository(DomainRepository):
       AND (%(station)s::text          IS NULL OR m.station_text = %(station)s::text)
       AND (%(overload_only)s::boolean = false OR r.overload_flag = true)
     ORDER BY r.pass_time DESC
-    LIMIT %(limit)s::int
+    LIMIT %(limit)s::int OFFSET %(offset)s::int
     """
 
     PASSAGE_ONE_SQL = """
@@ -145,11 +145,18 @@ class LoRepository(DomainRepository):
         station: str | None = None,
         overload_only: bool = False,
         limit: int = 200,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """按时间/桩号/超载筛过车记录，时间倒序。"""
+        """按时间/桩号/超载筛过车记录，时间倒序。
+
+        ★★ 2026-10-14 加 `offset`。加之前这条路**不能翻页**：
+          `ORDER BY pass_time DESC LIMIT n` 只能取最早那一段，
+          而调用方**拿不到任何信号**说明后面还有。
+          `offset` 默认 0 ⇒ 既有的 `passages(limit=n)` 调用**行为逐位不变**。
+        """
         return self._dao.query(self.PASSAGES_SQL, {
             "from_ts": from_ts, "to_ts": to_ts, "station": station,
-            "overload_only": overload_only, "limit": limit,
+            "overload_only": overload_only, "limit": limit, "offset": offset,
         })
 
     def passage(self, record_id: int) -> dict[str, Any]:
@@ -290,7 +297,7 @@ class GeRepository(DomainRepository):
       AND (%(to_km)s::numeric   IS NULL OR station_local_km <= %(to_km)s::numeric)
       AND (%(integer_only)s::boolean = false OR is_integer_station = true)
     ORDER BY station_seq_no
-    LIMIT %(limit)s::int
+    LIMIT %(limit)s::int OFFSET %(offset)s::int
     """
 
     PIS_SQL = """
@@ -736,11 +743,15 @@ class GeRepository(DomainRepository):
 
     def stations(self, section_id: int, *, from_km: float | None = None,
                  to_km: float | None = None, integer_only: bool = False,
-                 limit: int = 500) -> list[dict[str, Any]]:
-        """某路段的桩号序列，可按区间/是否整桩筛。"""
+                 limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+        """某路段的桩号序列，可按区间/是否整桩筛。
+
+        ★★ 2026-10-14 加 `offset`，理由同 `passages`：原先只能取前 n 条，
+          而 5000 的上限**不是**「能取多少」的旋钮 —— 第 5001 条永远取不到。
+        """
         return self._dao.query(self.STATIONS_SQL, {
             "sid": section_id, "from_km": from_km, "to_km": to_km,
-            "integer_only": integer_only, "limit": limit,
+            "integer_only": integer_only, "limit": limit, "offset": offset,
         })
     # ── v0.6（契约变更工单 #3）：桩号脱离路段，按**路线**取 ──────────────
     #
@@ -766,7 +777,7 @@ class GeRepository(DomainRepository):
       AND (%(to_km)s::numeric   IS NULL OR t.station_local_km <= %(to_km)s::numeric)
       AND (NOT %(integer_only)s::boolean OR t.is_integer_station)
     ORDER BY t.station_local_km
-    LIMIT %(limit)s::integer
+    LIMIT %(limit)s::integer OFFSET %(offset)s::integer
     """
 
     #: 路线列表（含桩号数）。桩号数是按 line_id 数的 —— 与
@@ -798,7 +809,7 @@ class GeRepository(DomainRepository):
 
     def stations_by_line(self, line_id: int, *, from_km: float | None = None,
                          to_km: float | None = None, integer_only: bool = False,
-                         limit: int = 5000) -> list[dict[str, Any]]:
+                         limit: int = 5000, offset: int = 0) -> list[dict[str, Any]]:
         """某**路线**的桩号序列（FR-003）。可按区间/是否整桩筛。
 
         与 stations(section_id) 的区别不只是换个 WHERE 列：
@@ -807,7 +818,7 @@ class GeRepository(DomainRepository):
         """
         return self._dao.query(self.LINE_STATIONS_SQL, {
             "lid": line_id, "from_km": from_km, "to_km": to_km,
-            "integer_only": integer_only, "limit": limit,
+            "integer_only": integer_only, "limit": limit, "offset": offset,
         })
 
     def alignment(self, section_id: int) -> dict[str, Any]:

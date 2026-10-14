@@ -419,11 +419,26 @@ def list_wim(
     to_ts: datetime | None = None,
     station: str | None = Query(None, description="如 K4640+000"),
     overload_only: bool = False,
-    limit: int = Query(200, ge=1, le=2000),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
+    # ★★ 2026-10-14：补 `offset` 与 `truncated`（与 /v1/objects/{object_type} 对齐）。
+    #   实测量到的后果：本接口原先上限 2000，但 `ORDER BY pass_time DESC LIMIT n`
+    #   **永远只能取最早那一段**，第 2001 条取不到，而且响应里**没有任何字段**
+    #   说明被截断了 —— 调用方把「前 2000 条」读成了「全部」。
+    #
+    #   ★ 上限**不是**「能取多少」的旋钮：上限 2000 而能取完，
+    #     靠的是 `offset`；上限再高，不翻页也拿不到第 n+1 条。
+    #
+    #   ★ 修法与通用出口同一条：**多要一行来探测** —— 要到 limit+1 行 ⇒ 确实还有更多。
+    #     探测的那一行**不进响应**。
     rows = dao.lo.passages(from_ts=from_ts, to_ts=to_ts, station=station,
-                           overload_only=overload_only, limit=limit)
-    return {"object_type": "wim_axle_record", "count": len(rows), "items": rows}
+                           overload_only=overload_only, limit=limit + 1,
+                           offset=offset)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"object_type": "wim_axle_record", "count": len(rows),
+            "truncated": truncated, "items": rows}
 
 
 @app.get("/v1/objects/wim_axle/{record_id}", tags=["对象查询"],
@@ -519,14 +534,21 @@ def list_stations(
     from_km: float | None = Query(None, ge=0, description="起（路段内里程，km，含）"),
     to_km: float | None = Query(None, ge=0, description="止（路段内里程，km，含）"),
     integer_only: bool = Query(False, description="只要整桩"),
-    limit: int = Query(500, ge=1, le=5000),
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
+    # ★★ 2026-10-14：补 `offset` 与 `truncated`，理由同 `/v1/objects/wim_axle`。
+    #   本接口原先上限 5000（三个列表端点里最高），却**一页都翻不了**。
     try:
         rows = dao.ge.stations(section_id, from_km=from_km, to_km=to_km,
-                               integer_only=integer_only, limit=limit)
+                               integer_only=integer_only, limit=limit + 1,
+                               offset=offset)
     except DaoError as exc:
         raise _http(exc) from exc
-    return {"section_id": section_id, "count": len(rows), "items": rows}
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"section_id": section_id, "count": len(rows),
+            "truncated": truncated, "items": rows}
 
 
 @app.get("/v1/geometry/sections/{section_id}/alignment", tags=["几何查询"],

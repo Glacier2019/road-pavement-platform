@@ -1,0 +1,185 @@
+# ============================================================================
+# M6 统一数据出口 —— 列表端点翻页契约 v0.4
+# ----------------------------------------------------------------------------
+# 本文件是 m6-gateway.v0.3.yaml 的**增量**，只描述本次变动的两个端点。
+# 真源仍是服务运行后自动生成的 /openapi.json；本文件是它的人工摘要。
+#
+# ★★★ 它为什么存在：**四个列表端点里，只有一个能翻页。**
+#
+#   2026-10-14 实测（容器内 rp-api，端口 8001）：
+#
+#     端点                                  offset   truncated   limit 上限
+#     /v1/objects/{object_type}              有        有          1000
+#     /v1/objects/wim_axle                 **没有**   没有         2000
+#     /v1/geometry/.../stations            **没有**   没有         5000
+#     /v1/metrics/wim_hourly               没有       没有          无
+#
+#   `wim_hourly` 不是列表端点（返回当日聚合，`buckets` 最多 24 个），不在本次范围。
+#
+# ★★ 要紧的是：**上限不是「能取多少」的旋钮。**
+#   通用出口上限**只有 1000**，却能取完 2215 行 —— 因为它有 `offset`。
+#   另外两个上限**更高**（2000 / 5000），却**永远只能取前 n 行**：
+#   第 n+1 条取不到，而且响应里**没有任何字段**说明被截断了。
+#   调用方拿到 5000 条，**以为这就是全部**。
+#   ⇒ 把上限从 5000 加到 500000，一行额外的数据也拿不到。
+#
+# ★ 这次三个上限统一为 **1000**。统一之后上限退化成**纯运维参数**
+#   （限制单次请求的代价），不再影响「谁能取到多少数据」—— 那是 `offset` 的事。
+#
+# ★★ 为什么是新文件而不是就地改 v0.3：宪法 §I「契约禁止就地改」。
+#   同目录的 m6-gateway.geo.v0.3.yaml 立的就是这个先例（纠正 step_m 默认值
+#   也是新开一份增量）。下游照着 v0.3 写过的解析代码必须继续成立。
+#
+# ★ 本文件的字段名、默认值、上下界**全部来自与服务对读**（从实现生成的
+#   /openapi.json 直接取，不是转抄）；`m6-路由` 的 5i / 5j 每次跑都会
+#   把契约与实现逐参数比一遍，包括类型、required 与取值范围。
+# ============================================================================
+
+openapi: 3.1.0
+info:
+  title: M6 统一数据出口（列表翻页增量 v0.4）
+  version: 0.4.0
+  description: >-
+    v0.3 之上的增量：`/v1/objects/wim_axle` 与
+    `/v1/geometry/sections/{section_id}/stations` 补上 `offset`，
+    响应补上 `truncated`，并把三个列表端点的 `limit` 上限统一为 1000。
+    向下兼容：**是** —— 两个新参数都有默认值（`offset` 默认 0），
+    不传它们的既有调用行为**逐位不变**；`limit` 上限由 2000 / 5000 收紧到 1000
+    是**唯一**的行为变化，且只有传了超过 1000 的调用方会受影响（会得到 422）。
+
+paths:
+  /v1/objects/wim_axle:
+    get:
+      summary: WIM 过车记录（按时间/桩号/超载筛选）
+      description: >-
+        本次**新增 `offset`**，并新增响应字段 `truncated`。
+        其余字段与 v0.3 一致，见那份文件。
+      parameters:
+        - name: from_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_ts
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: station
+          in: query
+          schema:
+            type: string
+          description: 如 K4640+000
+        - name: overload_only
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+          description: >-
+            单页最多返回几条。★ 上限由 v0.3 的 2000 收紧为 **1000**，
+            与另外两个列表端点一致。要紧的是**它不是「能取多少」的旋钮** ——
+            要取更多，靠 `offset` 翻页。
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: >-
+            跳过前几条，用于翻页。默认 0 ⇒ 不传时行为与 v0.3 逐位相同。
+
+            ★ 实现侧口径：服务**多要一行**来探测后面还有没有（`limit + 1`），
+            探测到的那一行**不进响应**，只用来算 `truncated`。所以判定是精确的，
+            不是「拿满就猜」。
+
+  /v1/geometry/sections/{section_id}/stations:
+    get:
+      summary: 桩号序列（可按区间与是否整桩筛）
+      description: >-
+        本次**新增 `offset`**，并新增响应字段 `truncated`。
+        其余字段与 v0.3 一致，见那份文件。
+      parameters:
+        - name: section_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: from_km
+          in: query
+          schema:
+            type: number
+            minimum: 0
+          description: 起（路段内里程，km，含）
+        - name: to_km
+          in: query
+          schema:
+            type: number
+            minimum: 0
+          description: 止（路段内里程，km，含）
+        - name: integer_only
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: 只要整桩
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 500
+          description: >-
+            单页最多返回几条。★ 上限由 v0.3 的 5000 收紧为 **1000**。
+            本端点原先上限**三个列表端点里最高**，却**一页都翻不了** ——
+            这正是本次要修的东西。
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: 跳过前几条，用于翻页。默认 0 ⇒ 不传时行为与 v0.3 逐位相同。
+
+  /v1/objects/{object_type}:
+    get:
+      summary: 按对象类型查档案对象
+      description: >-
+        本端点**本次没有新增参数**（`offset` 与 `truncated` 在 v0.3 就有了，
+        它正是另外两个端点要照齐的样板）。这里只列它，是为了把
+        **`limit` 上限统一为 1000** 这件事写进契约 —— v0.3 声明的是 `default: 100`，
+        上限 1000 一直只有实现知道，契约没写。
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+          description: 单页最多返回几条。
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: 跳过前几条，用于翻页。
+
+# ============================================================================
+# 关于 `count` 的口径（本次**没有**改动，但要写下来）
+# ----------------------------------------------------------------------------
+# 三个端点的 `count` 都是**本页条数**，不是符合条件的总数。
+# 调用方只能靠「翻到空页」或 `truncated: false` 判断结束。
+#
+# ★ 这是既有行为，本次不动它 —— 要改成「总数」需要多跑一次 count 查询，
+#   是另一次变更。但**契约里原先没写**，调用方按字面读会以为是总数。
+#   写在这里，是让下一个人不必再量一遍。
+# ============================================================================

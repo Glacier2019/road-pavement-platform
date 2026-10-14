@@ -236,7 +236,7 @@ class _FakeGe:
         return self.SECTION
 
     def stations(self, section_id, *, from_km=None, to_km=None,
-                 integer_only=False, limit=500):
+                 integer_only=False, limit=500, offset=0):
         self.section(section_id)        # 不存在 → NotFound
         return [{"station_seq_no": 1, "station_local_km": 0.0,
                  "station_text": "K0+000.000", "station_type": "endpoint",
@@ -670,6 +670,103 @@ def main() -> int:
     if not ok_meta:
         fails.append(f"假仓储判据的元测试失败：认出={_caught} 误报={_clean}")
 
+    # ---- 5g-bis) ★★★ 收了 `offset` 的仓储方法，它的 SQL 里必须真有 OFFSET ----
+    # ★★★ 2026-10-14 晚加的，起因是一次**红验**：给两个端点补上翻页之后，
+    #   我把 `PASSAGES_SQL` 末尾的 `OFFSET %(offset)s::int` 删掉 ——
+    #   那会让 `wim_axle` 的翻页**彻底失效**（永远回第一页，而 `truncated`
+    #   会永远报 true，因为 `limit+1` 探测拿到的仍是第 1..n+1 行）。
+    #   ★ 而全套 28 条**一条都没红**，exit=0。
+    #
+    #   原因：5g 守的是**假仓储的签名**，5i/5j 守的是**契约与 schema 的声明**。
+    #   没有任何一条守**SQL 本身** —— 声明对了、签名对了，SQL 里把 OFFSET 拿掉，
+    #   整套门一声不响。这正是 D-022 那一类：**新加的能力没有东西在看它。**
+    #
+    # ★ 判据**精确到「签名收了 offset 的方法」**，不是「所有带 LIMIT 的 SQL」：
+    #   实测 `ELEMENTS_BY_STATION_SQL` 与 `SAMPLE_UNIFORM_SQL` 都带
+    #   `LIMIT %(limit)s` 却没有 OFFSET，而它们**不该有** —— `/samples` 与
+    #   `/elements` 两个端点都没有 `limit` 查询参数，那个 LIMIT 是内部上限，
+    #   不是给调用方翻页用的。一刀切会误报两条，而误报会让这道门被关掉。
+    #
+    # ★ `list_objects` 没有 `_SQL` 常量（SQL 是内联 f-string），所以对
+    #   「一个 `_SQL` 都没引用」的方法改为直接查它自己的源码文本。
+    #   ⇒ 这条不写清楚，判据会对内联那一个**静默放过**（宪法原则 V 的老坑）。
+    def _paging_gaps(dao_src: str) -> tuple:
+        """→ (收了 offset 的方法数, [SQL 里没有 OFFSET 的方法])。"""
+        tree = ast.parse(dao_src)
+        consts: dict = {}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id.endswith("_SQL")):
+                consts[node.targets[0].id] = node.value.value
+        n, bad = 0, []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            a = fn.args
+            names = [x.arg for x in a.args] + [x.arg for x in a.kwonlyargs]
+            if "offset" not in names:
+                continue
+            n += 1
+            used = sorted({x.attr for x in ast.walk(fn)
+                           if isinstance(x, ast.Attribute)
+                           and isinstance(x.value, ast.Name)
+                           and x.value.id == "self"
+                           and x.attr.endswith("_SQL")})
+            if not used:
+                # 内联 SQL：查方法自己的源码
+                seg = ast.get_source_segment(dao_src, fn) or ""
+                if "OFFSET" not in seg:
+                    bad.append(f"{fn.name}（内联 SQL）收了 offset 却没用 OFFSET")
+                continue
+            for attr in used:
+                sql = consts.get(attr)
+                if sql is not None and "OFFSET" not in sql:
+                    bad.append(f"{fn.name} 收了 offset，但 {attr} 里没有 OFFSET")
+        return n, bad
+
+    _DAO = (ROOT / "modules" / "M3-rpdao" / "rpdao" / "repo.py").read_text(
+        encoding="utf-8")
+    _n_off, _pg_bad = _paging_gaps(_DAO)
+    print(f"  翻页落地：收了 `offset` 的仓储方法 {_n_off} 个，"
+          f"SQL 里缺 OFFSET 的 {len(_pg_bad)} 个")
+    # ★ 计数下界：4 是 2026-10-14 实测值（list_objects / passages / stations /
+    #   stations_by_line）。判据看不到目标时，`_pg_bad` 会是空 —— 空得像通过。
+    if _n_off < 4:
+        print(f"  ✗ 只找到 {_n_off} 个收 offset 的仓储方法（期望 ≥ 4）"
+              f" —— 这条检查已经不认识现实了")
+        fails.append(f"翻页落地判据失效：只找到 {_n_off} 个收 offset 的方法")
+    elif not _pg_bad:
+        print("  ✓ 每个收了 offset 的方法，SQL 里都真有 OFFSET")
+    else:
+        print(f"  ✗ 收了 offset 却没落到 SQL：{_pg_bad}")
+        fails.append(f"翻页没有落到 SQL：{_pg_bad}")
+
+    # ---- 5g-ter) ★★ 元测试：证明上面这条**会响** ----
+    _PG_FAKE = (
+        "class R:\n"
+        "    X_SQL = \"SELECT 1 LIMIT %(limit)s::int\"\n"
+        "    def paginated(self, *, limit=10, offset=0):\n"
+        "        return self._dao.query(self.X_SQL, {})\n"
+        "    Y_SQL = \"SELECT 1 LIMIT %(limit)s::int OFFSET %(offset)s::int\"\n"
+        "    def fine(self, *, limit=10, offset=0):\n"
+        "        return self._dao.query(self.Y_SQL, {})\n"
+        "    def inline_bad(self, *, limit=10, offset=0):\n"
+        "        return self._dao.query(\"SELECT 1 LIMIT 1\", {})\n"
+        "    def not_paginated(self, *, limit=10):\n"
+        "        return self._dao.query(self.X_SQL, {})\n")
+    _pg_n, _pg_caught = _paging_gaps(_PG_FAKE)
+    _pg_ok = (_pg_n == 3
+              and any("paginated" in x for x in _pg_caught)
+              and any("inline_bad" in x for x in _pg_caught)
+              and not any("fine" in x for x in _pg_caught)
+              and not any("not_paginated" in x for x in _pg_caught))
+    print(f"  元测试：SQL 缺 OFFSET 被认出 → {_pg_caught} "
+          f"{'✓' if _pg_ok else '✗'}")
+    if not _pg_ok:
+        fails.append(f"翻页落地判据的元测试失败：认出={_pg_caught}")
+
     # ---- 5i) ★★★ 契约声明的查询参数（含默认值）== 实现认识的，**全部端点** ----
     # ★★ 这一条守的是**成因本身**，不是某一个端点。原来它只管
     #   `/v1/objects/{object_type}`（甲 那一轮加的），于是「契约许了一个实现
@@ -820,7 +917,7 @@ def main() -> int:
     # ★ 这份名单**只许缩短**（与 §5g 的假仓储表、LEGACY_UNCOMMENTED 同一条规矩）：
     #   实际少了要红（提醒你删掉陈旧条目），实际多了更要红。
     #
-    # ★★ 两个坑，都是门自己照出来的：
+    # ★★ 三个坑，都是门自己照出来的：
     #   ① 名单最初是 5 条。把 anyOf 摊平逻辑收拢成一处之后变成 7 条 ——
     #      `from_km` / `to_km` 的 `ge=0` 原来**藏在 anyOf 里面**，看不见。
     #      ⇒ 「收拢一处」当场就还了本。
@@ -828,6 +925,12 @@ def main() -> int:
     #      键是 FastAPI 按字母排的（maximum 在前），契约侧是手写的（minimum 在前），
     #      于是同一份约束被当成「新增」+「过期」各报一次。
     #      ⇒ 一律走 `_fmt()` 排序，键序不参与判定。
+    #   ③ ★★ 2026-10-14 晚：**7 条降到 3 条**。契约增量 v0.4 把
+    #      `stations.from_km/to_km`（各 `ge=0`）、两个 `limit` 的上限
+    #      （5000 / 2000 → 统一 1000）写进了声明。
+    #      ⇒ 这一轮不是「还债」，是**把债本身消掉**：那 4 条不再需要冻结。
+    #      剩下的 3 条是 geo 增量范围内的（lat/lon 范围、step_m 上界），
+    #      要另开一份 geo 增量才能消。
     _UNDECLARED_FROZEN = (
         "GET /v1/geometry/sections/{section_id}/geo/reverse 的参数 lat："
         "{'maximum': 90, 'minimum': -90}",
@@ -835,14 +938,6 @@ def main() -> int:
         "{'maximum': 180, 'minimum': -180}",
         "GET /v1/geometry/sections/{section_id}/geo/route 的参数 step_m："
         "{'exclusiveMinimum': 0, 'maximum': 1000}",
-        "GET /v1/geometry/sections/{section_id}/stations 的参数 from_km："
-        "{'minimum': 0}",
-        "GET /v1/geometry/sections/{section_id}/stations 的参数 to_km："
-        "{'minimum': 0}",
-        "GET /v1/geometry/sections/{section_id}/stations 的参数 limit："
-        "{'maximum': 5000, 'minimum': 1}",
-        "GET /v1/objects/wim_axle 的参数 limit："
-        "{'maximum': 2000, 'minimum': 1}",
     )
 
     def _fmt(d: dict) -> str:
@@ -940,13 +1035,18 @@ def main() -> int:
         print(f"  ✗ 新增未声明的约束 {x}")
     for x in _stale:
         print(f"  ✗ 名单上的约束已不成立（请删掉这一条）{x}")
-    if len(_UNDECLARED_FROZEN) < 1:
-        print("  ✗ 冻结名单是空的 —— 这条棘轮已成摆设")
-        fails.append("契约未声明的约束冻结名单为空")
-    if _s_pairs < 20 or len(_undecl) < 5:
-        print(f"  ✗ 形状比对面太小或棘轮没量到东西（{_s_pairs} 个参数 / "
-              f"{len(_undecl)} 条未声明，下界 20 / 5）")
-        fails.append(f"参数形状比对失效：{_s_pairs} 个参数 / {len(_undecl)} 条未声明")
+    # ★★ 这里原先有一条「名单不许为空」。2026-10-14 晚**删掉了** ——
+    #   因为名单空掉是**目标**而不是故障：债还完了，就没有东西要冻结。
+    #   那「_shape 突然读不到范围键」这种故障谁来挡？
+    #   ⇒ 名单本身挡得住：真读不到时 `_undecl` 变空，
+    #     而名单上还剩 3 条 ⇒ `_stale` 立刻红。
+    #   ⇒ 名单真空的那天，由**元测试**挡（它证 `_shape` 会提取范围、会认第三方向）。
+    # ★ 下界只钉**比对面够大**（20 是实测值，2026-10-14 实测 25）。
+    #   原先还有一条「未声明不许少于 5」，删了 —— 那个数会随还债往下走，
+    #   把它写死成下界，等于**惩罚还债**。判据没哑掉这件事由 _s_pairs 与元测试守。
+    if _s_pairs < 20:
+        print(f"  ✗ 形状比对面太小（{_s_pairs} 个参数，下界 20）—— 判据已成摆设")
+        fails.append(f"参数形状比对失效：只比了 {_s_pairs} 个参数")
     if _shape_bad:
         fails.append(f"契约↔实现参数形状漂移 {len(_shape_bad)} 处：{_shape_bad}")
     if _rng_bad:
@@ -987,7 +1087,8 @@ def main() -> int:
     #   而 sorted() 的字典序**不等于**版本序 —— 例如 v0.10 会排到 v0.2 前面。
     _ord = [f.name for f in sorted(contract_files(), key=_ver_key)]
     _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.geo.v0.2.yaml",
-                 "m6-gateway.geo.v0.3.yaml", "m6-gateway.v0.3.yaml"]
+                 "m6-gateway.geo.v0.3.yaml", "m6-gateway.v0.3.yaml",
+                 "m6-gateway.v0.4.yaml"]
     _okm2 = _ord == _want_ord
     print(f"  元测试：契约版本序 → {_ord} {'✓' if _okm2 else '✗'}")
     if not _okm2:
