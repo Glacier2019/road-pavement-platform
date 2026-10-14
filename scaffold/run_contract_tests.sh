@@ -43,7 +43,12 @@ DAO_DEPS=(--with "psycopg[binary,pool]==3.2.3")
 #   汇总却只说"通过 489 ｜ 失败 0"，和全绿读起来一模一样。
 #   实测：不装 psycopg → 通过 489；装了 → 通过 514。差的 25 条就是它们。
 PYDAO_DEPS=("${PY_DEPS[@]}" --with "psycopg[binary,pool]==3.2.3")
-API_DEPS=(--with fastapi==0.115.6 --with httpx --with "psycopg[binary,pool]==3.2.3")
+# M6 路由契约：要 fastapi+httpx 起 TestClient，要 psycopg 让 app.py 能 import。
+# ★★ 还加了 pyyaml —— 因为这条套件从「只比路径集合」升到了
+#   「比每个端点声明的查询参数与默认值」。按缩进抠字能读参数名，
+#   读不了嵌在 `schema:` 底下的 `default`；而缩进假设是判据里最脆的一环。
+#   ⇒ 代价是一个依赖，换来的是判据不再建立在格式假设上。
+API_DEPS=(--with fastapi==0.115.6 --with httpx --with pyyaml==6.0.2 --with "psycopg[binary,pool]==3.2.3")
 # M9 集成面：要 fastapi+httpx 起 TestClient，还要 pyyaml 读模块登记表；
 # 它**不需要** psycopg —— M9 不直连库（这正是 test_console.py 第 1 组钉的事）。
 CONSOLE_DEPS=(--with fastapi==0.115.6 --with httpx --with pyyaml==6.0.2)

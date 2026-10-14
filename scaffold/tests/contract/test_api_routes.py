@@ -35,6 +35,10 @@ import pathlib
 import re
 import sys
 
+# ★ 读契约要用它。API_DEPS 里加了 pyyaml —— 判据从「比参数名」升到
+#   「比参数名与默认值」之后，按缩进抠字读不动嵌在 `schema:` 底下的 `default`。
+import yaml  # noqa: E402
+
 from fastapi.testclient import TestClient
 from starlette.routing import Match
 # ★ `psycopg` 把 `numeric` 读成 `Decimal`，所以库里的 `crs_central_meridian_deg`
@@ -666,77 +670,130 @@ def main() -> int:
     if not ok_meta:
         fails.append(f"假仓储判据的元测试失败：认出={_caught} 误报={_clean}")
 
-    # ---- 5i) ★★ 契约声明的查询参数 == 实现认识的查询参数 ----
-    # ★★ 这一条补的是**这次缺陷的成因本身**：契约里写着「客户端据此翻页」，
-    #   而实现里根本没有 `offset` —— 契约许了一个实现给不出的能力。
-    #   第 2 组的路径对齐门只比**路径集合**，参数漂移它看不见。
-    def _params_in(text: str, path_key: str) -> list[str]:
-        """从 OpenAPI 文本里取某个路径下 `in: query` 的参数名。
+    # ---- 5i) ★★★ 契约声明的查询参数（含默认值）== 实现认识的，**全部端点** ----
+    # ★★ 这一条守的是**成因本身**，不是某一个端点。原来它只管
+    #   `/v1/objects/{object_type}`（甲 那一轮加的），于是「契约许了一个实现
+    #   给不出的能力」这件事在**别的 20 个端点上**依然没有任何东西在比。
+    #   第 2 组的路径对齐门只比**路径集合**，参数与默认值的漂移它看不见。
+    #
+    # ★★ 换成解析真 yaml，不再按缩进抠字：现在要比**默认值**，而 `default`
+    #   嵌在 `schema:` 底下。缩进假设是判据里最脆的一环，而这次要读的东西
+    #   正好长在它最容易崩的位置。代价只是依赖桶里多一个 pyyaml。
+    #
+    # ★★★ 声明面是**多份契约的并集**：`m6-gateway.geo.v0.2.yaml` 头部逐字
+    #   写着「本文件是 v0.1 的**增量**，只描述新增与变化的部分」，所以它对
+    #   同一路径只列自己动过的参数 —— 只看一份会漏掉另一半，而漏掉的那半
+    #   正好是**没有人比过**的那半。
+    def _ver_key(fn: pathlib.Path) -> tuple:
+        """契约文件的版本序：先比 (主,次)，同版再比文件名。
 
-        ★ 不引 pyyaml：这一套的依赖桶（API_DEPS）里没有它，
-          而为了读一份 yaml 去动依赖桶，代价比按缩进解析大。
-        ★ 只取 `in: query` 的 —— `object_type` 是 `in: path`，不算查询参数。
-        ★ 遇到下一个 `  /` 开头的行就停 —— 否则会把别的端点的参数也吃进来。
+        ★ 这是本仓既有的版本约定，不是这条判据新定的：后一版覆盖前一版。
+          同名参数被多份声明时按这个序遍历，**靠后的赢**。
         """
-        lines = text.splitlines()
-        starts = [k for k, l in enumerate(lines) if l.rstrip() == f"  {path_key}:"]
-        if len(starts) != 1:
-            return []
-        i = starts[0]
-        j = next((k for k in range(i + 1, len(lines))
-                  if lines[k].startswith("  /")), len(lines))
-        out: list[str] = []
-        cur: str | None = None
-        for l in lines[i:j]:
-            m = re.match(r"\s*- name: (\S+)", l)
-            if m:
-                cur = m.group(1)
-            elif re.match(r"\s*in: query\s*$", l) and cur:
-                out.append(cur)
-                cur = None
-            elif re.match(r"\s*in: ", l):
-                cur = None
-        return out
+        m = re.search(r"\.v(\d+)\.(\d+)\.yaml$", fn.name)
+        v = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        return (v, fn.name)
 
-    _declared = _params_in(CONTRACT_PATH.read_text(encoding="utf-8"),
-                           "/v1/objects/{object_type}")
-    _impl = sorted(APP._LIST_OBJECTS_PARAMS)
-    print(f"  契约声明 {_declared} ｜ 实现认识 {_impl}")
-    if not _declared:
-        print("  ✗ 契约里没解析出该端点的查询参数 —— 判据本身失效了")
-        fails.append("契约查询参数解析为空，5i 已成摆设")
-    elif sorted(_declared) != _impl:
-        _c_only = sorted(set(_declared) - set(_impl))
-        _i_only = sorted(set(_impl) - set(_declared))
-        print(f"  ✗ 契约与实现不一致：契约多 {_c_only}，实现多 {_i_only}")
-        fails.append(f"契约↔实现查询参数漂移：契约 {_declared} vs 实现 {_impl}")
-    else:
-        print("  ✓ 契约声明的查询参数与实现认识的**完全一致**"
-              "（契约不会再许一个实现给不出的能力）")
+    def _declared_query() -> tuple:
+        """{路径: {方法: {参数名: (默认值, 声明它的文件)}}} + 覆盖记录。"""
+        out: dict = {}
+        over: dict = {}
+        for f in sorted(contract_files(), key=_ver_key):
+            doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            for path, item in (doc.get("paths") or {}).items():
+                for method, op in item.items():
+                    if not isinstance(op, dict):
+                        continue
+                    slot = out.setdefault(path, {}).setdefault(method, {})
+                    for prm in (op.get("parameters") or []):
+                        if prm.get("in") != "query":
+                            continue
+                        nm = prm["name"]
+                        if nm in slot and slot[nm][1] != f.name:
+                            over.setdefault(f"{method.upper()} {path}", []).append(
+                                f"{nm}: {slot[nm][1]}={slot[nm][0]!r} → {f.name}")
+                        slot[nm] = ((prm.get("schema") or {}).get("default"), f.name)
+        return out, over
 
-    # 元测试：证明 5i 的判据会响，且三件事都对
-    _PROBE_YAML = (
-        "  /v1/objects/{object_type}:\n"
-        "    get:\n"
-        "      parameters:\n"
-        "        - name: object_type\n"
-        "          in: path\n"
-        "        - name: limit\n"
-        "          in: query\n"
-        "        - name: offset\n"
-        "          in: query\n"
-        "  /v1/objects/other:\n"
-        "    get:\n"
-        "      parameters:\n"
-        "        - name: zzz_别的端点的\n"
-        "          in: query\n")
-    _probe = _params_in(_PROBE_YAML, "/v1/objects/{object_type}")
-    _probe2 = _params_in(_PROBE_YAML, "/v1/objects/other")
-    ok_meta2 = (_probe == ["limit", "offset"] and _probe2 == ["zzz_别的端点的"])
-    print(f"  元测试：只在 `in: path` 里的不算查询参数、且不会吃到下一个端点 → "
-          f"{_probe} / {_probe2} {'✓' if ok_meta2 else '✗'}")
-    if not ok_meta2:
-        fails.append(f"契约参数解析的元测试失败：{_probe} / {_probe2}")
+    def _compare(decl: dict, live: dict) -> tuple:
+        """比「两边都有的端点」→ (比了几对, 名字不一致, 默认值不一致, 有默认值的对数)。
+
+        ★ **只比两边都有的**：契约未收录的端点归第 2 组的路径门管，
+          这里再报一次就是同一条性质有了两份定义。
+        """
+        pairs, def_pairs = 0, 0
+        name_bad: list = []
+        def_bad: list = []
+        for path in sorted(set(live) & set(decl)):
+            for method in sorted(set(live[path]) & set(decl[path])):
+                impl = {q["name"]: (q.get("schema") or {}).get("default")
+                        for q in (live[path][method].get("parameters") or [])
+                        if q.get("in") == "query"}
+                declm = decl[path][method]
+                pairs += 1
+                if sorted(impl) != sorted(declm):
+                    name_bad.append(f"{method.upper()} {path}：契约 {sorted(declm)}"
+                                    f" vs 实现 {sorted(impl)}")
+                    continue
+                for nm in sorted(declm):
+                    if declm[nm][0] is None or impl[nm] is None:
+                        continue
+                    def_pairs += 1
+                    if declm[nm][0] != impl[nm]:
+                        def_bad.append(f"{method.upper()} {path} 的参数 {nm}："
+                                       f"契约 {declm[nm][0]!r}（{declm[nm][1]}）"
+                                       f" vs 实现 {impl[nm]!r}")
+        return pairs, name_bad, def_bad, def_pairs
+
+    _decl, _over = _declared_query()
+    _pairs, _name_bad, _def_bad, _def_pairs = _compare(
+        _decl, APP.app.openapi().get("paths", {}))
+    print(f"  比了 {_pairs} 个端点、{_def_pairs} 个带默认值的参数")
+    for k in sorted(_over):
+        print(f"    版本覆盖 {k}：{'；'.join(_over[k])}")
+
+    # ★ 计数下界：一个找不到目标的判据永远不会失败（宪法 V）
+    #   20 / 8 都是**实测值**，不是拍的（2026-10-14：21 个端点、8 个默认值）。
+    #   ★ 两个数差这么多是有原因的，而且不是缺陷：契约**没有义务**为每个参数
+    #     都写默认值（Service 侧有默认、契约只说「可传」是合法的）。所以默认值
+    #     这条的下界低，它守的是「解析没哑掉」，不是「覆盖率」。
+    if _pairs < 20 or _def_pairs < 8:
+        print(f"  ✗ 比对面太小（{_pairs} 个端点 / {_def_pairs} 个默认值）—— 判据已成摆设")
+        fails.append(f"契约↔实现参数比对只覆盖 {_pairs} 个端点 / {_def_pairs} 个默认值")
+    for x in _name_bad:
+        print(f"  ✗ 参数名漂移 {x}")
+    for x in _def_bad:
+        print(f"  ✗ 默认值漂移 {x}")
+    if _name_bad:
+        fails.append(f"契约↔实现查询参数漂移 {len(_name_bad)} 处：{_name_bad}")
+    if _def_bad:
+        fails.append(f"契约↔实现默认值漂移 {len(_def_bad)} 处：{_def_bad}")
+    if not (_name_bad or _def_bad) and _pairs >= 20 and _def_pairs >= 8:
+        print("  ✓ 全部端点的查询参数名与默认值都与契约一致")
+
+    # 元测试①：证明 _compare 的判据会响（三态：一致静默 / 名字漂移 / 默认值漂移）
+    _ok_p = [{"name": "limit", "in": "query", "schema": {"default": 100}}]
+    _mt_decl = {"P": {"get": {"limit": (100, "a.yaml")}}}
+    _r0 = _compare(_mt_decl, {"P": {"get": {"parameters": _ok_p}}})
+    _r1 = _compare(_mt_decl, {"P": {"get": {"parameters": [
+        {"name": "offset", "in": "query", "schema": {"default": 0}}]}}})
+    _r2 = _compare(_mt_decl, {"P": {"get": {"parameters": [
+        {"name": "limit", "in": "query", "schema": {"default": 999}}]}}})
+    _okm1 = (len(_r0[1]) == 0 and len(_r0[2]) == 0 and _r0[3] == 1
+             and len(_r1[1]) == 1 and len(_r2[2]) == 1)
+    print(f"  元测试：一致时静默、名字漂移会响、默认值漂移会响 → {'✓' if _okm1 else '✗'}")
+    if not _okm1:
+        fails.append(f"参数比对判据的元测试失败：{_r0[1:]} / {_r1[1]} / {_r2[2]}")
+
+    # 元测试②：钉死版本序。★ 上一条判据的覆盖规则建立在这个序上，
+    #   而 sorted() 的字典序**不等于**版本序 —— 例如 v0.10 会排到 v0.2 前面。
+    _ord = [f.name for f in sorted(contract_files(), key=_ver_key)]
+    _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.geo.v0.2.yaml",
+                 "m6-gateway.geo.v0.3.yaml", "m6-gateway.v0.3.yaml"]
+    _okm2 = _ord == _want_ord
+    print(f"  元测试：契约版本序 → {_ord} {'✓' if _okm2 else '✗'}")
+    if not _okm2:
+        fails.append(f"契约版本序不符：{_ord}，期望 {_want_ord}")
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
