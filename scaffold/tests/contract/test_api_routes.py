@@ -695,7 +695,11 @@ def main() -> int:
         return (v, fn.name)
 
     def _declared_query() -> tuple:
-        """{路径: {方法: {参数名: (默认值, 声明它的文件)}}} + 覆盖记录。"""
+        """{路径: {方法: {参数名: (默认值, 文件名, schema, required)}}} + 覆盖记录。
+
+        ★ 存四元组是因为后面有两条判据要用同一份解析结果：5i 只用前两项，
+          5j 要用后两项。**一份解析、两处消费**，不各写一遍。
+        """
         out: dict = {}
         over: dict = {}
         for f in sorted(contract_files(), key=_ver_key):
@@ -712,10 +716,12 @@ def main() -> int:
                         if nm in slot and slot[nm][1] != f.name:
                             over.setdefault(f"{method.upper()} {path}", []).append(
                                 f"{nm}: {slot[nm][1]}={slot[nm][0]!r} → {f.name}")
-                        slot[nm] = ((prm.get("schema") or {}).get("default"), f.name)
+                        slot[nm] = ((prm.get("schema") or {}).get("default"), f.name,
+                                    prm.get("schema") or {},
+                                    bool(prm.get("required", False)))
         return out, over
 
-    def _compare(decl: dict, live: dict) -> tuple:
+    def _compare(decl: dict, live: dict) -> tuple:  # noqa: D401
         """比「两边都有的端点」→ (比了几对, 名字不一致, 默认值不一致, 有默认值的对数)。
 
         ★ **只比两边都有的**：契约未收录的端点归第 2 组的路径门管，
@@ -785,6 +791,135 @@ def main() -> int:
     if not _okm1:
         fails.append(f"参数比对判据的元测试失败：{_r0[1:]} / {_r1[1]} / {_r2[2]}")
 
+    # ---- 5j) ★★ 类型、required、取值范围 ----
+    # ★★ 5i 比的是**参数的名字**（以及名字上挂的默认值）。参数**长什么样**
+    #   —— 是整数还是浮点、上下界多少 —— 一个都没比过。
+    #   `step_m` 的 `gt=0, le=1000` 就是实例：契约里没有这两个界。
+    #
+    # ★★★ 与 5i 的性质不同，所以判据也不同，这里必须说清楚：
+    #   5i 抓的是**两边不一致**（契约说 10、实现给 20）—— 那是**静默**的错，
+    #   调用方拿到的是一个和契约不符的数，不报错。
+    #   这一条抓的是**实现有、契约没写**的约束。它**不静默**：越界会 422，
+    #   调用方能学到。⇒ 严重度低一档，处理方式也该低一档。
+    #
+    # ⇒ 于是分两问：
+    #   ①「两边都声明的，必须相等」—— 严格门，和 5i 同级（防的是未来的漂移）；
+    #   ②「实现有、契约没声明的」—— **棘轮门**：只记数，只许变少不许变多。
+    #      不直接把契约补全是**有意的**：补全要给两个契约族各加一份增量文件，
+    #      而这 5 条该不该补、补成什么值，取决于一个产品决定（见 §九）。
+    _RANGE_KEYS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+    # ★★ 棘轮是**逐条冻结的名单**，不是一个计数。
+    #   我第一版只记了条数，然后红验当场把它的洞照出来了：把 `lat` 的上界
+    #   从 90 悄悄改成 91，条数不变（那条本来就没声明），门一声不响。
+    #   ⇒ 记数只挡「多了一条」，挡不住「这一条被改了」。名单两个都挡。
+    #
+    # ★ 这份名单**只许缩短**（与 §5g 的假仓储表、LEGACY_UNCOMMENTED 同一条规矩）：
+    #   实际少了要红（提醒你删掉陈旧条目），实际多了更要红。
+    _UNDECLARED_FROZEN = (
+        "GET /v1/geometry/sections/{section_id}/geo/reverse 的参数 lat："
+        "{'minimum': -90, 'maximum': 90}",
+        "GET /v1/geometry/sections/{section_id}/geo/reverse 的参数 lon："
+        "{'minimum': -180, 'maximum': 180}",
+        "GET /v1/geometry/sections/{section_id}/geo/route 的参数 step_m："
+        "{'maximum': 1000, 'exclusiveMinimum': 0}",
+        "GET /v1/geometry/sections/{section_id}/stations 的参数 limit："
+        "{'minimum': 1, 'maximum': 5000}",
+        "GET /v1/objects/wim_axle 的参数 limit："
+        "{'minimum': 1, 'maximum': 2000}",
+    )
+
+    def _shape(sc: dict) -> tuple:
+        """把参数 schema 归一成 (类型, required, {范围键: 值})。
+
+        ★ `anyOf: [{type: X}, {type: null}]` 是 FastAPI 对 `X | None` 的写法，
+          表示「可空」，不是「两个类型」。两边写法不同就比不动 ——
+          一边写 anyOf、一边写 type 会被误报成类型漂移，那是判据的错。
+        """
+        t = sc.get("type")
+        if t is None and "anyOf" in sc:
+            subs = [x.get("type") for x in sc["anyOf"] if isinstance(x, dict)]
+            real = sorted(x for x in subs if x and x != "null")
+            t = "|".join(real) if real else "null"
+        return t, {k: sc[k] for k in _RANGE_KEYS if k in sc}
+
+    def _params_of(node: dict) -> dict:
+        return {q["name"]: q for q in (node.get("parameters") or [])
+                if q.get("in") == "query"}
+
+    _shape_bad: list = []
+    _rng_bad: list = []
+    _undecl: list = []
+    _s_pairs = 0
+    for _p in sorted(set(_decl) & set(APP.app.openapi().get("paths", {}))):
+        _lv = APP.app.openapi()["paths"][_p]
+        for _mth in sorted(set(_decl[_p]) & set(_lv)):
+            for _nm, _c in _decl[_p][_mth].items():
+                _i = _params_of(_lv[_mth]).get(_nm)
+                if _i is None:
+                    continue
+                _s_pairs += 1
+                _ct, _cr = _shape(_c[2])
+                _it, _ir = _shape(_i.get("schema") or {})
+                _tag = f"{_mth.upper()} {_p} 的参数 {_nm}"
+                if _ct is not None and _it is not None and _ct != _it:
+                    _shape_bad.append(f"{_tag}：契约 {_ct!r}（{_c[1]}） vs 实现 {_it!r}")
+                    continue
+                if _c[3] != bool(_i.get("required", False)):
+                    _shape_bad.append(f"{_tag} 的 required：契约 {_c[3]}"
+                                      f"（{_c[1]}） vs 实现 {bool(_i.get('required', False))}")
+                    continue
+                if _cr and _ir and _cr != _ir:
+                    _rng_bad.append(f"{_tag}：契约 {_cr}（{_c[1]}） vs 实现 {_ir}")
+                elif _ir and not _cr:
+                    _undecl.append(f"{_tag}：{_ir}")
+
+    print(f"  比了 {_s_pairs} 个参数的形状 ｜ 类型/required 差 {len(_shape_bad)}"
+          f" ｜ 范围两边都有而不同 {len(_rng_bad)} ｜ 实现有契约没声明 {len(_undecl)}")
+    for x in _shape_bad:
+        print(f"  ✗ 形状漂移 {x}")
+    for x in _rng_bad:
+        print(f"  ✗ 范围漂移 {x}")
+    for x in _undecl:
+        print(f"    ○ 契约未声明 {x}")
+    _new = [x for x in _undecl if x not in _UNDECLARED_FROZEN]
+    _stale = [x for x in _UNDECLARED_FROZEN if x not in _undecl]
+    for x in _new:
+        print(f"  ✗ 新增未声明的约束 {x}")
+    for x in _stale:
+        print(f"  ✗ 名单上的约束已不成立（请删掉这一条）{x}")
+    if len(_UNDECLARED_FROZEN) < 1:
+        print("  ✗ 冻结名单是空的 —— 这条棘轮已成摆设")
+        fails.append("契约未声明的约束冻结名单为空")
+    if _s_pairs < 20 or not _undecl:
+        print(f"  ✗ 形状比对面太小或棘轮没量到东西（{_s_pairs} / {len(_undecl)}）")
+        fails.append(f"参数形状比对失效：{_s_pairs} 个参数 / {len(_undecl)} 条未声明")
+    if _shape_bad:
+        fails.append(f"契约↔实现参数形状漂移 {len(_shape_bad)} 处：{_shape_bad}")
+    if _rng_bad:
+        fails.append(f"契约↔实现取值范围漂移 {len(_rng_bad)} 处：{_rng_bad}")
+    if _new:
+        fails.append(f"契约未声明的约束新增 {len(_new)} 条：{_new}")
+    if _stale:
+        fails.append(f"契约未声明的约束名单已过期 {len(_stale)} 条：{_stale}")
+    if not (_shape_bad or _rng_bad or _new or _stale):
+        print(f"  ✓ 类型与 required 全一致；{len(_undecl)} 条未声明的约束与冻结名单逐条相符")
+
+    # 元测试：证明形状判据的三条腿都会响
+    def _mk(q: dict) -> dict:
+        return {"paths": {"P": {"get": {"parameters": [q]}}}}
+    _mt_base = {"P": {"get": {"step_m": (0, "a.yaml", {"type": "number"}, False)}}}
+    _ok = {"name": "step_m", "in": "query", "required": False,
+           "schema": {"type": "number", "exclusiveMinimum": 0}}
+    _tbad = {"name": "step_m", "in": "query", "required": False,
+             "schema": {"type": "string", "exclusiveMinimum": 0}}
+    _rbad = {"name": "step_m", "in": "query", "required": False,
+             "schema": {"type": "number", "exclusiveMinimum": 5}}
+    _okm = (_shape(_ok["schema"]) == ("number", {"exclusiveMinimum": 0})
+            and _shape(_tbad["schema"])[0] == "string"
+            and _shape({"anyOf": [{"type": "integer"}, {"type": "null"}]})[0] == "integer")
+    print(f"  元测试：anyOf 可空归一成单类型、类型差异可分辨 → {'✓' if _okm else '✗'}")
+    if not _okm:
+        fails.append("参数形状归一化的元测试失败")
     # 元测试②：钉死版本序。★ 上一条判据的覆盖规则建立在这个序上，
     #   而 sorted() 的字典序**不等于**版本序 —— 例如 v0.10 会排到 v0.2 前面。
     _ord = [f.name for f in sorted(contract_files(), key=_ver_key)]
