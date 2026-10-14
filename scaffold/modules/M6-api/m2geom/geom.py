@@ -174,13 +174,23 @@ def derive_control_points(elements: list[dict[str, Any]]) -> list[dict[str, Any]
 # 算的，独立于这里的公式。33 个真实线元全部吻合到 6.6e-7 m / 1.6e-9°。
 
 
-def curvature_at(element: dict[str, Any], station_m: float) -> float:
-    """线元内某桩号的曲率（1/m）。左转为正、右转为负。"""
+def kappa_ends(element: dict[str, Any]) -> tuple[float, float]:
+    """线元两端曲率 (κ起, κ终)，1/m，左转为正、右转为负。
+
+    κ 沿线元**线性变化**，这是后面三处的共同前提：
+    `curvature_at` 靠它线性插值、`azimuth_at` 靠它对 ∫κ ds 得闭式、
+    `point_at` 靠它判断该走初等闭式还是 Simpson。**只在这里算一次。**
+    """
     sgn = element.get("turn_flag") or 1
     r0 = element.get("radius_start_m")
     r1 = element.get("radius_end_m")
-    k0 = 0.0 if not r0 else sgn / r0          # R=None → 无穷大半径 → 曲率 0
-    k1 = 0.0 if not r1 else sgn / r1
+    return (0.0 if not r0 else sgn / r0,      # R=None → 无穷大半径 → 曲率 0
+            0.0 if not r1 else sgn / r1)
+
+
+def curvature_at(element: dict[str, Any], station_m: float) -> float:
+    """线元内某桩号的曲率（1/m）。左转为正、右转为负。"""
+    k0, k1 = kappa_ends(element)
     length = element["length_m"]
     if length <= 0:
         return k0
@@ -209,11 +219,7 @@ def azimuth_at(element: dict[str, Any], station_m: float) -> float:
     曲率线性 → ∫κ ds 是二次式，所以这里是**闭式精确**的，不靠数值积分：
         Δθ = κ0·d + (κ1 − κ0)·d² / (2L)
     """
-    sgn = element.get("turn_flag") or 1
-    r0 = element.get("radius_start_m")
-    r1 = element.get("radius_end_m")
-    k0 = 0.0 if not r0 else sgn / r0
-    k1 = 0.0 if not r1 else sgn / r1
+    k0, k1 = kappa_ends(element)
     d = station_m - element["start_station_m"]
     length = element["length_m"]
     dtheta = k0 * d
@@ -226,13 +232,28 @@ def point_at(element: dict[str, Any], station_m: float,
              *, steps: int = 64) -> tuple[float, float]:
     """线元内某桩号的平面坐标 (x, y)。
 
-    对 ``∫(cosθ, sinθ) ds`` 用**复合 Simpson**：方位角是精确的，只有这一步是数值的。
-    直线与圆曲线其实有闭式，缓和曲线（回旋线）要 Fresnel 积分、没有初等闭式，
-    所以统一走 Simpson —— 一条路，且误差可控（steps=64 时实测 < 1e-9 m）。
+    κ 沿线元**不变**时（直线、圆曲线）走**初等闭式**，不再积分：
+
+        κ = 0:  x = x0 + d·cosθ0,            y = y0 + d·sinθ0
+        κ ≠ 0:  x = x0 + (sinθ − sinθ0)/κ,   y = y0 − (cosθ − cosθ0)/κ
+
+    κ 线性变化时（缓和曲线／回旋线）坐标是 Fresnel 积分、**没有初等闭式**，
+    走**复合 Simpson**：方位角本身仍是闭式精确的，只有坐标这一步是数值的。
+    实测两条路的差 ≤ 8.0e-09 m（圆曲线）、0（直线），见
+    tests/contract/test_geometry_solver.py 第 3 组。
     """
     d = station_m - element["start_station_m"]
     if d <= 0:
         return element["start_x"], element["start_y"]
+    k0, k1 = kappa_ends(element)
+    if k0 == k1:
+        th0 = math.radians(_need_start_azimuth(element))
+        if k0 == 0.0:                          # 直线：θ 是常数
+            return (element["start_x"] + d * math.cos(th0),
+                    element["start_y"] + d * math.sin(th0))
+        th = th0 + k0 * d                      # 圆曲线：∫cosθ ds 有闭式
+        return (element["start_x"] + (math.sin(th) - math.sin(th0)) / k0,
+                element["start_y"] - (math.cos(th) - math.cos(th0)) / k0)
     n = max(2, steps + (steps % 2))            # Simpson 要求偶数段
     h = d / n
     th0 = math.radians(_need_start_azimuth(element))
@@ -257,4 +278,4 @@ def locate(elements: list[dict[str, Any]], station_m: float) -> dict[str, Any] |
 
 
 __all__ = ["derive_control_points", "curve_groups",
-           "curvature_at", "azimuth_at", "point_at", "locate"]
+           "curvature_at", "azimuth_at", "point_at", "locate", "kappa_ends"]

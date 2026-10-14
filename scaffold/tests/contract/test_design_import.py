@@ -622,6 +622,61 @@ def main() -> int:
     check("★ 桩号落在全部线元之外 → locate 返回 None，**不外推**",
           _geom.locate(_el, -1.0) is None and _geom.locate(_el, 1000.0) is None)
 
+    # ★★ 闭式守卫（2026-10-14）：κ 沿线元**不变**时 point_at 走初等闭式，不再积分。
+    #    参考实现写在下面、**不复用被测代码** —— 拿被测函数验被测函数是同义反复。
+    #    参考用 4096 段：它的误差 ~1e-18 m，远在 float64 分辨率（坐标 ~2000 m 时 ~4e-13 m）之下。
+    def _ref_point(e, s, steps=4096):
+        d = s - e["start_station_m"]
+        if d <= 0:
+            return e["start_x"], e["start_y"]
+        n = max(2, steps + (steps % 2))
+        h = d / n
+        t0 = math.radians(e["azimuth_deg"])
+        sx = math.cos(t0) + math.cos(math.radians(_geom.azimuth_at(e, s)))
+        sy = math.sin(t0) + math.sin(math.radians(_geom.azimuth_at(e, s)))
+        for i in range(1, n):
+            t = math.radians(_geom.azimuth_at(e, e["start_station_m"] + i * h))
+            w = 4.0 if i % 2 else 2.0
+            sx += w * math.cos(t)
+            sy += w * math.sin(t)
+        return (e["start_x"] + h / 3.0 * sx, e["start_y"] + h / 3.0 * sy)
+
+    _cl = [
+        dict(seq=1, type="line", turn_flag=1, start_station_m=0.0, end_station_m=800.0,
+             length_m=800.0, azimuth_deg=37.0, start_x=1000.0, start_y=2000.0,
+             radius_start_m=None, radius_end_m=None),
+        dict(seq=2, type="circular", turn_flag=1, start_station_m=0.0, end_station_m=600.0,
+             length_m=600.0, azimuth_deg=37.0, start_x=1000.0, start_y=2000.0,
+             radius_start_m=1200.0, radius_end_m=1200.0),
+        dict(seq=3, type="transition", turn_flag=1, start_station_m=0.0, end_station_m=85.0,
+             length_m=85.0, azimuth_deg=37.0, start_x=1000.0, start_y=2000.0,
+             radius_start_m=None, radius_end_m=600.0),
+    ]
+    _worst_cl = {}
+    for _e in _cl:
+        for _f in (0.13, 0.37, 0.5, 0.71, 0.93):
+            _s = _e["length_m"] * _f
+            _d = math.dist(_geom.point_at(_e, _s), _ref_point(_e, _s))
+            _worst_cl[_e["type"]] = max(_worst_cl.get(_e["type"], 0.0), _d)
+    check("★ 闭式/积分两条路一致：直线、圆曲线、缓和曲线都 ≤ 1e-8 m",
+          all(v <= 1e-8 for v in _worst_cl.values()),
+          " / ".join(f"{k} {v:.3e}" for k, v in sorted(_worst_cl.items())))
+    check("★ 走不走闭式由 κ 起终是否相等决定（直线、圆曲线相等；缓和曲线不等）",
+          _geom.kappa_ends(_cl[0])[0] == _geom.kappa_ends(_cl[0])[1]
+          and _geom.kappa_ends(_cl[1])[0] == _geom.kappa_ends(_cl[1])[1]
+          and _geom.kappa_ends(_cl[2])[0] != _geom.kappa_ends(_cl[2])[1],
+          f"line {_geom.kappa_ends(_cl[0])} / circular {_geom.kappa_ends(_cl[1])}"
+          f" / transition {_geom.kappa_ends(_cl[2])}")
+    # 圆曲线闭式必须**精确**落在半径 R 上 —— 这是闭式本身的自证，与参考积分无关。
+    _rc = 0.0
+    # 圆心 C = (x0 − sinθ0/κ, y0 + cosθ0/κ)；P(s) − C = (sinθ/κ, −cosθ/κ) → |P−C| = 1/κ
+    _cx = _cl[1]["start_x"] - math.sin(math.radians(_cl[1]["azimuth_deg"])) * 1200.0
+    _cy = _cl[1]["start_y"] + math.cos(math.radians(_cl[1]["azimuth_deg"])) * 1200.0
+    for _f in (0.1, 0.3, 0.5, 0.7, 0.9):
+        _rc = max(_rc, abs(math.dist(_geom.point_at(_cl[1], 600.0 * _f), (_cx, _cy)) - 1200.0))
+    check("★ 圆曲线闭式自证：每个算出来的点到圆心的距离都等于 R（差 ≤ 1e-9 m）",
+          _rc <= 1e-9, f"实测最大偏差 {_rc:.3e} m")
+
     # ★★ 元测试：把 turn_flag 丢掉（一律按左转算），右转的线元必须算不对。
     #    这正是我第一版犯的错 —— 33 个真实线元里有 16 个是右转，终点最多差 98 m。
     _r = dict(_el[2], turn_flag=-1)
