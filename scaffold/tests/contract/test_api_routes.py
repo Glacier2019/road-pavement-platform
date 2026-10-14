@@ -808,6 +808,10 @@ def main() -> int:
     #      不直接把契约补全是**有意的**：补全要给两个契约族各加一份增量文件，
     #      而这 5 条该不该补、补成什么值，取决于一个产品决定（见 §九）。
     _RANGE_KEYS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+    # ★ 约束类键的**全集**。description / title 之类不算：前者是文档、
+    #   每个端点各写各的，后者是 FastAPI 从参数名生成的。拿它们比没有意义。
+    _CONSTRAINT_KEYS = ("type", "format") + _RANGE_KEYS + (
+        "minLength", "maxLength", "pattern", "enum", "const", "multipleOf")
     # ★★ 棘轮是**逐条冻结的名单**，不是一个计数。
     #   我第一版只记了条数，然后红验当场把它的洞照出来了：把 `lat` 的上界
     #   从 90 悄悄改成 91，条数不变（那条本来就没声明），门一声不响。
@@ -815,32 +819,66 @@ def main() -> int:
     #
     # ★ 这份名单**只许缩短**（与 §5g 的假仓储表、LEGACY_UNCOMMENTED 同一条规矩）：
     #   实际少了要红（提醒你删掉陈旧条目），实际多了更要红。
+    #
+    # ★★ 两个坑，都是门自己照出来的：
+    #   ① 名单最初是 5 条。把 anyOf 摊平逻辑收拢成一处之后变成 7 条 ——
+    #      `from_km` / `to_km` 的 `ge=0` 原来**藏在 anyOf 里面**，看不见。
+    #      ⇒ 「收拢一处」当场就还了本。
+    #   ② 条目里嵌的是 Python `repr`，而 repr **对键序敏感**：实现侧 schema 的
+    #      键是 FastAPI 按字母排的（maximum 在前），契约侧是手写的（minimum 在前），
+    #      于是同一份约束被当成「新增」+「过期」各报一次。
+    #      ⇒ 一律走 `_fmt()` 排序，键序不参与判定。
     _UNDECLARED_FROZEN = (
         "GET /v1/geometry/sections/{section_id}/geo/reverse 的参数 lat："
-        "{'minimum': -90, 'maximum': 90}",
+        "{'maximum': 90, 'minimum': -90}",
         "GET /v1/geometry/sections/{section_id}/geo/reverse 的参数 lon："
-        "{'minimum': -180, 'maximum': 180}",
+        "{'maximum': 180, 'minimum': -180}",
         "GET /v1/geometry/sections/{section_id}/geo/route 的参数 step_m："
-        "{'maximum': 1000, 'exclusiveMinimum': 0}",
+        "{'exclusiveMinimum': 0, 'maximum': 1000}",
+        "GET /v1/geometry/sections/{section_id}/stations 的参数 from_km："
+        "{'minimum': 0}",
+        "GET /v1/geometry/sections/{section_id}/stations 的参数 to_km："
+        "{'minimum': 0}",
         "GET /v1/geometry/sections/{section_id}/stations 的参数 limit："
-        "{'minimum': 1, 'maximum': 5000}",
+        "{'maximum': 5000, 'minimum': 1}",
         "GET /v1/objects/wim_axle 的参数 limit："
-        "{'minimum': 1, 'maximum': 2000}",
+        "{'maximum': 2000, 'minimum': 1}",
     )
 
-    def _shape(sc: dict) -> tuple:
-        """把参数 schema 归一成 (类型, required, {范围键: 值})。
+    def _fmt(d: dict) -> str:
+        """把约束字典印成**键序无关**的字符串。
 
-        ★ `anyOf: [{type: X}, {type: null}]` 是 FastAPI 对 `X | None` 的写法，
-          表示「可空」，不是「两个类型」。两边写法不同就比不动 ——
-          一边写 anyOf、一边写 type 会被误报成类型漂移，那是判据的错。
+        ★ 不排序就会把同一份约束因为键序不同而报成两条 —— 键序没有语义，
+          不该参与判定。名单里的每一个字都由它产出。
         """
-        t = sc.get("type")
-        if t is None and "anyOf" in sc:
-            subs = [x.get("type") for x in sc["anyOf"] if isinstance(x, dict)]
-            real = sorted(x for x in subs if x and x != "null")
-            t = "|".join(real) if real else "null"
-        return t, {k: sc[k] for k in _RANGE_KEYS if k in sc}
+        return "{" + ", ".join(f"{k!r}: {d[k]!r}" for k in sorted(d)) + "}"
+
+    def _shape(sc: dict) -> tuple:
+        """把参数 schema 归一成 (类型, {全部约束键: 值})。
+
+        ★★★ **任何比较都必须走这一个函数。** 这是本文件里唯一的一处摊平逻辑。
+
+        ★ `anyOf: [{type: X, format: F}, {type: null}]` 是 FastAPI 对
+          `X | None` 的写法：**约束藏在 anyOf 里面，顶层什么都没有**。
+          不摊平它，就会把「契约声明了 format、实现没有」当成缺陷 —— 那是假的。
+
+        ★★ 这个坑我在同一个会话里**踩了两次**：两次都是自己写探针、两次都忘了摊平，
+          两次都得出「契约声明了 10 条实现没有」这种结论，而真相是 **0 条**。
+          ⇒ 教训不是「记得摊平」，是**摊平只许有一处**。
+        """
+        merged = {k: v for k, v in sc.items() if k in _CONSTRAINT_KEYS}
+        subs = [x for x in (sc.get("anyOf") or []) if isinstance(x, dict)]
+        for sub in subs:
+            for k, v in sub.items():
+                if k in _CONSTRAINT_KEYS and k != "type":
+                    merged.setdefault(k, v)
+        if "type" not in merged:
+            real = sorted({x.get("type") for x in subs
+                           if x.get("type") and x.get("type") != "null"})
+            if real:
+                merged["type"] = "|".join(real)
+        return (merged.get("type"),
+                {k: v for k, v in merged.items() if k != "type"})
 
     def _params_of(node: dict) -> dict:
         return {q["name"]: q for q in (node.get("parameters") or [])
@@ -849,6 +887,7 @@ def main() -> int:
     _shape_bad: list = []
     _rng_bad: list = []
     _undecl: list = []
+    _promised: list = []
     _s_pairs = 0
     for _p in sorted(set(_decl) & set(APP.app.openapi().get("paths", {}))):
         _lv = APP.app.openapi()["paths"][_p]
@@ -858,8 +897,10 @@ def main() -> int:
                 if _i is None:
                     continue
                 _s_pairs += 1
-                _ct, _cr = _shape(_c[2])
-                _it, _ir = _shape(_i.get("schema") or {})
+                _ct, _cc = _shape(_c[2])
+                _it, _ic = _shape(_i.get("schema") or {})
+                _cr = {k: v for k, v in _cc.items() if k in _RANGE_KEYS}
+                _ir = {k: v for k, v in _ic.items() if k in _RANGE_KEYS}
                 _tag = f"{_mth.upper()} {_p} 的参数 {_nm}"
                 if _ct is not None and _it is not None and _ct != _it:
                     _shape_bad.append(f"{_tag}：契约 {_ct!r}（{_c[1]}） vs 实现 {_it!r}")
@@ -869,18 +910,30 @@ def main() -> int:
                                       f"（{_c[1]}） vs 实现 {bool(_i.get('required', False))}")
                     continue
                 if _cr and _ir and _cr != _ir:
-                    _rng_bad.append(f"{_tag}：契约 {_cr}（{_c[1]}） vs 实现 {_ir}")
+                    _rng_bad.append(f"{_tag}：契约 {_fmt(_cr)}（{_c[1]}）"
+                                    f" vs 实现 {_fmt(_ir)}")
                 elif _ir and not _cr:
-                    _undecl.append(f"{_tag}：{_ir}")
+                    _undecl.append(f"{_tag}：{_fmt(_ir)}")
+                # ★★ 第三个方向：**契约声明了约束、实现没有。**
+                #   这正是 D-019 那个缺陷的形状（契约许了一个实现不兑现的承诺），
+                #   只是从「少一个参数」下沉到「少一个约束」。
+                #   ⇒ 它**没有名单**：一个不兑现的承诺不该被冻结成欠债。
+                for _k in sorted(_cc):
+                    if _k not in _ic:
+                        _promised.append(
+                            f"{_tag}：契约声明 {_k} = {_cc[_k]!r}（{_c[1]}），实现没有")
 
     print(f"  比了 {_s_pairs} 个参数的形状 ｜ 类型/required 差 {len(_shape_bad)}"
-          f" ｜ 范围两边都有而不同 {len(_rng_bad)} ｜ 实现有契约没声明 {len(_undecl)}")
+          f" ｜ 范围两边都有而不同 {len(_rng_bad)} ｜ 实现有契约没声明 {len(_undecl)}"
+          f" ｜ 契约声明了实现没有 {len(_promised)}")
     for x in _shape_bad:
         print(f"  ✗ 形状漂移 {x}")
     for x in _rng_bad:
         print(f"  ✗ 范围漂移 {x}")
     for x in _undecl:
         print(f"    ○ 契约未声明 {x}")
+    for x in _promised:
+        print(f"  ✗ 契约声明了而实现没有 {x}")
     _new = [x for x in _undecl if x not in _UNDECLARED_FROZEN]
     _stale = [x for x in _UNDECLARED_FROZEN if x not in _undecl]
     for x in _new:
@@ -890,8 +943,9 @@ def main() -> int:
     if len(_UNDECLARED_FROZEN) < 1:
         print("  ✗ 冻结名单是空的 —— 这条棘轮已成摆设")
         fails.append("契约未声明的约束冻结名单为空")
-    if _s_pairs < 20 or not _undecl:
-        print(f"  ✗ 形状比对面太小或棘轮没量到东西（{_s_pairs} / {len(_undecl)}）")
+    if _s_pairs < 20 or len(_undecl) < 5:
+        print(f"  ✗ 形状比对面太小或棘轮没量到东西（{_s_pairs} 个参数 / "
+              f"{len(_undecl)} 条未声明，下界 20 / 5）")
         fails.append(f"参数形状比对失效：{_s_pairs} 个参数 / {len(_undecl)} 条未声明")
     if _shape_bad:
         fails.append(f"契约↔实现参数形状漂移 {len(_shape_bad)} 处：{_shape_bad}")
@@ -901,23 +955,32 @@ def main() -> int:
         fails.append(f"契约未声明的约束新增 {len(_new)} 条：{_new}")
     if _stale:
         fails.append(f"契约未声明的约束名单已过期 {len(_stale)} 条：{_stale}")
-    if not (_shape_bad or _rng_bad or _new or _stale):
-        print(f"  ✓ 类型与 required 全一致；{len(_undecl)} 条未声明的约束与冻结名单逐条相符")
+    if _promised:
+        fails.append(f"契约声明了而实现没有的约束 {len(_promised)} 处：{_promised}")
+    if not (_shape_bad or _rng_bad or _new or _stale or _promised):
+        print(f"  ✓ 三个方向都干净：类型与 required 全一致；{len(_undecl)} 条未声明的约束"
+              f"与冻结名单逐条相符；契约没有许下实现给不出的约束")
 
-    # 元测试：证明形状判据的三条腿都会响
-    def _mk(q: dict) -> dict:
-        return {"paths": {"P": {"get": {"parameters": [q]}}}}
-    _mt_base = {"P": {"get": {"step_m": (0, "a.yaml", {"type": "number"}, False)}}}
-    _ok = {"name": "step_m", "in": "query", "required": False,
-           "schema": {"type": "number", "exclusiveMinimum": 0}}
-    _tbad = {"name": "step_m", "in": "query", "required": False,
-             "schema": {"type": "string", "exclusiveMinimum": 0}}
-    _rbad = {"name": "step_m", "in": "query", "required": False,
-             "schema": {"type": "number", "exclusiveMinimum": 5}}
-    _okm = (_shape(_ok["schema"]) == ("number", {"exclusiveMinimum": 0})
-            and _shape(_tbad["schema"])[0] == "string"
-            and _shape({"anyOf": [{"type": "integer"}, {"type": "null"}]})[0] == "integer")
-    print(f"  元测试：anyOf 可空归一成单类型、类型差异可分辨 → {'✓' if _okm else '✗'}")
+    # ★★ 元测试：形状判据的每一条腿都要能被证明**会响**。
+    #   宪法 V：一个找不到目标的判据永远不会失败，而「0 条发现」与「没在看」
+    #   在输出上一模一样。第三个方向实测就是 0 条 —— 所以它**更需要**这个证明。
+    _mt_ok = _shape({"type": "number", "exclusiveMinimum": 0})
+    _mt_null = _shape({"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]})
+    _mt_bare = _shape({"anyOf": [{"type": "string"}, {"type": "null"}]})
+    # ① 摊平：anyOf 里的 format 必须被提出来，否则第三个方向全是假发现
+    _mt_flat = (_mt_ok == ("number", {"exclusiveMinimum": 0})
+                and _mt_null == ("string", {"format": "date"}))
+    # ② 第三个方向：契约声明 format、实现只声明 string ⇒ 必须能发现
+    _mt_seen = [k for k in sorted(_mt_null[1]) if k not in _mt_bare[1]]
+    # ③ 反向：实现有、契约没有 ⇒ 走的是另一条腿，不该混进来
+    _mt_rev = [k for k in sorted(_mt_bare[1]) if k not in _mt_null[1]]
+    _okm = (_mt_flat and _mt_seen == ["format"] and _mt_rev == []
+            and _shape({"type": "string"})[0] == "string"
+            and _shape({"type": "integer"})[0] != _shape({"type": "string"})[0]
+            # ④ 键序无关：名单条目由 _fmt 产出，两处键序不同必须印成同一个字符串
+            and _fmt({"b": 2, "a": 1}) == _fmt({"a": 1, "b": 2}))
+    print(f"  元测试：anyOf 摊平、类型可分辨、第三方向能发现、反向不串 → "
+          f"{'✓' if _okm else '✗'}（摊平 {_mt_flat}／发现 {_mt_seen}／反向 {_mt_rev}）")
     if not _okm:
         fails.append("参数形状归一化的元测试失败")
     # 元测试②：钉死版本序。★ 上一条判据的覆盖规则建立在这个序上，
