@@ -366,7 +366,8 @@ CREATE TABLE IF NOT EXISTS road_section (
     remark        text
 );
 COMMENT ON TABLE  road_section IS '路段档案（路线→路段）';
-COMMENT ON COLUMN road_section.start_station_km IS '数值桩号便于区间排序检索';
+COMMENT ON COLUMN road_section.start_station_km IS '数值桩号便于区间排序检索。★这是**路段（工程标段）的起点**，不是线形单元的起点 —— 路段是管理口径的划分，线元才是几何口径';
+COMMENT ON COLUMN road_section.end_station_km IS '终点数值桩号。与 start_station_km 构成路段的桩号区间（毕设工程 0.000 → 5805.421）';
 COMMENT ON COLUMN road_section.crs_epsg IS '★权威坐标系：EPSG/SRID。外键指向 spatial_ref_sys；与所属项目不等时写入侧报错';
 COMMENT ON COLUMN road_section.crs_zone_number IS '可空注释：带号。只在分带投影族里有意义，没有不得报错';
 COMMENT ON COLUMN road_section.crs_central_meridian_deg IS '可空注释：中央子午线。手写换算路径需要它';
@@ -534,6 +535,10 @@ CREATE TABLE IF NOT EXISTS station_equation (
     remark              text
 );
 COMMENT ON TABLE station_equation IS '断链（长链/短链）：同一物理位置有两套合法桩号。★缺此表则里程统计静默多算/少算、新旧数据按桩号 join 在断链处错位，且不报错。本毕设工程无断链（空表运行），G228 复测修正必用';
+COMMENT ON COLUMN station_equation.equation_station_km IS '断链点桩号。★**相对桩号**（设计口径，0 起）—— 本表三列里唯一走相对口径的一列';
+COMMENT ON COLUMN station_equation.station_before_km IS '断链前桩号。★**绝对桩号**（路网统一口径）。与 equation_station_km 口径不同，比较前必须先换算，直接相减会得到无意义的差值';
+COMMENT ON COLUMN station_equation.station_after_km IS '断链后桩号。★**绝对桩号**（路网统一口径）。⚠ 同一物理位置在 before/after 两列各有值，差即链长（equation_len_m）';
+COMMENT ON COLUMN station_equation.station_text IS '断链标注原文（形如 K10+000=K10+050），照源文件原样保留 —— 用于与设计文件逐字核对，不参与计算';
 
 -- A11. 平面交点（来自 .JD）★**派生表**：全部字段可由 A12 的单元链推出（实测偏差 3×10⁻⁸ m）
 --      折点是线的摘要 —— 两条相邻切线求交即得。故 .JD 只作**验算**（独立来源的第二意见），
@@ -608,6 +613,9 @@ CREATE TABLE IF NOT EXISTS alignment_element (
     UNIQUE (section_id, element_seq)
 );
 COMMENT ON TABLE alignment_element IS '平面线形单元（.PM）★平面几何真源表。原 curvature_1pm 单列已删：缓和曲线单元内 κ 从 0 连续变到 1/R，**非常数**，一列必然失真；改由 radius_start_m/radius_end_m 表达。A11 交点与 A15 κ(s) 皆由本表推出';
+COMMENT ON COLUMN alignment_element.start_station_km IS '★单元起点桩号（相对桩号，0 起）。★全库桩号的**权威来源**：其余逐桩数据都是在平面线形上按桩号采点得到的，故本表的桩号区间是全库取数的**主轴**';
+COMMENT ON COLUMN alignment_element.end_station_km IS '★单元终点桩号（相对桩号）。与 start_station_km 构成闭区间；length_m 是它的生成列（由两端相减得到）';
+COMMENT ON COLUMN alignment_element.element_type IS '要素码映射后的几何类型：line 直线 / circular 圆曲线 / transition 缓和曲线。★三者的 κ(s) 表达式各不相同，MUST NOT 混为一类';
 CREATE INDEX IF NOT EXISTS idx_alignment_elem_station ON alignment_element(start_station_km, end_station_km);
 CREATE INDEX IF NOT EXISTS idx_alignment_elem_pi ON alignment_element(pi_id);
 
@@ -820,6 +828,7 @@ CREATE TABLE IF NOT EXISTS ditch_segment (
 );
 COMMENT ON TABLE ditch_segment IS '边沟/排水沟断面分段（.CTR 的 ZBGXS/YBGXS 边沟、ZPSGXS/YPSGXS 排水沟）★设计输入。教程 §13.10 第 2/3 类格式：分段终点桩号 + 变化组数 + (坡度,坡高,砌护控制)×组数。一行 = 沟的一个折点。★键是桩号。组数 0 表示该段不设沟';
 COMMENT ON COLUMN ditch_segment.ditch_kind IS 'side_ditch 边沟（源关键字 ZBGXS/YBGXS）/ drainage_ditch 排水沟（ZPSGXS/YPSGXS）。本工程边沟 3 折点、排水沟 0 折点（不设）';
+COMMENT ON COLUMN ditch_segment.station_km IS '★分段终点桩号。⚠ 不挂 station_id 外键：.CTR 的分段桩号不是 .STA 桩号序列的子集。★与 I1 slope_segment.station_km 同一约定、同一来源（.CTR 同一种分段格式）';
 CREATE INDEX IF NOT EXISTS idx_ditch_segment_station ON ditch_segment(section_id, side, ditch_kind, station_km);
 
 -- I3. 路基标准断面分段（.CTR 的 ZBZDM/YBZDM）

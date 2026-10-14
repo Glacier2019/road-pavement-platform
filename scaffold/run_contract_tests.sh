@@ -78,6 +78,11 @@ TESTS=(
   "m5-m10|M5–M10 模块产出契约（诊断/映射/养护/登记/工单）|M5–M10|PY|tests/contract/test_module_contracts.py"
   "m3-写权|契约③写入侧：表级写权守卫（应通过/应拒绝两侧）+ M2 不绕契约|M2/M3|PY|tests/contract/test_write_guard.py"
   "m1-表数|契约②：DDL ↔ 数据字典 ↔ catalog 三处表数一致|M1/M3|PY|tests/contract/test_ddl_dict_catalog.py"
+  # ★ v0.6 补漏（2026-10-14）：桩号类列**必须有注释** —— 注释是桩号语义的唯一载体。
+  #   起因实测：62 个桩号类列只有 18 个有注释，而同构的 ditch_segment / slope_segment
+  #   一个有、一个没有 —— 说明「写不写全靠人记得」。本门是**棘轮**（清单只许缩短），
+  #   并顺带钉住 sql/ ↔ 活库的注释一致（装库一致那条实测**不比注释**）。
+  "列注释|契约② 补漏：桩号类列必须有注释（棘轮 + DDL↔活库逐字一致 + 元测试）|M1/M3|DAO|tests/contract/test_column_comments.py"
   "design-导入|契约⑤：设计导入 IR + 纬地适配器 + 落库器（应通过/应拒绝两侧）|M2|PYDAO|tests/contract/test_design_import.py"
   "m9-集成面|M9 集成面：页面只经 /gw 取数、不直连库、转发的边界（应通过/应拒绝两侧）|M9|CONSOLE|tests/contract/test_console.py"
   "m1-装库一致|契约②补漏：全新装 DDL 与 DDL+migration 升级必须得到同一套 schema|M1/M3|DAO|tests/contract/test_ddl_migration_parity.py"
