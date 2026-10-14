@@ -121,15 +121,41 @@ paths:
           schema:
             type: integer
             default: 100
+            minimum: 1
             maximum: 1000
+          description: >-
+            一次最多返回多少条。上限 1000 —— 比这更大的表**必须靠 offset 翻页**，
+            不能靠调大 limit 一把取完。
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+          description: >-
+            跳过前多少条，用于翻页。默认 0，此时与**不带该参数**取到同一批行。
+            ★ 配合 `truncated` 用：为 true 时把 offset 加上本页的 count 继续取，
+            直到它变成 false；此时各页的 items 合起来**就是全表**（不重不漏）。
+            ★ 本参数 2026-10-14 才加。加之前它是个**空操作** —— 实测 2215 行的表
+            `?limit=1000&offset=1000` 回的仍是 id=[1, 2]，第 1001 行起**永远取不到**。
       responses:
         "200":
           description: >-
             返回 object_type、domain、count、truncated 与 items 数组。
             `truncated: true` 表示**结果被 limit 截断了，后面还有** ——
-            客户端据此翻页或收窄条件；为 false 时 count 就是全部。
+            此时按上面 offset 的说明取下一页；为 false 时 count 就是全部，
+            **且已到末页**。
             ★ 此前没有这个字段：拿满 limit 行时响应与「恰好这么多」**完全一样**，
             调用方无从分辨（实测 2215 行的表回 count=100）。
+        "422":
+          description: >-
+            **不认识的查询参数**。本端点只接受上面声明的 limit 与 offset，
+            任何别的键都会得到 422，且正文**列出支持的键名**。
+            ★ 为什么不静默忽略：实测（改造前）`?section_id=6` 与 `?bogus_xyz=1`
+            拿到的响应与什么都不加时**一模一样** —— 调用方会把「全部数据」
+            读成「我筛出来的数据」，而响应里没有任何字段说明筛选没生效。
+            同族判词见 /samples 的 422：「不接受未知段名 —— 静默返回空会被
+            读成『区间内无数据』」。
         "404":
           description: 未登记的对象类型
 

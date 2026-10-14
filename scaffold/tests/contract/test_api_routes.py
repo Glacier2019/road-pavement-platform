@@ -29,6 +29,7 @@ Starlette/FastAPI **按注册顺序取第一个完全匹配的路由**。若把�
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import pathlib
 import re
@@ -286,11 +287,13 @@ class _FakeDomain:
     #: 所以既有的用例读数不变。§4 会临时把它调大来验截断边界。
     ROWS: int = 1
 
-    def list_objects(self, table, limit=100):
+    def list_objects(self, table, limit=100, offset=0):
         # ★ 必须**真的尊重 limit** —— 否则 §4 测不出东西：
         #   一个忽略 limit、恒回 1 行的假仓储，会让「截断」永远为假。
-        return [{"id": i + 1, "table": table}
-                for i in range(min(self.ROWS, limit))]
+        # ★★ 同理必须**真的尊重 offset**（2026-10-14 加）：一个收下 offset
+        #   却不跳行的假仓储，会让 §5 的翻页用例**永远绿** —— 而翻页正是要测的东西。
+        rows = [{"id": i + 1, "table": table} for i in range(self.ROWS)]
+        return rows[offset:offset + limit]
 
 
 class _FakeDao:
@@ -477,7 +480,7 @@ def main() -> int:
     class _StubRepo:
         """只有 `list_objects` 一个方法 —— 这正是 `_list_tracked` 用到的全部。"""
         def __init__(self, n): self.n = n
-        def list_objects(self, table, *, limit=100):
+        def list_objects(self, table, *, limit=100, offset=0):
             return [{"id": i + 1} for i in range(min(self.n, limit))]
 
     for n, want_status in ((99, None), (100, None), (101, 503)):
@@ -491,6 +494,249 @@ def main() -> int:
               f"（期望 {'放行' if want_status is None else want_status}）")
         if not ok:
             fails.append(f"_list_tracked 表 {n} 行 → {got}（期望 {want_status}）")
+
+    # ------------------------------------- 5) 通用出口：翻页 + 未知查询参数必须报错
+    # ★★ 这一组守的是 2026-10-14（用户裁决的「甲」）修掉的两个**实测**缺陷：
+    #   ① 不认识的查询参数被静默吞掉 —— `?section_id=6` 与 `?bogus_xyz=1`
+    #      拿到的响应和什么都不加时**一模一样**（都是全表的 332 行），
+    #      调用方把「全部数据」读成了「我筛出来的数据」；
+    #   ② 不能翻页 —— `?offset=1000` 回的仍是 id=[1, 2]，一张 2215 行的表
+    #      后半段**永远取不到**，而契约里写着「truncated: true → 客户端据此翻页」。
+    print("\n=== 5) 通用出口：翻页 + 未知查询参数必须报错（甲）===")
+
+    # ---- 5a) ★ 未知参数必须 422，并列出**支持的键** ----
+    for bad in ("section_id", "bogus_xyz", "offsett"):
+        resp = client.get(f"/v1/objects/road_line?{bad}=1")
+        txt = resp.text
+        ok = (resp.status_code == 422 and bad in txt
+              and "limit" in txt and "offset" in txt)
+        print(f"  ?{bad}=1 → HTTP {resp.status_code} "
+              f"{'✓ 报错且列出了支持的键' if ok else '✗ 被静默吞掉'}")
+        if not ok:
+            fails.append(f"未知参数 ?{bad}=1 → {resp.status_code}（期望 422 且列出支持的键）")
+
+    # ---- 5b) 对照：合法参数**不受影响**（别为了挡坏人误伤好人）----
+    resp = client.get("/v1/objects/road_line?limit=5&offset=0")
+    if resp.status_code == 200:
+        print("  ?limit=5&offset=0 → HTTP 200 ✓ 合法参数不受影响")
+    else:
+        print(f"  ?limit=5&offset=0 → HTTP {resp.status_code} ✗ 误伤了合法参数")
+        fails.append(f"合法参数被误伤 → {resp.status_code}")
+
+    # ---- 5c) ★★ 翻页：不重、不漏、页数与 truncated 轨迹都对 ----
+    _FakeDomain.ROWS = 250
+    seen: list[int] = []
+    pages: list[list[int]] = []
+    trunc_trace: list[bool] = []
+    off = 0
+    while off <= 1000:                      # 死循环保险：绝不把测试挂住
+        b = client.get(f"/v1/objects/road_line?limit=100&offset={off}").json()
+        ids = [r["id"] for r in b["items"]]
+        pages.append(ids)
+        trunc_trace.append(b["truncated"])
+        seen.extend(ids)
+        if not b["truncated"]:
+            break
+        off += 100
+    _FakeDomain.ROWS = 1                    # ★ 还原，别影响别的用例
+    dup = len(seen) != len(set(seen))
+    ok_page = (not dup and seen == list(range(1, 251)) and len(pages) == 3
+               and trunc_trace == [True, True, False])
+    print(f"  250 行 / limit 100 → {len(pages)} 页，truncated={trunc_trace}，"
+          f"并集 {len(seen)} 行{'（有重复！）' if dup else ''} {'✓' if ok_page else '✗'}")
+    if not ok_page:
+        fails.append(f"翻页错：{len(pages)} 页 truncated={trunc_trace} 并集 {len(seen)} 行 "
+                     f"重复={dup}（期望 3 页 / [True, True, False] / 250 / 无重复）")
+
+    # ---- 5d) ★ 最后一页必须 truncated=False ----
+    #   ★ 单钉这一条：一个「永远说还有更多」的实现会让客户端**永远翻下去**。
+    if trunc_trace and trunc_trace[-1] is False:
+        print("  ✓ 最后一页 truncated=False（不会让客户端永远翻下去）")
+    else:
+        print(f"  ✗ 最后一页 truncated={trunc_trace[-1:]} → 客户端会永远翻下去")
+        fails.append("最后一页 truncated 不为 False")
+
+    # ---- 5e) ★ offset 默认 0：不加参数与显式 offset=0 必须**逐位相同** ----
+    _FakeDomain.ROWS = 7
+    r_plain = client.get("/v1/objects/road_line?limit=3").json()
+    r_zero = client.get("/v1/objects/road_line?limit=3&offset=0").json()
+    _FakeDomain.ROWS = 1
+    ok_same = (r_plain == r_zero
+               and [r["id"] for r in r_plain["items"]] == [1, 2, 3])
+    print("  不加 offset == offset=0 → "
+          + ("✓ 逐位相同，且仍从第 1 行起" if ok_same else "✗ 有差异"))
+    if not ok_same:
+        fails.append(f"offset 改变了既有行为：{r_plain} vs {r_zero}")
+
+    # ---- 5f) ★ offset 越界 → 空页，**不是** 500 ----
+    _FakeDomain.ROWS = 7
+    resp = client.get("/v1/objects/road_line?limit=3&offset=999")
+    _FakeDomain.ROWS = 1
+    _jb = resp.json() if resp.status_code == 200 else {}
+    ok_over = (resp.status_code == 200 and _jb.get("count") == 0
+               and _jb.get("truncated") is False)
+    print(f"  ?limit=3&offset=999（越界）→ HTTP {resp.status_code} "
+          f"count={_jb.get('count', '-')} "
+          f"{'✓ 空页' if ok_over else '✗ 应当返回空页而不是报错'}")
+    if not ok_over:
+        fails.append(f"offset 越界 → {resp.status_code}（期望 200 空页）")
+
+    # ---- 5g) ★★★ 假仓储签名漂移检测 ----
+    # ★★ 为什么要这一条：真仓储这次加了 `offset`，而 tests/ 下有**假仓储**
+    #   实现同一个方法。上一版代码的注释里写着**正因为**要连它们一起改，
+    #   所以才「不去动仓储的签名」—— 于是缺陷就一直留着。
+    #   与其永远回避，不如**让漂移必然被发现**：假仓储漏了参数，这条就红。
+    def _fakes_missing_offset(sources: list[tuple[str, str]]) -> list[str]:
+        """找出**收了 `self` 却没收 `offset`** 的 `list_objects`。
+
+        ★★ 用 **AST**，不用正则 —— 这不是洁癖，是实测踩过的坑：
+          第一版是文本扫描，结果它**扫到了本文件自己**：这个检查的 docstring 里
+          写着 `def list_objects(self, …)`，元测试里又内嵌了一段假源码，
+          于是「找到 8 个、其中 3 个没跟上」，而真正该查的 4 个**全是好的**。
+          ⇒ 一个会把注释和字符串当成现实的判据，报出来的错**和现实无关**。
+          AST 里注释和字符串根本不出现，这个坑从根上没了。
+
+        ★ 只收第一个形参是 `self` 的：那才是仓储实现；
+          路由那个是 `def list_objects(request: Request, …)`，天然不算。
+        """
+        bad: list[str] = []
+        for name, text in sources:
+            for node in ast.walk(ast.parse(text)):
+                if not (isinstance(node, ast.FunctionDef)
+                        and node.name == "list_objects"):
+                    continue
+                a = node.args
+                if not a.args or a.args[0].arg != "self":
+                    continue
+                names = ([x.arg for x in a.args] + [x.arg for x in a.kwonlyargs])
+                if "offset" not in names:
+                    bad.append(f"{name}:{node.lineno} 只收了 {names}")
+        return bad
+
+    _SRC = [(tf.name, tf.read_text(encoding="utf-8"))
+            for tf in sorted((ROOT / "tests" / "contract").glob("*.py"))]
+    def _count_fakes(sources: list[tuple[str, str]]) -> int:
+        """数一数**真的**有几个带 `self` 的 `list_objects`（AST，理由同上）。"""
+        n = 0
+        for _, text in sources:
+            for node in ast.walk(ast.parse(text)):
+                if (isinstance(node, ast.FunctionDef)
+                        and node.name == "list_objects"
+                        and node.args.args and node.args.args[0].arg == "self"):
+                    n += 1
+        return n
+
+    _found = _count_fakes(_SRC)
+    _missing = _fakes_missing_offset(_SRC)
+    print(f"  假仓储签名：扫了 {len(_SRC)} 个契约测试文件，"
+          f"找到 {_found} 个 `def list_objects(self, …)`")
+    # ★ 先钉「这条检查真的看到了东西」—— 一个匹配 0 个目标的检查永远不会失败，
+    #   比没有检查更糟（宪法原则 V）。少了就说明正则或目录已经不认识现实了。
+    if _found < 4:
+        print(f"  ✗ 只找到 {_found} 个假仓储（期望 ≥ 4）→ 这条检查已经失效了")
+        fails.append(f"假仓储扫描只命中 {_found} 个（期望 ≥ 4），检查本身失效")
+    elif not _missing:
+        print("  ✓ 全部假仓储都收了 `offset`（真仓储接口变了，它们都跟上了）")
+    else:
+        print(f"  ✗ 有假仓储没跟上真仓储：{_missing}")
+        fails.append(f"假仓储签名漂移：{_missing}")
+
+    # ---- 5h) ★★ 元测试：证明 5g 的判据**会响** ----
+    # ★ 宪法原则 V：「一个永远不会失败的检查，比没有检查更糟。」
+    #   所以这里喂一段**故意漏了 offset** 的源码，判据必须把它认出来。
+    #   ★ 假源码写成**真实的类体**（假仓储本来就是类方法）—— 裸的缩进 `def`
+    #     连 `ast.parse` 都过不去，那样测到的是语法错误，不是判据。
+    _FAKE_SRC = [("虚构-漏了-offset.py",
+                  "class Fake:\n"
+                  "    def list_objects(self, table, *, limit=100):\n"
+                  "        return []\n")]
+    _caught = _fakes_missing_offset(_FAKE_SRC)
+    _clean = _fakes_missing_offset(
+        [("虚构-合规.py",
+          "class Fake:\n"
+          "    def list_objects(self, table, *, limit=100, offset=0):\n"
+          "        return []\n"),
+         ("虚构-路由-不是仓储.py",
+          "def list_objects(request, object_type: str, limit: int = 100):\n"
+          "    return {}\n")])
+    ok_meta = len(_caught) == 1 and not _clean
+    print(f"  元测试：漏 offset 的假仓储被认出 → {_caught}；"
+          f"合规的不误报 → {'是' if not _clean else _clean} "
+          f"{'✓' if ok_meta else '✗'}")
+    if not ok_meta:
+        fails.append(f"假仓储判据的元测试失败：认出={_caught} 误报={_clean}")
+
+    # ---- 5i) ★★ 契约声明的查询参数 == 实现认识的查询参数 ----
+    # ★★ 这一条补的是**这次缺陷的成因本身**：契约里写着「客户端据此翻页」，
+    #   而实现里根本没有 `offset` —— 契约许了一个实现给不出的能力。
+    #   第 2 组的路径对齐门只比**路径集合**，参数漂移它看不见。
+    def _params_in(text: str, path_key: str) -> list[str]:
+        """从 OpenAPI 文本里取某个路径下 `in: query` 的参数名。
+
+        ★ 不引 pyyaml：这一套的依赖桶（API_DEPS）里没有它，
+          而为了读一份 yaml 去动依赖桶，代价比按缩进解析大。
+        ★ 只取 `in: query` 的 —— `object_type` 是 `in: path`，不算查询参数。
+        ★ 遇到下一个 `  /` 开头的行就停 —— 否则会把别的端点的参数也吃进来。
+        """
+        lines = text.splitlines()
+        starts = [k for k, l in enumerate(lines) if l.rstrip() == f"  {path_key}:"]
+        if len(starts) != 1:
+            return []
+        i = starts[0]
+        j = next((k for k in range(i + 1, len(lines))
+                  if lines[k].startswith("  /")), len(lines))
+        out: list[str] = []
+        cur: str | None = None
+        for l in lines[i:j]:
+            m = re.match(r"\s*- name: (\S+)", l)
+            if m:
+                cur = m.group(1)
+            elif re.match(r"\s*in: query\s*$", l) and cur:
+                out.append(cur)
+                cur = None
+            elif re.match(r"\s*in: ", l):
+                cur = None
+        return out
+
+    _declared = _params_in(CONTRACT_PATH.read_text(encoding="utf-8"),
+                           "/v1/objects/{object_type}")
+    _impl = sorted(APP._LIST_OBJECTS_PARAMS)
+    print(f"  契约声明 {_declared} ｜ 实现认识 {_impl}")
+    if not _declared:
+        print("  ✗ 契约里没解析出该端点的查询参数 —— 判据本身失效了")
+        fails.append("契约查询参数解析为空，5i 已成摆设")
+    elif sorted(_declared) != _impl:
+        _c_only = sorted(set(_declared) - set(_impl))
+        _i_only = sorted(set(_impl) - set(_declared))
+        print(f"  ✗ 契约与实现不一致：契约多 {_c_only}，实现多 {_i_only}")
+        fails.append(f"契约↔实现查询参数漂移：契约 {_declared} vs 实现 {_impl}")
+    else:
+        print("  ✓ 契约声明的查询参数与实现认识的**完全一致**"
+              "（契约不会再许一个实现给不出的能力）")
+
+    # 元测试：证明 5i 的判据会响，且三件事都对
+    _PROBE_YAML = (
+        "  /v1/objects/{object_type}:\n"
+        "    get:\n"
+        "      parameters:\n"
+        "        - name: object_type\n"
+        "          in: path\n"
+        "        - name: limit\n"
+        "          in: query\n"
+        "        - name: offset\n"
+        "          in: query\n"
+        "  /v1/objects/other:\n"
+        "    get:\n"
+        "      parameters:\n"
+        "        - name: zzz_别的端点的\n"
+        "          in: query\n")
+    _probe = _params_in(_PROBE_YAML, "/v1/objects/{object_type}")
+    _probe2 = _params_in(_PROBE_YAML, "/v1/objects/other")
+    ok_meta2 = (_probe == ["limit", "offset"] and _probe2 == ["zzz_别的端点的"])
+    print(f"  元测试：只在 `in: path` 里的不算查询参数、且不会吃到下一个端点 → "
+          f"{_probe} / {_probe2} {'✓' if ok_meta2 else '✗'}")
+    if not ok_meta2:
+        fails.append(f"契约参数解析的元测试失败：{_probe} / {_probe2}")
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0

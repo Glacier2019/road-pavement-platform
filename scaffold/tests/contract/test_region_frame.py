@@ -293,19 +293,23 @@ class _FakeGe:
     def crs_family(self, srid):
         return self.FAMILY_BY_SRID.get(int(srid), "tmerc")
 
-    def list_objects(self, table, *, limit=100):
+    def list_objects(self, table, *, limit=100, offset=0):
         if table != "monitor_cross_section":
             raise UnknownTable(f"GE 域无此表：{table}")
-        return [dict(r) for r in self._monitors][:limit]
+        # ★★ `offset` 要**真的跳行**（2026-10-14）：一个收下 offset 却不跳的
+        #   假仓储，会让翻页用例**永远绿** —— 而那正是要测的东西。
+        return [dict(r) for r in self._monitors][offset:offset + limit]
 
 
 class _FakeRe:
     """RE 域仓储。`sensor_install` 是**设备溯源**的依据所在。"""
 
-    def list_objects(self, table, *, limit=100):
+    def list_objects(self, table, *, limit=100, offset=0):
         if table != "sensor_install":
             raise UnknownTable(f"RE 域无此表：{table}")
-        return [dict(r) for r in FIX["sensor_install"]][:limit]
+        # ★★ `offset` 要**真的跳行**（2026-10-14）：一个收下 offset 却不跳的
+        #   假仓储，会让翻页用例**永远绿** —— 而那正是要测的东西。
+        return [dict(r) for r in FIX["sensor_install"]][offset:offset + limit]
 
 
 class _FakeDao:

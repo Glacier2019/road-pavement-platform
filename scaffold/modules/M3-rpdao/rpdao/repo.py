@@ -61,10 +61,20 @@ class DomainRepository:
         return "?"
 
     # -------------------------------------------------------------- 通用查询
-    def list_objects(self, table: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    #: ★★ 2026-10-14 加 `offset`（用户裁决的「甲」）。加之前这条路**不能翻页**：
+    #  实测 `cross_section_ground_point` 有 2215 行，而 `?limit=1000&offset=1000`
+    #  回的仍是 id=[1, 2] —— 第 1001..2215 行**永远取不到**。而契约里还明写着
+    #  「truncated: true → 客户端据此翻页」，那句在当时是**空话**。
+    #
+    #  ★ `offset` 默认 0 ⇒ 既有的 `list_objects(t, limit=n)` 调用**行为逐位不变**。
+    #  ★★ `ORDER BY id` 是翻页的**前提**：没有全序，LIMIT/OFFSET 会重复或漏行。
+    #     这一列本来就在，但它的作用从「让输出好看」升格成「让分页正确」。
+    def list_objects(self, table: str, *, limit: int = 100,
+                     offset: int = 0) -> list[dict[str, Any]]:
         t = self._check(table)
-        return self._dao.query(f"SELECT * FROM {t} ORDER BY id LIMIT %(limit)s::int",
-                               {"limit": limit})
+        return self._dao.query(
+            f"SELECT * FROM {t} ORDER BY id LIMIT %(limit)s::int OFFSET %(offset)s::int",
+            {"limit": limit, "offset": offset})
 
     def get(self, table: str, obj_id: int) -> dict[str, Any]:
         t = self._check(table)

@@ -159,6 +159,10 @@ TESTS=(
   #   ⚠ 这个测试走 API 桶（要 fastapi/httpx）。§1 §2 离线always-run；
   #     §3 打活服务，服务没起会**大声跳过**并在结果里说明，不假装通过。
   "数字类型|numeric 列必须以 JSON 数字出去：机制 + 全部路由 response_model 为 None + 活服务实测|M6|API|tests/contract/test_json_numeric_types.py"
+  # ★ v0.8 新增（用户裁决的「甲」）。**通用出口**的两个缺陷都是「看着成功、其实错了」那一类：
+  #   不认识的查询参数被静默吞掉；`offset` 是个空操作、第 1001 行起永远取不到。
+  #   ⇒ 它跑**真库 + 真仓储 + 真路由**（`m6-路由` 用的是假数据层，测不到 `OFFSET` 子句）。
+  "通用出口|通用对象出口：翻页不重不漏 + 未知查询参数必须报错（含活体元测试）|M3/M6|API|tests/contract/test_generic_egress.py"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

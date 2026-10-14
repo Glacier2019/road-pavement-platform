@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
 import gaps
 
@@ -435,13 +435,36 @@ def get_wim(record_id: int) -> dict[str, Any]:
         raise _http(exc) from exc
 
 
+#: 通用出口**认识的**查询参数。不在这张表里的键一律报错 —— 理由见下面路由里那段。
+_LIST_OBJECTS_PARAMS = ("limit", "offset")
+
+
 # ↓ 参数化路由：必须排在所有 /v1/objects/<具体名> 之后
 @app.get("/v1/objects/{object_type}", tags=["对象查询"],
          summary="按对象类型查档案对象")
-def list_objects(object_type: str, limit: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
+def list_objects(request: Request,
+                 object_type: str,
+                 limit: int = Query(100, ge=1, le=1000),
+                 offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    # ★ 先判**对象类型**，再判查询参数：路径写错是更根本的错，
+    #   而且 `?limit=0` 这类**越界值**由 FastAPI 在进函数体之前就拦掉了。
     code = OBJECT_TYPES.get(object_type)
     if code is None:
         raise HTTPException(404, f"未登记的对象类型：{object_type}（白名单见 /v1/catalog）")
+    # ★★ 2026-10-14：**不认识的查询参数一律报错，不静默忽略。**
+    #   实测量到的后果（就是这次动手的原因）：`?section_id=6` 与
+    #   `?bogus_xyz=1` 拿到的响应**和什么都不加时一模一样** —— 全是 332 行。
+    #   调用方把「全部数据」读成了「我筛出来的数据」，而**没有任何信号**。
+    #
+    # ★ 这不是新发明的规矩：同一份文件里 `/samples` 早就这么做了，判词是
+    #   「不接受未知段名 —— 静默返回空会被读成「区间内无数据」」。
+    #   这里是同一件事的另一个朝向：静默返回**全部**会被读成「这就是全部」。
+    unknown = sorted(set(request.query_params) - set(_LIST_OBJECTS_PARAMS))
+    if unknown:
+        raise HTTPException(
+            422,
+            f"不认识的查询参数：{unknown}；本接口只支持 {list(_LIST_OBJECTS_PARAMS)}"
+            f"（不接受未声明的键 —— 静默忽略会被读成「筛选已生效」）")
     try:
         # ★★★ 2026-10-13（D-011 的收尾）：这里原先直接要 `limit` 行，
         #   而仓储的 SQL 是 `SELECT * FROM 表 ORDER BY id LIMIT n` ——
@@ -451,11 +474,17 @@ def list_objects(object_type: str, limit: int = Query(100, ge=1, le=1000)) -> di
         #   而响应里**没有任何字段**说明这是被截断的。
         #
         # ★ 修法是**多要一行来探测**：要到 limit+1 行 ⇒ 确实还有更多。
-        #   为什么不去改仓储的签名：`list_objects` 还有别的消费者，
-        #   而 tests/ 下有两个**假仓储**实现它 —— 改签名要连它们一起改，
-        #   那是「为了一个字段动一条公共接口」。探测放在这里，
-        #   **零接口改动**，而且判定是**精确**的（不是「拿满就猜」）。
-        rows = dao.domain(code).list_objects(object_type, limit=limit + 1)
+        #   探测放在这里，判定是**精确**的（不是「拿满就猜」）。
+        #
+        # ★★ 2026-10-14 **改口**：上一版这里写着「为什么不去改仓储的签名」，
+        #   理由是「改签名要连 tests/ 下两个假仓储一起改」。**那条理由现在不成立了**
+        #   —— 因为 `truncated: true` 是要让客户端「据此翻页」的，而翻页根本没法做：
+        #   实测 `?offset=1000` 回的仍是 id=[1, 2]，2215 行的表后半段取不到。
+        #   契约要求的能力缺了，改公共接口就从「为一个字段动接口」变成「补一个缺」。
+        #   ⇒ 仓储加 `offset`（默认 0，老调用逐位不变），假仓储同步跟上，
+        #     并加了一条**签名一致性**的门，让假仓储以后不可能悄悄漂移。
+        rows = dao.domain(code).list_objects(object_type, limit=limit + 1,
+                                             offset=offset)
     except DaoError as exc:
         raise _http(exc) from exc
     # ★ 探测用的那一行**不进响应** —— 它只回答「有没有更多」。
