@@ -960,106 +960,98 @@ class GeRepository(DomainRepository):
         "cross_section_ground_point": ("station_km", "cross_section_ground_point", "*"),
     }
 
-    #: FR-014：在**路段范围内**由要素重采样出桩号。
+    #: FR-014：按固定间隔**采样**。★ 这是「采样」，不是「桩号」。
     #:
-    #: ★★ 这条规则不是推演出来的，是**从源文件反推并逐点核对过**的。
-    #:   实测：`.STA`（桩号序列文件）给的 332 个桩号
-    #:        == 20 m 整桩 ∪ 线元起终点 ∪ 交点曲中点
-    #:   332 个点对 332 个点，**331 个精确相等**，剩 1 个差 **1 mm**
-    #:   （重算曲中点时的舍入 —— 源文件是 HintCAD 内部算的，比库里存的
-    #:     `tangent_len_m` / `curve_len_m` 多几位）。
+    #: ★★★ 与 `stations()` 分清是本方法的**全部意义**：
     #:
-    #: ★ 由此得到采样点**两类**，性质完全不同，MUST 分开对待：
-    #:     · `grid`          —— 等间隔网格。**受 interval 控制**，
-    #:                          这正是 FR-014 要「密度可配置」的那一半。
-    #:     · `element_bound` —— 线元起终点。
-    #:     · `curve_mid`     —— 交点曲中点，`QZ = JD − (2T − L)/2`。
-    #:   后两类是**特征点**，**不随 interval 变**。换密度时 MUST 保留：
-    #:   把曲线起终点丢掉，曲线段的评价就失真了 —— 而它恰恰是最该看清的地方。
+    #:     `stations()` 返回**设计给的桩号**（`.STA` 导入），**不等间隔**。
+    #:       毕设这段实测 332 个桩号，其中只有 **291** 个落在 20 m 整桩上，
+    #:       另 **41** 个是加桩（33 个线元终点 + 8 个交点曲中点）。
+    #:       桩号是**设计出来的**，不是网格。
     #:
-    #: ★ 定义域是**路段范围** `[start_station_km, end_station_km]`，不是路线全长。
-    #:   路段终点通常**不是**整桩（毕设是 5805.421，20 m 网格只到 5800），
-    #:   所以它靠「线元终点」这条进来，不是靠网格。
+    #:     本方法返回**等间隔采样点** —— 「只有具体使用时才采样」，
+    #:       用时才算、不落表。弯沉要 20 m、IRI 要 10 m、破损要 100 m~1 km，
+    #:       各给各的间隔。⇒ **不存在一个平台级的「采样间隔」**；
+    #:       `design_project.station_interval_m` 是「设计文件里桩号序列的步长」，
+    #:       那是关于**设计文件**的事实，不是采样默认值。
     #:
-    #: `min(kind)` 取的是**最具体**的那个标签：字典序 `curve_mid < element_bound
-    #: < grid`，恰好就是想要的优先级。换成别的排序就不是这个语义了。
-    RESAMPLE_STATIONS_SQL = """
+    #: ★★ 线元终点桩号**不在本方法返回值里** —— 它是
+    #:   `alignment_element.end_station_km` **那一列属性**，直接读表就有。
+    #:   交点曲中点同理，读 `alignment_pi`。
+    #:   把这两样合成进采样结果，就是把「采样」和「设计桩号」搅在一起。
+    #:   ★ 本仓第一版就是这么写的，20 m 下恰好等于 `.STA` 的 332 点 ——
+    #:     那是**巧合**，因为这份设计的间隔正是 20 m。已收掉（见 D-014）。
+    #:
+    #: ★ 定义域是**路段范围** `[start_station_km, end_station_km]`；
+    #:   也可用 `from_km` / `to_km` 只取其中一段（具体使用时的常见形态）。
+    #:
+    #: ★ 末点**不一定**落在 `to` 上：等间隔网格的定义就是「最后一个不超过
+    #:   `to` 的整倍数」。毕设 20 m 采样只到 5.800，而路段终点是 5.805421 ——
+    #:   这是**等间隔**的性质，不是丢尾巴。需要终点就自己补上。
+    SAMPLE_UNIFORM_SQL = """
     WITH b AS (
-      SELECT start_station_km AS a, end_station_km AS z
+      SELECT coalesce(%(from)s::numeric, start_station_km) AS a,
+             coalesce(%(to)s::numeric,   end_station_km)   AS z
       FROM road_section WHERE id = %(sid)s::bigint
-    ),
-    grid AS (
-      SELECT b.a + (n::numeric * %(iv)s::numeric) / 1000.0 AS s
-      FROM b,
-           generate_series(0,
-             floor(((b.z - b.a) * 1000.0) / %(iv)s::numeric)::int) AS n
-    ),
-    feat AS (
-      SELECT unnest(ARRAY[e.start_station_km, e.end_station_km]) AS s,
-             'element_bound'::text AS kind
-      FROM alignment_element e
-      WHERE e.section_id = %(sid)s::bigint
-      UNION ALL
-      SELECT p.station_km - (2 * p.tangent_len_m - p.curve_len_m) / 2.0 / 1000.0,
-             'curve_mid'::text
-      FROM alignment_pi p
-      WHERE p.section_id = %(sid)s::bigint
-        AND p.tangent_len_m IS NOT NULL
-        AND p.curve_len_m  IS NOT NULL
-    ),
-    allpts AS (
-      SELECT s, 'grid'::text AS kind FROM grid
-      UNION ALL
-      SELECT s, kind FROM feat
     )
-    SELECT round(u.s, 6) AS station_km, min(u.kind) AS kind
-    FROM allpts u, b
-    WHERE u.s >= b.a AND u.s <= b.z
-    GROUP BY round(u.s, 6)
+    SELECT round(b.a + (n::numeric * %(iv)s::numeric) / 1000.0, 6) AS station_km
+    FROM b,
+         generate_series(0,
+           floor(((b.z - b.a) * 1000.0) / %(iv)s::numeric)::int) AS n
     ORDER BY 1
     LIMIT %(limit)s::integer
     """
 
-    def resample_stations(self, section_id: int, interval_m: float, *,
-                          limit: int = 20000) -> list[dict[str, Any]]:
-        """FR-014：按 `interval_m` 由要素重采样出桩号（含 `kind` 标签）。
+    def sample_uniform(self, section_id: int, interval_m: float, *,
+                       from_km: float | None = None,
+                       to_km: float | None = None,
+                       limit: int = 20000) -> list[dict[str, Any]]:
+        """按 `interval_m` **等间隔采样**。返回的是采样点，**不是桩号**。
 
-        每行是 `{station_km, kind}`；`kind` ∈
-        `grid`（等间隔网格）/ `element_bound`（线元起终点）/ `curve_mid`（曲中点）。
+        每行是 `{station_km}`。范围默认取路段全长，也可用 `from_km`/`to_km`。
 
-        **要纯等间隔网格**，就取 `kind == "grid"` 的那些；
-        **要还原设计文件给的桩号集**，就整个列表都拿（20 m 下实测 = 332 个）。
+        ★ **要「设计给的桩号」请用 `stations()`** —— 那个**不等间隔**，
+          与本方法不是一回事。
+        ★ **要「线元终点桩号」请读 `alignment_element.end_station_km`** ——
+          它已经是一列属性，不在本方法返回值里。
 
         `interval_m` 必须为正 —— 0 或负数**报错**，不静默。
         因为静默的后果是「一个点」或「空」，而两者都会被下游读成
         「这段路没有采样点」，那是另一回事。
         """
-        if not isinstance(interval_m, (int, float)) or interval_m <= 0:
+        if (not isinstance(interval_m, (int, float))
+                or isinstance(interval_m, bool) or interval_m <= 0):
             raise ValueError(
                 f"采样间隔必须为正数，收到 {interval_m!r}；"
                 "0 或负数不静默处理 —— 静默会得到一个点或空列表，"
                 "而下游会把它读成「这段路没有采样点」")
+        if (from_km is not None and to_km is not None
+                and float(from_km) >= float(to_km)):
+            raise ValueError(
+                f"采样区间为空：from_km={from_km} >= to_km={to_km}；"
+                "这不是「这段路没有采样点」，是调用方把两端写反了 —— "
+                "不静默返回空列表")
         # ★★ 多取一行当探针，用来发现截断。
         #
-        #   为什么这里**必须报错**、不能像别处那样返回一个 `truncated` 标志：
-        #   截断掉的是**尾部**，而尾部正是「特征点」和「路段终点」所在。
-        #   一个被截断的网格**不是网格** —— 拿它做积分会得到偏小的结果，
+        #   为什么这里**必须报错**、不能返回一个 `truncated` 标志：
+        #   截断掉的是**尾部** —— 拿一个残缺网格做积分会得到偏小的结果，
         #   而结果看起来完全正常。这比返回空还危险。
         #
-        #   ★ 这个洞是我自己先踩出来的：写完之后用 0.1 m 试了一下，
-        #     得到的 `curve_mid=2 / element_bound=9`（本该 8 / 34）——
-        #     LIMIT 把特征点吃掉了一大半，而且**一声不吭**。
-        rows = self._dao.query(self.RESAMPLE_STATIONS_SQL, {
+        #   ★ 这个洞是我自己先踩出来的：第一版把特征点也并进来，
+        #     0.1 m 时 LIMIT 把尾部的点吃掉了一大半，而且**一声不吭**。
+        rows = self._dao.query(self.SAMPLE_UNIFORM_SQL, {
             "sid": section_id,
             # ★ 传字符串而不是 float：走 `::numeric` 时 float 的二进制误差会
             #   进到网格里（0.1 存不下），变成「第 7 位小数对不上」这种查不动的红。
             "iv": str(interval_m),
+            "from": None if from_km is None else str(from_km),
+            "to": None if to_km is None else str(to_km),
             "limit": limit + 1,
         })
         if len(rows) > limit:
             raise ValueError(
-                f"重采样结果超过 limit={limit}（至少 {len(rows)} 个点），"
-                f"已拒绝返回 —— 截断会丢掉尾部的特征点和路段终点，"
+                f"采样结果超过 limit={limit}（至少 {len(rows)} 个点），"
+                f"已拒绝返回 —— 截断会丢掉尾部的点，"
                 f"而下游拿一个残缺网格算出来的结果看起来是正常的。"
                 f"请调大 limit，或把间隔放粗（section_id={section_id}、"
                 f"interval_m={interval_m}）")

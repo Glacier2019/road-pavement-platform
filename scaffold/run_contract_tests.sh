@@ -83,10 +83,10 @@ TESTS=(
   #   一个有、一个没有 —— 说明「写不写全靠人记得」。本门是**棘轮**（清单只许缩短），
   #   并顺带钉住 sql/ ↔ 活库的注释一致（装库一致那条实测**不比注释**）。
   "列注释|契约② 补漏：桩号类列必须有注释（棘轮 + DDL↔活库逐字一致 + 元测试）|M1/M3|DAO|tests/contract/test_column_comments.py"
-  # FR-014 的另一半：由要素**重采样**出桩号（密度可配置）。
-  # ★ 硬回归是「20 m 重采样 MUST 重建出 .STA 给的 332 个桩号」——
-  #   它证明「由要素算」与「源文件给的」是同一件事，而不是两套各说各话的数字。
-  "重采样|契约② FR-014：由要素重采样出桩号（20 m MUST 重建 .STA 的 332 点、特征点不随间隔变）|M3|DAO|tests/contract/test_resample_stations.py"
+  # FR-014 的另一半：**采样**（密度可配置）。★ 采样 ≠ 桩号 —— 这条门守的就是这个。
+  # ★ 核心判据：20 m 采样 291 点 ≠ stations() 332 点，且桩号里 41 个不在整桩上。
+  #   两个数 MUST NOT 相等 —— 相等就说明又把「采样」当成了「桩号」。
+  "采样|契约② FR-014：采样 ≠ 桩号（等间隔采样 vs 设计给的桩号集；线元终点读表那一列）|M3|DAO|tests/contract/test_sample_uniform.py"
   "design-导入|契约⑤：设计导入 IR + 纬地适配器 + 落库器（应通过/应拒绝两侧）|M2|PYDAO|tests/contract/test_design_import.py"
   "m9-集成面|M9 集成面：页面只经 /gw 取数、不直连库、转发的边界（应通过/应拒绝两侧）|M9|CONSOLE|tests/contract/test_console.py"
   "m1-装库一致|契约②补漏：全新装 DDL 与 DDL+migration 升级必须得到同一套 schema|M1/M3|DAO|tests/contract/test_ddl_migration_parity.py"

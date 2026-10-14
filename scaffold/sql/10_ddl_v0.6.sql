@@ -257,7 +257,7 @@ CREATE TABLE IF NOT EXISTS design_project (
     remark             text
 );
 COMMENT ON TABLE design_project IS '设计项目台账（设计期数据血缘起点）；一个项目对应一套纬地工程文件';
-COMMENT ON COLUMN design_project.station_interval_m IS '桩号间隔，决定逐桩数据的默认密度';
+COMMENT ON COLUMN design_project.station_interval_m IS '设计文件里桩号序列的步长（毕设＝20 m）。★这是关于**设计文件**的事实，不是平台的采样默认密度 —— 采样是「具体使用时才算」的动作，间隔由每次使用各自给（弯沉 20 m / IRI 10 m / 破损 100 m~1 km），见 GeRepository.sample_uniform()';
 COMMENT ON COLUMN design_project.crs_epsg IS '★权威坐标系：EPSG/SRID。外键指向 spatial_ref_sys，查不到即存不进去';
 COMMENT ON COLUMN design_project.crs_zone_number IS '可空注释：带号。只在分带投影族里有意义，没有不得报错';
 COMMENT ON COLUMN design_project.crs_central_meridian_deg IS '可空注释：中央子午线。手写换算路径需要它';
