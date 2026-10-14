@@ -931,14 +931,17 @@ def main() -> int:
     #      ⇒ 这一轮不是「还债」，是**把债本身消掉**：那 4 条不再需要冻结。
     #      剩下的 3 条是 geo 增量范围内的（lat/lon 范围、step_m 上界），
     #      要另开一份 geo 增量才能消。
-    _UNDECLARED_FROZEN = (
-        "GET /v1/geometry/sections/{section_id}/geo/reverse 的参数 lat："
-        "{'maximum': 90, 'minimum': -90}",
-        "GET /v1/geometry/sections/{section_id}/geo/reverse 的参数 lon："
-        "{'maximum': 180, 'minimum': -180}",
-        "GET /v1/geometry/sections/{section_id}/geo/route 的参数 step_m："
-        "{'exclusiveMinimum': 0, 'maximum': 1000}",
-    )
+    # ★★★ 2026-10-14 晚：**名单空了。**
+    #   最后 3 条（`geo/reverse` 的 lat/lon 边界、`geo/route` 的 step_m 边界）
+    #   由契约增量 `m6-gateway.geo.v0.4.yaml` 写进了声明。
+    #   ⇒ 债还完了，没有东西要冻结。
+    #
+    # ★★ 「名单为空」与「判据根本没在看」在输出上一模一样（宪法 V）。
+    #   这个洞由**元测试**堵：它证 `_shape` 既会摊平 `anyOf`、
+    #   也会从 `anyOf` 里提出**范围键**（后者正是 D-021 那个洞），
+    #   还会辨认第三方向、且反向不串。判据没哑掉这件事不再由「名单非空」守
+    #   —— 那等于**要求债务不许还清**。
+    _UNDECLARED_FROZEN: tuple = ()
 
     def _fmt(d: dict) -> str:
         """把约束字典印成**键序无关**的字符串。
@@ -1035,12 +1038,14 @@ def main() -> int:
         print(f"  ✗ 新增未声明的约束 {x}")
     for x in _stale:
         print(f"  ✗ 名单上的约束已不成立（请删掉这一条）{x}")
-    # ★★ 这里原先有一条「名单不许为空」。2026-10-14 晚**删掉了** ——
-    #   因为名单空掉是**目标**而不是故障：债还完了，就没有东西要冻结。
-    #   那「_shape 突然读不到范围键」这种故障谁来挡？
-    #   ⇒ 名单本身挡得住：真读不到时 `_undecl` 变空，
-    #     而名单上还剩 3 条 ⇒ `_stale` 立刻红。
-    #   ⇒ 名单真空的那天，由**元测试**挡（它证 `_shape` 会提取范围、会认第三方向）。
+    # ★★ 「名单不许为空」这一条 2026-10-14 晚**删掉了**（先降到 3 条，再清零）。
+    #   名单空掉是**目标**而不是故障 —— 留着这条判据等于要求债务不许还清。
+    #   那「`_shape` 突然读不到范围键」这种故障谁来挡？
+    #   ⇒ ① `_s_pairs ≥ 20`：比对面还在，判据就没哑（实测 25）。
+    #   ⇒ ② 5j 的**元测试**：直接证 `_shape` 会摊平 `anyOf`、
+    #        会从 `anyOf` 里提出范围键、会认第三方向、反向不串。
+    #   ⇒ ③ 名单按**名字**查而不是按条数：名单上有东西时，「某一条被悄悄改了」
+    #        会同时表现为 `_new` + `_stale` 两条，改名挡不住。
     # ★ 下界只钉**比对面够大**（20 是实测值，2026-10-14 实测 25）。
     #   原先还有一条「未声明不许少于 5」，删了 —— 那个数会随还债往下走，
     #   把它写死成下界，等于**惩罚还债**。判据没哑掉这件事由 _s_pairs 与元测试守。
@@ -1058,13 +1063,23 @@ def main() -> int:
     if _promised:
         fails.append(f"契约声明了而实现没有的约束 {len(_promised)} 处：{_promised}")
     if not (_shape_bad or _rng_bad or _new or _stale or _promised):
-        print(f"  ✓ 三个方向都干净：类型与 required 全一致；{len(_undecl)} 条未声明的约束"
-              f"与冻结名单逐条相符；契约没有许下实现给不出的约束")
+        _tail = ("实现没有契约未声明的约束" if not _undecl
+                 else f"{len(_undecl)} 条未声明的约束与冻结名单逐条相符")
+        print(f"  ✓ 三个方向都干净：类型与 required 全一致；{_tail}；"
+              f"契约没有许下实现给不出的约束")
 
     # ★★ 元测试：形状判据的每一条腿都要能被证明**会响**。
     #   宪法 V：一个找不到目标的判据永远不会失败，而「0 条发现」与「没在看」
     #   在输出上一模一样。第三个方向实测就是 0 条 —— 所以它**更需要**这个证明。
     _mt_ok = _shape({"type": "number", "exclusiveMinimum": 0})
+    # ⑤ ★★ 这一条是 2026-10-14 晚补的，补的是一个**真的漏**：
+    #   原来的元测试只证了「顶层 exclusiveMinimum 能提出」与
+    #   「anyOf 里的 format 能提出」—— 而 format **不是**范围键。
+    #   也就是说：`anyOf` 里嵌的**范围键**能不能提出来，**没人证过**。
+    #   而 D-021 那个洞恰恰就是这个（from_km/to_km 的 ge=0 藏在 anyOf 里看不见）。
+    #   ⇒ 名单清零之后，这个洞更要紧：范围键读不到 → `_undecl` 空 → 全绿。
+    _mt_nested = _shape({"anyOf": [{"type": "number", "minimum": 0,
+                                    "maximum": 5}, {"type": "null"}]})
     _mt_null = _shape({"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]})
     _mt_bare = _shape({"anyOf": [{"type": "string"}, {"type": "null"}]})
     # ① 摊平：anyOf 里的 format 必须被提出来，否则第三个方向全是假发现
@@ -1074,21 +1089,32 @@ def main() -> int:
     _mt_seen = [k for k in sorted(_mt_null[1]) if k not in _mt_bare[1]]
     # ③ 反向：实现有、契约没有 ⇒ 走的是另一条腿，不该混进来
     _mt_rev = [k for k in sorted(_mt_bare[1]) if k not in _mt_null[1]]
-    _okm = (_mt_flat and _mt_seen == ["format"] and _mt_rev == []
+    _mt_nested_ok = (_mt_nested[0] == "number"
+                     and _mt_nested[1] == {"minimum": 0, "maximum": 5})
+    _okm = (_mt_flat and _mt_nested_ok and _mt_seen == ["format"] and _mt_rev == []
             and _shape({"type": "string"})[0] == "string"
             and _shape({"type": "integer"})[0] != _shape({"type": "string"})[0]
             # ④ 键序无关：名单条目由 _fmt 产出，两处键序不同必须印成同一个字符串
             and _fmt({"b": 2, "a": 1}) == _fmt({"a": 1, "b": 2}))
-    print(f"  元测试：anyOf 摊平、类型可分辨、第三方向能发现、反向不串 → "
+    print(f"  元测试：anyOf 摊平（含其中的**范围键**）、类型可分辨、"
+          f"第三方向能发现、反向不串 → "
           f"{'✓' if _okm else '✗'}（摊平 {_mt_flat}／发现 {_mt_seen}／反向 {_mt_rev}）")
     if not _okm:
         fails.append("参数形状归一化的元测试失败")
     # 元测试②：钉死版本序。★ 上一条判据的覆盖规则建立在这个序上，
     #   而 sorted() 的字典序**不等于**版本序 —— 例如 v0.10 会排到 v0.2 前面。
     _ord = [f.name for f in sorted(contract_files(), key=_ver_key)]
+    # ★★ 这个顺序**不直观**，我第一次写就写错了（被这条判据当场抓住）：
+    #   版本序是 `((主,次), 文件名)` —— **先比版本号，同版才比文件名**。
+    #   所以基础契约的 `m6-gateway.v0.3.yaml` 排在 `m6-gateway.geo.v0.4.yaml`
+    #   **前面**（(0,3) < (0,4)），哪怕名字上 geo 那一支看着更"晚"。
+    #   ⇒ 两支版本号各走各的，"geo 增量" 并不天然排在 "基础增量" 之后。
+    #   ★ 这**无害**，因为两支动的路径不重叠：geo 那支只碰 geo/reverse 与
+    #     geo/route，基础那支只碰 wim_axle 与 stations。
+    #     但这层意思不写下来，下一个人会以为顺序错了。
     _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.geo.v0.2.yaml",
                  "m6-gateway.geo.v0.3.yaml", "m6-gateway.v0.3.yaml",
-                 "m6-gateway.v0.4.yaml"]
+                 "m6-gateway.geo.v0.4.yaml", "m6-gateway.v0.4.yaml"]
     _okm2 = _ord == _want_ord
     print(f"  元测试：契约版本序 → {_ord} {'✓' if _okm2 else '✗'}")
     if not _okm2:
