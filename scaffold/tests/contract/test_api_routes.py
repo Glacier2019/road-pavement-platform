@@ -792,10 +792,16 @@ def main() -> int:
         return (v, fn.name)
 
     def _declared_query() -> tuple:
-        """{路径: {方法: {参数名: (默认值, 文件名, schema, required)}}} + 覆盖记录。
+        """{路径: {方法: {参数名: (默认值, 文件名, schema, required, in)}}} + 覆盖记录。
 
-        ★ 存四元组是因为后面有两条判据要用同一份解析结果：5i 只用前两项，
-          5j 要用后两项。**一份解析、两处消费**，不各写一遍。
+        ★ 存五元组是因为后面有两条判据要用同一份解析结果：5i 只用前两项，
+          5j 要用中间两项，两条都要用末一项。**一份解析、两处消费**，不各写一遍。
+
+        ★★★ 2026-10-14 晚：**把 `in: path` 收进来了。**
+          原先这里只收 `in: query`，5j 也只收 `in: query` ⇒
+          **路径参数的名字、类型、required 一个都没比过**。
+          实测两边各有 14 个路径参数、逐条对得上 —— 但那是**碰巧一致**，
+          不是**被守住**。这一层当时没有任何东西在看。
         """
         out: dict = {}
         over: dict = {}
@@ -807,7 +813,7 @@ def main() -> int:
                         continue
                     slot = out.setdefault(path, {}).setdefault(method, {})
                     for prm in (op.get("parameters") or []):
-                        if prm.get("in") != "query":
+                        if prm.get("in") not in ("query", "path"):
                             continue
                         nm = prm["name"]
                         if nm in slot and slot[nm][1] != f.name:
@@ -815,23 +821,36 @@ def main() -> int:
                                 f"{nm}: {slot[nm][1]}={slot[nm][0]!r} → {f.name}")
                         slot[nm] = ((prm.get("schema") or {}).get("default"), f.name,
                                     prm.get("schema") or {},
-                                    bool(prm.get("required", False)))
+                                    bool(prm.get("required", False)),
+                                    prm.get("in"))
         return out, over
 
     def _compare(decl: dict, live: dict) -> tuple:  # noqa: D401
-        """比「两边都有的端点」→ (比了几对, 名字不一致, 默认值不一致, 有默认值的对数)。
+        """比「两边都有的端点」→ (比了几对, 名字不一致, 默认值不一致,
+        有默认值的对数, in 位置不一致, {in: 参数个数})。
 
         ★ **只比两边都有的**：契约未收录的端点归第 2 组的路径门管，
           这里再报一次就是同一条性质有了两份定义。
+
+        ★★★ `in` 位置（query / path）**必须比**：只比名字的话，
+          契约写 `in: query` 而实现是 `in: path` 会**静默通过** ——
+          名字一样，调用方式完全不同（一个拼查询串、一个拼进路径）。
+          这是「名字对得上但语义错」的典型，光比名字看不见。
         """
         pairs, def_pairs = 0, 0
         name_bad: list = []
         def_bad: list = []
+        in_bad: list = []
+        kinds: dict = {}
         for path in sorted(set(live) & set(decl)):
             for method in sorted(set(live[path]) & set(decl[path])):
-                impl = {q["name"]: (q.get("schema") or {}).get("default")
-                        for q in (live[path][method].get("parameters") or [])
-                        if q.get("in") == "query"}
+                impl = {}
+                for q in (live[path][method].get("parameters") or []):
+                    if q.get("in") not in ("query", "path"):
+                        continue
+                    impl[q["name"]] = ((q.get("schema") or {}).get("default"),
+                                       q.get("in"))
+                    kinds[q.get("in")] = kinds.get(q.get("in"), 0) + 1
                 declm = decl[path][method]
                 pairs += 1
                 if sorted(impl) != sorted(declm):
@@ -839,19 +858,27 @@ def main() -> int:
                                     f" vs 实现 {sorted(impl)}")
                     continue
                 for nm in sorted(declm):
-                    if declm[nm][0] is None or impl[nm] is None:
+                    # ★ 位置先比：位置错了，后面的默认值比较没有意义
+                    if declm[nm][4] != impl[nm][1]:
+                        in_bad.append(f"{method.upper()} {path} 的参数 {nm}："
+                                      f"契约 in={declm[nm][4]!r}（{declm[nm][1]}）"
+                                      f" vs 实现 in={impl[nm][1]!r}")
+                        continue
+                    if declm[nm][0] is None or impl[nm][0] is None:
                         continue
                     def_pairs += 1
-                    if declm[nm][0] != impl[nm]:
+                    if declm[nm][0] != impl[nm][0]:
                         def_bad.append(f"{method.upper()} {path} 的参数 {nm}："
                                        f"契约 {declm[nm][0]!r}（{declm[nm][1]}）"
-                                       f" vs 实现 {impl[nm]!r}")
-        return pairs, name_bad, def_bad, def_pairs
+                                       f" vs 实现 {impl[nm][0]!r}")
+        return pairs, name_bad, def_bad, def_pairs, in_bad, kinds
 
     _decl, _over = _declared_query()
-    _pairs, _name_bad, _def_bad, _def_pairs = _compare(
-        _decl, APP.app.openapi().get("paths", {}))
-    print(f"  比了 {_pairs} 个端点、{_def_pairs} 个带默认值的参数")
+    (_pairs, _name_bad, _def_bad, _def_pairs,
+     _in_bad, _kinds) = _compare(_decl, APP.app.openapi().get("paths", {}))
+    print(f"  比了 {_pairs} 个端点、{sum(_kinds.values())} 个参数"
+          f"（查询 {_kinds.get('query', 0)} + 路径 {_kinds.get('path', 0)}）"
+          f"、{_def_pairs} 个带默认值的参数")
     for k in sorted(_over):
         print(f"    版本覆盖 {k}：{'；'.join(_over[k])}")
 
@@ -865,28 +892,55 @@ def main() -> int:
         fails.append(f"契约↔实现参数比对只覆盖 {_pairs} 个端点 / {_def_pairs} 个默认值")
     for x in _name_bad:
         print(f"  ✗ 参数名漂移 {x}")
+    for x in _in_bad:
+        print(f"  ✗ 参数位置漂移 {x}")
     for x in _def_bad:
         print(f"  ✗ 默认值漂移 {x}")
     if _name_bad:
-        fails.append(f"契约↔实现查询参数漂移 {len(_name_bad)} 处：{_name_bad}")
+        fails.append(f"契约↔实现参数名漂移 {len(_name_bad)} 处：{_name_bad}")
+    if _in_bad:
+        fails.append(f"契约↔实现参数位置漂移 {len(_in_bad)} 处：{_in_bad}")
     if _def_bad:
         fails.append(f"契约↔实现默认值漂移 {len(_def_bad)} 处：{_def_bad}")
-    if not (_name_bad or _def_bad) and _pairs >= 20 and _def_pairs >= 8:
-        print("  ✓ 全部端点的查询参数名与默认值都与契约一致")
+    # ★★ 路径参数也进比对之后，这个下界要跟着走：14 是 2026-10-14 实测的
+    #   路径参数个数（实现侧），下界取 10 留余量。看不到路径参数时，
+    #   `_in_bad` 与 `_name_bad` 都会是空 —— 空得像通过。
+    if _kinds.get("path", 0) < 10:
+        print(f"  ✗ 只比到 {_kinds.get('path', 0)} 个路径参数（下界 10）"
+              f" —— 路径那一层又没人看了")
+        fails.append(f"路径参数比对失效：只比到 {_kinds.get('path', 0)} 个")
+    if not (_name_bad or _in_bad or _def_bad) and _pairs >= 20 and _def_pairs >= 8:
+        print("  ✓ 全部端点的参数名、位置（查询/路径）与默认值都与契约一致")
 
     # 元测试①：证明 _compare 的判据会响（三态：一致静默 / 名字漂移 / 默认值漂移）
     _ok_p = [{"name": "limit", "in": "query", "schema": {"default": 100}}]
-    _mt_decl = {"P": {"get": {"limit": (100, "a.yaml")}}}
+    _mt_decl = {"P": {"get": {"limit": (100, "a.yaml", {"default": 100}, False, "query")}}}
     _r0 = _compare(_mt_decl, {"P": {"get": {"parameters": _ok_p}}})
     _r1 = _compare(_mt_decl, {"P": {"get": {"parameters": [
         {"name": "offset", "in": "query", "schema": {"default": 0}}]}}})
     _r2 = _compare(_mt_decl, {"P": {"get": {"parameters": [
         {"name": "limit", "in": "query", "schema": {"default": 999}}]}}})
+    # ★★ 位置漂移：名字一样、位置不同 ⇒ 必须能发现。
+    #   这一条是 2026-10-14 晚加 `in: path` 时补的：只比名字的话，
+    #   契约写 query、实现是 path 会**静默通过**（名字对得上）。
+    _r3 = _compare(_mt_decl, {"P": {"get": {"parameters": [
+        {"name": "limit", "in": "path", "schema": {"default": 100}}]}}})
+    # ★ 路径参数也要被数到（否则「只比到 0 个路径参数」这条下界会静默失效）
+    _r4 = _compare({"P": {"get": {"sid": (None, "a.yaml", {"type": "integer"},
+                                        True, "path")}}},
+                   {"P": {"get": {"parameters": [
+                       {"name": "sid", "in": "path",
+                        "schema": {"type": "integer"}}]}}})
     _okm1 = (len(_r0[1]) == 0 and len(_r0[2]) == 0 and _r0[3] == 1
-             and len(_r1[1]) == 1 and len(_r2[2]) == 1)
-    print(f"  元测试：一致时静默、名字漂移会响、默认值漂移会响 → {'✓' if _okm1 else '✗'}")
+             and len(_r0[4]) == 0 and _r0[5] == {"query": 1}
+             and len(_r1[1]) == 1 and len(_r2[2]) == 1
+             and len(_r3[4]) == 1 and len(_r3[2]) == 0
+             and _r4[5] == {"path": 1} and _r4[3] == 0 and len(_r4[4]) == 0)
+    print(f"  元测试：一致时静默、名字漂移会响、位置漂移会响、默认值漂移会响 → "
+          f"{'✓' if _okm1 else '✗'}")
     if not _okm1:
-        fails.append(f"参数比对判据的元测试失败：{_r0[1:]} / {_r1[1]} / {_r2[2]}")
+        fails.append(f"参数比对判据的元测试失败：{_r0[1:]} / {_r1[1]} / "
+                     f"{_r2[2]} / {_r3[4]} / {_r4[5]}")
 
     # ---- 5j) ★★ 类型、required、取值范围 ----
     # ★★ 5i 比的是**参数的名字**（以及名字上挂的默认值）。参数**长什么样**
@@ -979,14 +1033,23 @@ def main() -> int:
                 {k: v for k, v in merged.items() if k != "type"})
 
     def _params_of(node: dict) -> dict:
+        """★ 2026-10-14 晚起**收 `in: path`** —— 原先只收 query，
+        于是路径参数的类型与 required 一个都没比过（实测两边各 14 个）。"""
         return {q["name"]: q for q in (node.get("parameters") or [])
-                if q.get("in") == "query"}
+                if q.get("in") in ("query", "path")}
 
     _shape_bad: list = []
     _rng_bad: list = []
     _undecl: list = []
     _promised: list = []
     _s_pairs = 0
+    # ★★★ 2026-10-14 晚补：`_s_pairs` 是**全部**参数的比对面，路径参数混在里面，
+    #   所以「5j 不再看路径参数」这件事**不会**让 `_s_pairs` 掉到 20 以下
+    #   （实测 39 → 25，仍在 20 之上）。⇒ 单独数一份路径比对面。
+    #   ★ 这不是推测：把 `_params_of` 的过滤改回只看 query，套件 **exit=0 全绿**，
+    #     5j 已经不看路径形状了，而没有任何一条判据响。
+    #     同一个毛病今天第三次：**新加的能力，没有东西在看它。**
+    _s_path_pairs = 0
     for _p in sorted(set(_decl) & set(APP.app.openapi().get("paths", {}))):
         _lv = APP.app.openapi()["paths"][_p]
         for _mth in sorted(set(_decl[_p]) & set(_lv)):
@@ -995,6 +1058,8 @@ def main() -> int:
                 if _i is None:
                     continue
                 _s_pairs += 1
+                if _i.get("in") == "path":
+                    _s_path_pairs += 1
                 _ct, _cc = _shape(_c[2])
                 _it, _ic = _shape(_i.get("schema") or {})
                 _cr = {k: v for k, v in _cc.items() if k in _RANGE_KEYS}
@@ -1021,7 +1086,8 @@ def main() -> int:
                         _promised.append(
                             f"{_tag}：契约声明 {_k} = {_cc[_k]!r}（{_c[1]}），实现没有")
 
-    print(f"  比了 {_s_pairs} 个参数的形状 ｜ 类型/required 差 {len(_shape_bad)}"
+    print(f"  比了 {_s_pairs} 个参数的形状（其中路径 {_s_path_pairs} 个）"
+          f" ｜ 类型/required 差 {len(_shape_bad)}"
           f" ｜ 范围两边都有而不同 {len(_rng_bad)} ｜ 实现有契约没声明 {len(_undecl)}"
           f" ｜ 契约声明了实现没有 {len(_promised)}")
     for x in _shape_bad:
@@ -1052,6 +1118,12 @@ def main() -> int:
     if _s_pairs < 20:
         print(f"  ✗ 形状比对面太小（{_s_pairs} 个参数，下界 20）—— 判据已成摆设")
         fails.append(f"参数形状比对失效：只比了 {_s_pairs} 个参数")
+    # ★★ 路径参数单独一条下界（14 是实测值，下界取 10 留余量）。
+    #   理由见上面 `_s_path_pairs` 的说明：总比对面够大**不代表**路径那一层还在看。
+    if _s_path_pairs < 10:
+        print(f"  ✗ 形状比对面里的路径参数太少（{_s_path_pairs} 个，下界 10）"
+              f" —— 路径那一层又没人看了")
+        fails.append(f"路径参数形状比对失效：只比了 {_s_path_pairs} 个")
     if _shape_bad:
         fails.append(f"契约↔实现参数形状漂移 {len(_shape_bad)} 处：{_shape_bad}")
     if _rng_bad:
