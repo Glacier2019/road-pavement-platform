@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, TYPE_CHECKING
 
-from .catalog import ALL_TABLES, DOMAINS, Domain
+from .catalog import ALL_TABLES, CROSS_KIND, CROSS_ORDER_KEY, CROSS_TABLES, DOMAINS, Domain, domain_of
 from .errors import ContractViolation, CrsBindingError, NotFound, UnknownTable
 from .pool import quote_ident
 
@@ -1153,3 +1153,99 @@ def list_tables() -> tuple[str, ...]:
 def build_repository(code: str, dao: "Dao") -> DomainRepository:
     """域仓储工厂。没有专属子类的域先用通用仓储（接口一致，后续按需下沉）。"""
     return _BUILDERS.get(code, DomainRepository)(dao, DOMAINS[code])
+
+
+class CrossRepository:
+    """跨域支撑表仓储 —— 字典 / 日志 / 台账 / 登记簿的唯一读出口。
+
+    ★★★ 为什么它不是 ``DomainRepository`` 的子类，也不复用 ``_check``：
+
+    ``DomainRepository._check()`` 是**域内**白名单 —— 它要求表在 ``self.domain.tables``
+    里。跨域支撑表**按定义不属于任何域**（``domain_of()`` 对它们返回 ``None``），
+    所以域仓储**天然取不到它们**，这不是配置问题、是类型问题。
+
+    ⇒ 修法不是放宽 ``_check``（那会把「M3 不许越域乱读」这条守卫拆掉），
+      而是**承认它们是域外的**，另开一条**明说的**通道 —— 与 ``catalog.py`` 里
+      ``REFERENCE_TABLES`` / ``GeRepository.srid_exists`` 对 ``spatial_ref_sys``
+      的处理同一个道理（那里的注释原话：「正确的做法是**承认它是域外的**，
+      然后开一条明说的通道，而不是放宽白名单」）。
+
+    ★ 读守卫的口径与**写侧**（``write.py``）对齐：那里判的是 ``table not in ALL_TABLES``，
+      是**表级**白名单；这里判的是 ``table not in CROSS_TABLES``，同样是表级。
+      两侧都**默认拒绝**，都没有「按前缀猜」的余地。
+    """
+
+    #: 本仓储允许访问的表。**只读**，且只读这一份。
+    tables: tuple[str, ...] = CROSS_TABLES
+
+    def __init__(self, dao: "Dao") -> None:
+        self._dao = dao
+
+    def _check(self, table: str) -> str:
+        """表级白名单：本仓储**只**能碰 CROSS_TABLES。
+
+        ★ 两种拒绝都是 **404**，不是 400：
+          · 域对象表走错门 → 404 + 指路（`/v1/objects/{table}`）
+          · 完全没登记的表 → 404 + 指路（`/v1/support`）
+
+        ★★ 为什么域对象那一支也必须是 404，而不是「用错了门 ⇒ 400」：
+          与 `/v1/objects/{object_type}` 的先例对齐 —— 那里对**不在白名单里的
+          对象类型**一律 404（判词「未登记的对象类型」）。
+          `wim_axle_record` 对本出口而言就是**不存在的资源**，不是「请求格式错」。
+          ★ 实跑对读时发现的：初版这里抛 ContractViolation ⇒ 400，
+            而同一份契约里写着 404 —— **契约与实现当场不一致**。
+            判词是对的、码值错了，这种错最难看出来：信息全对，只有数字错。
+        """
+        if table not in CROSS_TABLES:
+            owner = domain_of(table)
+            if owner is not None:
+                raise NotFound(
+                    f"跨域支撑表出口没有 {table}（该表是 {owner} 域对象，不走本出口）；"
+                    f"请改用 /v1/objects/{table}"
+                )
+            raise NotFound(
+                f"未登记的跨域支撑表：{table}；本出口的表见 /v1/support"
+            )
+        return quote_ident(table)
+
+    def order_key(self, table: str) -> str:
+        """本表的稳定排序键。字典是 ``code``，台账/日志/规则是 ``id``。"""
+        self._check(table)
+        return CROSS_ORDER_KEY[table]
+
+    def list_rows(self, table: str, *, limit: int = 100,
+                  offset: int = 0) -> list[dict[str, Any]]:
+        """按本表的排序键稳定翻页。
+
+        ★ 排序键**逐表不同**且必须是确定的：字典没有 ``id`` 列（``code`` 主键），
+          一律 ``ORDER BY id`` 会让字典出口直接报错。键来自 ``catalog.CROSS_ORDER_KEY``，
+          由 ``selfcheck()`` 断言与 ``CROSS_TABLES`` 逐张对齐。
+        """
+        t = self._check(table)
+        key = CROSS_ORDER_KEY[table]
+        return self._dao.query(
+            f"SELECT * FROM {t} ORDER BY {key} LIMIT %(limit)s::int OFFSET %(offset)s::int",
+            {"limit": limit, "offset": offset})
+
+    def count(self, table: str) -> int:
+        t = self._check(table)
+        return int(self._dao.scalar(f"SELECT count(*) AS n FROM {t}") or 0)
+
+    def catalog(self) -> list[dict[str, Any]]:
+        """跨域支撑表清单：逐张给表名、类别、排序键、行数。
+
+        ★ 这张清单是**出口的一部分**，不是运维装饰：客户端拿到一个码之后，
+          要能自己判断该去哪张表解 —— 靠 ``dict_`` 前缀去猜是命名习惯，不是契约。
+        """
+        out: list[dict[str, Any]] = []
+        for t in CROSS_TABLES:
+            out.append({
+                "table": t,
+                "kind": CROSS_KIND[t],
+                "order_key": CROSS_ORDER_KEY[t],
+                "row_count": self.count(t),
+            })
+        return out
+
+    def __repr__(self) -> str:
+        return f"<CrossRepository 表{len(self.tables)}张>"

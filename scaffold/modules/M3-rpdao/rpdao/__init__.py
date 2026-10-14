@@ -18,6 +18,9 @@ from __future__ import annotations
 
 from .catalog import (
     ALL_TABLES,
+    CROSS_KIND,
+    CROSS_KINDS,
+    CROSS_ORDER_KEY,
     CROSS_TABLES,
     DOMAINS,
     EXPECTED_PHYSICAL_TABLES,
@@ -40,6 +43,7 @@ from .errors import (
 from .pool import Dao
 from .repo import (
     PARTITIONED_ROOTS,
+    CrossRepository,
     DomainRepository,
     GeRepository,
     LoRepository,
@@ -51,10 +55,14 @@ __version__ = "0.2.0"
 __all__ = [
     "Dao",
     "DomainRepository",
+    "CrossRepository",
     "GeRepository",
     "LoRepository",
     "DOMAINS",
     "CROSS_TABLES",
+    "CROSS_ORDER_KEY",
+    "CROSS_KIND",
+    "CROSS_KINDS",
     "ALL_TABLES",
     "EXPECTED_PHYSICAL_TABLES",
     "TABLE_OWNER",

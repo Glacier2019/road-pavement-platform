@@ -140,6 +140,77 @@ CROSS_TABLES: tuple[str, ...] = (
     "quality_rule", "mapping_set",
 )
 
+# ---------------------------------------------------------------------------
+# 跨域支撑表的**出口元数据**（D-026 的修复）
+# ---------------------------------------------------------------------------
+# ★★★ 为什么要有这两个表 —— 先记下那个真实缺陷：
+#
+# M6 的对象查询白名单写着（原注释）：
+#   「跨域支撑表（字典/质量日志/批次台账等 11 张）**刻意不在此列**：
+#     它们是治理设施，不是本体对象，不应经"对象查询"暴露。」
+#
+# ⇒ **排除是有意的，这个决定没问题。** 但**同一段注释里没有下一句**：
+#   它们该从哪出去。于是这 11 张里**有数据的 7 张**（字典 5 ＋ 批次台账
+#   ＋ 质量日志）既不在对象查询里、也没有任何命名端点 ——
+#   实测 7 张全部 404，而 `/v1/objects/wim_axle` 照样返回 `axle_type_code: "T5"`，
+#   能解它的 `dict_axle_type` 却取不到。**平台自己的输出里带着解不开的码。**
+#
+# ★★ 而那段注释里的数字是「共 31 张」，实际早已 51 张。
+#    名单从 31 长到 51 的整个过程里，**没有人回头看第二句** ——
+#    因为第二句**没有被任何东西守着**。
+#
+# ⇒ 所以这次修的不只是"补一个出口"，而是**把那个没做过的决定补上，
+#   并给它一条判据**。下面两张表就是那个决定的可执行形式。
+
+#: 跨域支撑表在出口里的**排序键**。
+#:
+#: ★★ 为什么必须逐表声明，不能一律 ``ORDER BY id``：
+#:   5 张字典是 **``code`` 主键、根本没有 id 列**（实测 information_schema），
+#:   6 张台账/日志/规则有 id。一律 ``ORDER BY id`` 会让字典出口**直接报错** ——
+#:   而字典恰恰是这轮最要紧的那一半。
+#:
+#: ★★ 为什么写成静态表，而不是运行时探 information_schema：
+#:   静态表能在**导入那一刻**断言「键集合 == CROSS_TABLES」（见 ``selfcheck()``），
+#:   于是「加了跨域表却忘了给排序键」当场就红，
+#:   而不是等某个客户端请求那张表时才 500。
+CROSS_ORDER_KEY: dict[str, str] = {
+    "dict_sensor_type": "code",
+    "dict_quantity": "code",
+    "dict_disease_type": "code",
+    "dict_axle_type": "code",
+    "dict_stat_metric": "code",
+    "data_quality_log": "id",
+    "calibration_log": "id",
+    "feedback_record": "id",
+    "data_import_batch": "id",
+    "quality_rule": "id",
+    "mapping_set": "id",
+}
+
+#: 跨域支撑表的**类别**。出口用它回答客户端最常问的一问：
+#: 「我拿到一个码，该去哪张表解」—— 靠表名前缀去猜是不可靠的约定，
+#: 而 ``dict_`` 前缀只是命名习惯，不是契约。
+CROSS_KIND: dict[str, str] = {
+    # 码 → 名称的对照表。客户端拿它离线解码，通常一次要全量。
+    "dict_axle_type": "dictionary",
+    "dict_disease_type": "dictionary",
+    "dict_quantity": "dictionary",
+    "dict_sensor_type": "dictionary",
+    "dict_stat_metric": "dictionary",
+    # 逐期质量 / 标定记录。
+    "data_quality_log": "log",
+    "calibration_log": "log",
+    # 导入批次 / 模块间反馈的台账。
+    "data_import_batch": "ledger",
+    "feedback_record": "ledger",
+    # 规则库 / 映射集的登记簿（有版本、有启用位）。
+    "quality_rule": "registry",
+    "mapping_set": "registry",
+}
+
+#: ``CROSS_KIND`` 的合法取值。出口按它分类，契约按它约束枚举 —— 两处必须同一份。
+CROSS_KINDS: tuple[str, ...] = ("dictionary", "log", "ledger", "registry")
+
 # 域外只读参照表（v0.6，契约变更工单 005）。
 #
 # ★★ 为什么**不**并入 CROSS_TABLES / ALL_TABLES
@@ -244,6 +315,18 @@ def selfcheck() -> dict[str, object]:
     domain_tables = sum(len(d.tables) for d in DOMAINS.values())
     logical_only = sum(len(d.logical) for d in DOMAINS.values())
     dups = [t for t in ALL_TABLES if ALL_TABLES.count(t) > 1]
+    # ★★ D-026 的修复落在这里：跨域表的出口元数据必须**逐张齐备**。
+    #    缺一张 ⇒ `cross_meta_missing` 非空 ⇒ `ok` 为假 ⇒ 契约测试当场红。
+    #    这条判据存在的理由见 CROSS_ORDER_KEY 上方的长注释：
+    #    上一版名单从 31 长到 51 却没人回头看「它们该从哪出去」，
+    #    就是因为那个决定**没有任何东西守着**。
+    cross_meta_missing = sorted(
+        set(CROSS_TABLES) - (set(CROSS_ORDER_KEY) & set(CROSS_KIND))
+    )
+    cross_meta_extra = sorted(
+        (set(CROSS_ORDER_KEY) | set(CROSS_KIND)) - set(CROSS_TABLES)
+    )
+    bad_kind = sorted(k for k in CROSS_KIND.values() if k not in CROSS_KINDS)
     return {
         "domains": len(DOMAINS),
         "domain_physical_tables": domain_tables,
@@ -252,5 +335,12 @@ def selfcheck() -> dict[str, object]:
         "logical_entries_without_table": logical_only,
         "duplicates": sorted(set(dups)),
         "expected_physical_tables": EXPECTED_PHYSICAL_TABLES,
-        "ok": not dups and (domain_tables + len(CROSS_TABLES)) == EXPECTED_PHYSICAL_TABLES,
+        "cross_meta_missing": cross_meta_missing,
+        "cross_meta_extra": cross_meta_extra,
+        "cross_bad_kind": bad_kind,
+        "ok": (not dups
+               and (domain_tables + len(CROSS_TABLES)) == EXPECTED_PHYSICAL_TABLES
+               and not cross_meta_missing
+               and not cross_meta_extra
+               and not bad_kind),
     }

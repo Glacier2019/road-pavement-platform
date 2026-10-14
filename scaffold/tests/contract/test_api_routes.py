@@ -300,6 +300,31 @@ class _FakeDomain:
         return rows[offset:offset + limit]
 
 
+class _FakeCross:
+    """跨域支撑表仓储的假实现（`/v1/support` 出口）。
+
+    ★ 形状照抄真 `CrossRepository` 的公开面：`catalog()` / `list_rows()` / `count()`。
+      真实现还有 `order_key()` 与私有 `_check()` —— 端点不碰它们，故假实现不提供
+      （**故意不提供**：假实现多给一分接口，就少一分「端点真的只用这些」的保证）。
+    """
+
+    ROWS = {"dict_axle_type": [
+        {"code": "A2", "name": "2 轴汽车", "remark": None},
+        {"code": "T5", "name": "5 轴货车", "remark": "G228 实测主力车型"},
+    ]}
+
+    def catalog(self):
+        return [{"table": "dict_axle_type", "kind": "dictionary",
+                 "order_key": "code", "row_count": len(self.ROWS["dict_axle_type"])}]
+
+    def list_rows(self, table, *, limit=100, offset=0):
+        rows = self.ROWS[table]
+        return rows[offset:offset + limit]
+
+    def count(self, table):
+        return len(self.ROWS[table])
+
+
 class _FakeDao:
     """替换 M3 门面。真实 Dao 的接口面就是这些——这正是 M3 契约的可替代性证明。"""
 
@@ -308,6 +333,7 @@ class _FakeDao:
         self.ge = _FakeGe()
 
     def domain(self, code): return _FakeDomain(code)
+    def cross(self): return _FakeCross()
     def ping(self): return True
     def pool_stats(self): return {"pool_size": 0, "pool_available": 0}
     def open(self): return self
@@ -374,6 +400,20 @@ def main() -> int:
         # 参数校验：非法筛选项应被 FastAPI 挡在门外（422），而不是进到 DAO
         ("GET",    "/v1/geometry/sections/6/stations?limit=0",      422),
         ("GET",    "/v1/geometry/sections/6/stations?from_km=-1",   422),
+        # ★★★ 跨域支撑表出口（2026-10-14，D-027）—— 这四条是本出口的**边界判据**。
+        #   ★ 加它们的直接原因：`_check()` 初版对「域对象走错门」抛 ContractViolation
+        #     ⇒ 400，而同一份契约里写着 404 —— **契约与实现当场不一致**。
+        #     探针表当时是**人手写的期望码**、与契约从不对读，所以它一片绿。
+        #   ⇒ 现在把这四条钉在探针里：它们同时守住「正路通」「边界不拆」「码值对」。
+        ("GET",    "/v1/support",                                   200),
+        ("GET",    "/v1/support/dict_axle_type",                    200),
+        ("GET",    "/v1/support/wim_axle_record",                   404),  # 域对象走错门
+        ("GET",    "/v1/support/nonexistent_tbl",                   404),  # 没登记的表
+        ("GET",    "/v1/support/dict_axle_type?limit=0",            422),  # 下界
+        ("GET",    "/v1/support/dict_axle_type?limit=1001",         422),  # 上界
+        # ★ 反向：域对象**不能**出现在支撑表出口，支撑表也**不能**从对象出口拿到。
+        #   两条一起才说明「门是两扇、边界是清楚的」，不是白名单被放宽了。
+        ("GET",    "/v1/objects/dict_axle_type",                    404),
         ("POST",   "/v1/actions/create_maintenance_ticket", 501),
     ]
     for method, url, want in cases:
@@ -1184,13 +1224,109 @@ def main() -> int:
     #   ★ 这**无害**，因为两支动的路径不重叠：geo 那支只碰 geo/reverse 与
     #     geo/route，基础那支只碰 wim_axle 与 stations。
     #     但这层意思不写下来，下一个人会以为顺序错了。
-    _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.geo.v0.2.yaml",
+    #
+    # ★★★ 2026-10-14（D-026）：`support.v0.1` 与 `geo.v0.1` **同版**（都是 (0,1)），
+    #   于是按**文件名**排：`m6-gateway.geo.v0.1` < `m6-gateway.support.v0.1`。
+    #   ⇒ 它插在 `geo.v0.1` 与 `geo.v0.2` **之间**，不在末尾。
+    #   ★ 这条判据这次**真的响了**（新文件一放进去就红）—— 它存在的意义就是
+    #     让「多了一份契约」这件事**必须有人确认过**，而不是自动通过。
+    #     这正是它该有的样子：新契约落在哪一位，是**判断**，不是排序的副产品。
+    _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.support.v0.1.yaml",
+                 "m6-gateway.geo.v0.2.yaml",
                  "m6-gateway.geo.v0.3.yaml", "m6-gateway.v0.3.yaml",
                  "m6-gateway.geo.v0.4.yaml", "m6-gateway.v0.4.yaml"]
     _okm2 = _ord == _want_ord
     print(f"  元测试：契约版本序 → {_ord} {'✓' if _okm2 else '✗'}")
     if not _okm2:
         fails.append(f"契约版本序不符：{_ord}，期望 {_want_ord}")
+
+    # ======================================================================
+    # 5k 出口覆盖率：**每张有数据的表都必须有人负责**
+    # ======================================================================
+    # ★★★ 这条判据为什么必须有（D-026 量出来的事实）：
+    #
+    # 上面 5i / 5j 比的是「契约声明的端点 ↔ 实现的路由」—— 它们能发现
+    # 「**声明了却没人实现**」和「**实现了却没人声明**」。
+    #
+    # ★ 但它们**看不见第三种情况**：一张表**根本没有任何路由**。
+    #   契约里没有它的端点，实现里也没有它的路由 —— **两边都没有东西可比**，
+    #   于是 5i/5j 一片绿，而那张表实打实地取不到。
+    #
+    # 实测原状（这就是本判据诞生的原因）：
+    #   · CROSS_TABLES 11 张里**有数据的 7 张**（字典 5 ＋ 批次台账 ＋ 质量日志）
+    #     既不在 `/v1/objects/{object_type}` 的白名单里、也没有任何命名端点
+    #     —— 7 张全部 HTTP 404，而 `/v1/objects/wim_axle` 照样返回
+    #     `axle_type_code: "T5"`，**能解它的 dict_axle_type 却取不到**。
+    #   · 那一刻套件是**全绿**的：28 项全过，没有任何一项在问
+    #     「平台有的数据，外面拿不拿得到」。
+    #
+    # ⇒ 判据：`rpdao.ALL_TABLES` 里**每张有数据的表**，必须满足三者之一：
+    #     ① 在 `/v1/objects/{object_type}` 的白名单里（域对象，走通用出口）；
+    #     ② 在 `/v1/support/{table}` 的白名单里（跨域支撑表，走支撑表出口）；
+    #     ③ 被显式登记进 `_INTENTIONALLY_UNEXPOSED`（**有意不出口**，附理由）。
+    #
+    # ★ 为什么第 ③ 条必须存在，而不是「一律必须出口」：
+    #   `app.py` 里那条边界是有道理的 ——「不是本体对象，不应经对象查询暴露」。
+    #   有些表可能真的**该留在内部**（例如纯运维的中间表）。
+    #   ⇒ 判据不该禁止「不出口」，而该禁止「**不出口却没人做过这个决定**」。
+    #     这正是原缺陷的准确形状：排除是**有意的**，但「该从哪出去」从没决定过。
+    #
+    # ★★ 与 D-025 §七 那条规矩的关系：那条说「加完一层新能力，先问现在谁在看它」。
+    #    这条是它的**另一半**：加完一张表，先问「现在谁能取到它」。
+    #    ★ 上一版 `app.py` 的注释写着「共 31 张」而实际 51 张 —— 名单从 31 长到 51
+    #      的整个过程里没人回头，**因为那句话没有被任何东西守着**。本判据就是那个守卫。
+    from rpdao import ALL_TABLES, CROSS_TABLES as _CT, DOMAINS as _D
+
+    #: **有意不出口**的表 → 理由。空元组/空字典是**正常状态**（当前没有这种表）。
+    #: 加表进来必须同时写理由 —— 让「不出口」成为一个**要签字**的决定，不是一个默认。
+    _INTENTIONALLY_UNEXPOSED: dict[str, str] = {}
+
+    _obj_whitelist = getattr(APP, "OBJECT_TYPES", {})
+    _sup_whitelist = set(_CT)
+    _uncovered: list[str] = []
+
+    for _t in ALL_TABLES:
+        if _t in _obj_whitelist or _t in _sup_whitelist or _t in _INTENTIONALLY_UNEXPOSED:
+            continue
+        _uncovered.append(_t)
+
+    _ok_k = not _uncovered
+    print(f"  出口覆盖率：ALL_TABLES {len(ALL_TABLES)} 张 ｜ "
+          f"域对象出口 {len(_obj_whitelist)} ｜ 支撑表出口 {len(_sup_whitelist)} ｜ "
+          f"有意不出口 {len(_INTENTIONALLY_UNEXPOSED)} ｜ "
+          f"**无人负责 {len(_uncovered)}** {'✓' if _ok_k else '✗ ' + str(_uncovered)}")
+    if not _ok_k:
+        fails.append(
+            f"有 {len(_uncovered)} 张表没有任何读出口，也没有登记为有意不出口：{_uncovered}。"
+            "每张表都必须有人负责 —— 域对象进 OBJECT_TYPES、支撑表进 CROSS_TABLES 出口、"
+            "或显式登记进 _INTENTIONALLY_UNEXPOSED 并写明理由。"
+        )
+
+    # ★★ 元测试：本条判据**必须能响**。
+    #   D-025 学到的教训 ——「一个从没响过的门，和没在看是一样的」。
+    #   ⇒ 这里**真的把支撑表出口抽掉**（用空集合代替），重跑同一段逻辑，
+    #     必须认出全部 11 张跨域表。★ 第一次我把 `_sup_whitelist` 原样传了进去，
+    #     于是元测试自己失效（它测的是「什么都在」的局面）—— 记在这里。
+    def _uncovered_under(sup: set, obj: dict) -> list[str]:
+        return [t for t in ALL_TABLES
+                if t not in obj and t not in sup and t not in _INTENTIONALLY_UNEXPOSED]
+
+    _mt_uncovered = _uncovered_under(set(), _obj_whitelist)
+    _mt_k = (set(_mt_uncovered) == set(_CT)) and len(_mt_uncovered) == len(_CT)
+    print(f"  元测试：抽掉支撑表出口后，11 张跨域表被认出 → {len(_mt_uncovered)} 张 "
+          f"{'✓' if _mt_k else '✗ ' + str(sorted(set(_mt_uncovered) ^ set(_CT)))}")
+    if not _mt_k:
+        fails.append("出口覆盖率判据失效：抽掉整个支撑表出口后仍有表被认为『有人管』")
+
+    # ★ 元测试②：反向 —— **不该响的时候不能响**。
+    #   把跨域表全登记为「有意不出口」，暴露集合必须回到空。
+    _mt_registered = {x: "测试用" for x in _CT}
+    _mt2 = [t for t in _CT if t not in _sup_whitelist and t not in _obj_whitelist
+            and t not in _mt_registered]
+    _mt2_k = (_mt2 == [])
+    print(f"  元测试：全部登记为有意不出口后不再报警 → {_mt2} {'✓' if _mt2_k else '✗'}")
+    if not _mt2_k:
+        fails.append("出口覆盖率判据反向不干净：全登记后仍报警")
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0

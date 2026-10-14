@@ -1,0 +1,175 @@
+# ============================================================================
+# M6 统一数据出口 —— 跨域支撑表出口契约摘要 v0.1
+# ----------------------------------------------------------------------------
+# 本文件是 m6-gateway.v0.4.yaml 的**增量**，只描述 D-026 新开的两条路径。
+# 真源仍是服务运行后自动生成的 /openapi.json；本文件是它的人工摘要，
+# 用于评审与对接。
+#
+# ★★★ 为什么必须新开一扇门（D-026 量出来的事实）
+# ----------------------------------------------------------------------------
+# 对象查询白名单（`/v1/objects/{object_type}`）里写着：
+#
+#   「跨域支撑表（字典/质量日志/批次台账等 11 张）**刻意不在此列**：
+#     它们是治理设施，不是本体对象，不应经"对象查询"暴露。」
+#
+# ⇒ **排除是有意的，这个决定没问题。** 但那段话**没有下一句**：
+#   它们该从哪出去。实测后果：
+#
+#     端点                                  结果
+#     GET /v1/objects/wim_axle               → {"axle_type_code": "T5", …}
+#     GET /v1/objects/dict_axle_type         → HTTP 404
+#
+#   `dict_axle_type` 说 `T5` 是「5 轴货车」。**平台自己的输出里带着解不开的码。**
+#   逐张实测：CROSS_TABLES 11 张里**有数据的 7 张**全部 404，且没有一条命名
+#   端点的 SQL 碰过它们 —— 既不在通用出口，也没有命名端点，**没有任何一条路**。
+#
+# ★★ 而那段注释里的数字是「共 31 张」，实际早已 51 张。名单从 31 长到 51 的
+#    整个过程里**没有人回头看第二句** —— 因为第二句**没有被任何东西守着**。
+#
+# ⇒ 所以这次不是「把 404 改成 200」（那会把字典塞进对象查询、破坏上面那条
+#   有道理的边界），而是**承认它们不是本体对象，另开一条明说的通道**。
+#   这与 `spatial_ref_sys` 的处理同一个道理 —— `catalog.py` 里
+#   `REFERENCE_TABLES` 的注释原话：
+#     「正确的做法是**承认它是域外的**，然后开一条明说的通道，
+#       而不是放宽白名单。」
+#
+# ★ 契约的翻页口径与 `/v1/objects/{object_type}` **完全一致**（`limit` /
+#   `offset` / `truncated`，多要一行精确探测）。两条通道的差别只在**表的口径**
+#   （域对象 vs 跨域支撑表），不在怎么取 —— 客户端已经学会了一套翻页方式，
+#   第二套只会多一种用错的机会。
+#
+# ★ 本文件的参数名、位置、类型、required、默认值与上下界**全部来自与服务对读**
+#   （直接从运行中的 /openapi.json 取，不是转抄）；`m6-路由` 的 5i / 5j
+#   每次跑都会把契约与实现逐参数比一遍，包括类型、required、取值范围与 in。
+# ============================================================================
+openapi: 3.1.0
+info:
+  title: M6 统一数据出口 —— 跨域支撑表出口
+  version: 0.1.0
+  description: >-
+    字典 / 日志 / 台账 / 登记簿的读出口。
+    对象查询那条路**有意**不收它们（不是本体对象），本文件是那条决定之后
+    一直缺着的「第二扇门」。
+
+paths:
+  /v1/support:
+    get:
+      summary: 跨域支撑表清单：字典 / 日志 / 台账 / 登记簿
+      description: >-
+        **有哪些支撑表、哪张是字典** —— 客户端解码前先问的一问。
+
+        客户端拿到 `axle_type_code: "T5"` 之后，必须知道该去哪张表解。
+        靠 `dict_` 前缀去猜是**命名习惯**，不是契约 —— 这里给的是契约：
+        `kind` 是明确声明的类别。
+
+        `kind` 的合法取值见响应里的 `kinds` 字段，真源是
+        `catalog.CROSS_KINDS`（两侧同一份，不各自维护）。
+      responses:
+        "200":
+          description: 全部跨域支撑表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, kinds, items]
+                properties:
+                  count:
+                    type: integer
+                    description: 表数（== CROSS_TABLES 的长度）
+                  kinds:
+                    type: array
+                    items:
+                      type: string
+                      enum: [dictionary, log, ledger, registry]
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [table, kind, order_key, row_count]
+                      properties:
+                        table:
+                          type: string
+                        kind:
+                          type: string
+                          enum: [dictionary, log, ledger, registry]
+                        order_key:
+                          type: string
+                          description: >-
+                            本表的稳定排序键。字典是 `code`（无 id 列），
+                            台账/日志/规则是 `id`。
+                        row_count:
+                          type: integer
+
+  /v1/support/{table}:
+    get:
+      summary: 按表取跨域支撑表内容（字典 / 日志 / 台账 / 登记簿）
+      description: >-
+        与 `/v1/objects/{object_type}` 同一条翻页契约。
+
+        `truncated` 为真表示后面还有更多，用 `offset` 接着取 ——
+        与通用出口一样，这个标志是**精确探测**出来的（多要一行），
+        不是「拿满就猜」。
+      parameters:
+        - name: table
+          in: path
+          required: true
+          schema:
+            type: string
+          description: >-
+            跨域支撑表名，合法值见 `/v1/support`。
+            不在 `CROSS_TABLES` 里的一律 404 —— 与对象查询一样，
+            **越白名单即越界**。域对象表走本接口会被明确指向
+            `/v1/objects/{object_type}`，不会静默返回。
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+          description: >-
+            单次最多返回条数。与通用出口同为 1000 ——
+            上限是**纯运维参数**（限制单次请求代价），
+            不是「能取多少」的旋钮；那是 `offset` 的事。
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: 跳过前多少条，配合 `truncated` 翻页。
+      responses:
+        "200":
+          description: 该表的一页内容
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [table, kind, count, truncated, items]
+                properties:
+                  table:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [dictionary, log, ledger, registry]
+                  count:
+                    type: integer
+                    description: >-
+                      **本页条数，不是总数。** 与通用出口同一口径：
+                      要判断后面还有没有，看 `truncated`。
+                  truncated:
+                    type: boolean
+                    description: true = 后面还有更多，用更大的 offset 接着取。
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        "404":
+          description: 未登记的跨域支撑表（或该表属域对象，应走 /v1/objects）
+        "422":
+          description: >-
+            不认识的查询参数。与通用出口同一判词：
+            「不接受未声明的键 —— 静默忽略会被读成「筛选已生效」」。

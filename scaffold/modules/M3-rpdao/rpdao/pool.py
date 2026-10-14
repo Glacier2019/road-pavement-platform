@@ -227,6 +227,23 @@ class Dao:
             self._repos[code] = build_repository(code, self)
         return self._repos[code]
 
+    def cross(self) -> Any:
+        """取**跨域支撑表**仓储（字典 / 日志 / 台账 / 登记簿）。
+
+        ★ 为什么要有这个方法，而不是让调用方自己 ``build_repository``：
+          跨域表**不属于任何域**，``domain(code)`` 这条路按域代号取，走不通。
+          它们之前正是因为这个原因**没有任何读出口** —— 见 ``CrossRepository``
+          的类注释与 D-026。
+
+        ★ 为什么缓存键是 ``"X"``：与 ``domain()`` 共用 ``self._repos``，
+          而合法域代号是 2 字母、不含 ``X``，不会撞。
+        """
+        from .repo import CrossRepository
+
+        if "X" not in self._repos:
+            self._repos["X"] = CrossRepository(self)
+        return self._repos["X"]
+
     def __getattr__(self, name: str) -> Any:
         """dao.lo / dao.ge … 直接取域仓储（小写域代号）。"""
         if name.isalpha() and len(name) == 2 and name.upper() in ("GE", "SU", "RE", "LO",

@@ -35,6 +35,8 @@ from jsonnum import NoResponseModel
 
 from rpdao import (
     ALL_TABLES,
+    CROSS_KIND,
+    CROSS_KINDS,
     CROSS_TABLES,
     DOMAINS,
     TABLE_OWNER,
@@ -51,12 +53,29 @@ from rpdao import (
 
 dao = Dao(os.getenv("PG_DSN"), app_name="rp-api")
 
-# 对象类型白名单 = 7 大对象域**已建**的物理表（共 31 张），来自 M3 的域目录。
+# 对象类型白名单 = 7 大对象域**已建**的物理表（共 51 张），来自 M3 的域目录。
 # 跨域支撑表（字典/质量日志/批次台账等 11 张）刻意不在此列：它们是治理设施，
 # 不是本体对象，不应经"对象查询"暴露。越白名单即越界 → 404。
+#
+# ★★★ 2026-10-14（D-026）：上面那段话**只说了它们不该从这走，没说它们该从哪走**。
+#   实测后果：这 11 张里**有数据的 7 张**（字典 5 ＋ 批次台账 ＋ 质量日志）
+#   既不在对象查询里、也没有任何命名端点 —— 7 张全部 404，
+#   而 `/v1/objects/wim_axle` 照样返回 `axle_type_code: "T5"`，
+#   能解它的 `dict_axle_type` 却取不到。**平台自己的输出里带着解不开的码。**
+#
+#   ★ 那段注释里还写着「共 31 张」，而实际早已 51 张 —— 名单从 31 长到 51
+#     的整个过程里**没有人回头看第二句**，因为第二句**没有被任何东西守着**。
+#
+#   ⇒ 所以这次不是"把 404 改成 200"（那会把字典塞进对象查询、破坏上面那条
+#     有道理的边界），而是**承认它们不是本体对象，另开一条明说的通道**：
+#     `/v1/support` 与 `/v1/support/{table}`。见 `rpdao.CrossRepository`。
 OBJECT_TYPES: dict[str, str] = {
     table: code for code, d in DOMAINS.items() for table in d.tables
 }
+
+# 支撑表出口支持的查询参数。与 `_LIST_OBJECTS_PARAMS` 同口径，**刻意分开写**：
+# 两者是两条不同的通道，合并成一个常量会让"给其中一条加参数"顺带改了另一条。
+_SUPPORT_PARAMS = ("limit", "offset")
 
 
 @asynccontextmanager
@@ -506,6 +525,98 @@ def list_objects(request: Request,
     truncated = len(rows) > limit
     rows = rows[:limit]
     return {"object_type": object_type, "domain": code,
+            "count": len(rows), "truncated": truncated, "items": rows}
+
+
+# ------------------------------------------------- 跨域支撑表出口（D-026 新开）
+# ★★★ 这扇门为什么必须存在，见文件上方 OBJECT_TYPES 那段注释。
+#
+# 一句话：对象查询那条路**有意**不收跨域表（它们不是本体对象），
+# 而"有意不收"之后**从来没有第二扇门** —— 于是有数据的 7 张全部 404，
+# 而平台自己的输出里照样带着 `axle_type_code: "T5"` 这种解不开的码。
+#
+# ★ 为什么不把它们并进 OBJECT_TYPES：
+#   ① 它们**没有域**（`domain_of()` 对它们返回 None），而 OBJECT_TYPES 是
+#      `表 → 域代号` 的映射，装不下没有域的表；
+#   ② 并进去就等于把「不是本体对象就不经对象查询暴露」这条边界拆了。
+#   ⇒ 承认它们是域外的，另开一条**明说的**通道。这与 `spatial_ref_sys`
+#     的处理是同一个道理（catalog.py 里 REFERENCE_TABLES 的原话：
+#     「正确的做法是**承认它是域外的**，然后开一条明说的通道，而不是放宽白名单」）。
+
+
+@app.get("/v1/support", tags=["支撑表出口"],
+         summary="跨域支撑表清单：字典 / 日志 / 台账 / 登记簿")
+def support_catalog() -> dict[str, Any]:
+    """**有哪些支撑表、哪张是字典** —— 客户端解码前先问的一问。
+
+    ★ 为什么这张清单本身就是出口的一部分，而不是运维装饰：
+      客户端拿到 `axle_type_code: "T5"` 之后，必须知道该去哪张表解。
+      靠 `dict_` 前缀去猜是**命名习惯**，不是契约 —— 而这里给的是契约：
+      `kind: "dictionary"` 是明确声明的类别（见 `catalog.CROSS_KIND`）。
+    """
+    try:
+        items = dao.cross().catalog()
+    except DaoError as exc:
+        raise _http(exc) from exc
+    return {"count": len(items), "kinds": list(CROSS_KINDS), "items": items}
+
+
+@app.get("/v1/support/{table}", tags=["支撑表出口"],
+         summary="按表取跨域支撑表内容（字典 / 日志 / 台账 / 登记簿）")
+def support_rows(request: Request,
+                 table: str,
+                 limit: int = Query(100, ge=1, le=1000),
+                 offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    """与 `/v1/objects/{object_type}` **同一条翻页契约**：`limit` / `offset` /
+    `truncated`，多要一行来精确探测有没有更多。
+
+    ★ 为什么沿用同一条契约而不是另设计一套：客户端已经学会了一套翻页方式，
+      第二套只会多一种用错的机会。两条通道的**差别只在表的口径**（域对象 vs
+      跨域支撑表），不在怎么取。
+    """
+    # 与 /v1/objects/{object_type} 同序：先判表名，再判查询参数。
+    #
+    # ★★★ 2026-10-14（D-027）：**边界判在这一层，不只判在 M3。**
+    #   初版把「表在不在 CROSS_TABLES 里」整个交给 M3 的 `CrossRepository._check()`
+    #   —— 实跑对读时暴露了两个问题：
+    #     ① 契约层看不见这条边界。本文件的路由表是契约比对的对象，
+    #        而写在 M3 里的判据**在这层不可见**（复用隔壁域对象出口的形状：
+    #        那边对不在白名单里的 object_type 就是**在这里**回 404）。
+    #     ② 假仓储会绕过它。路由测试用 `_FakeDao` 替掉 M3，若白名单只在 M3，
+    #        那么「域对象不能走这个出口」这条**在路由测试里根本测不到** ——
+    #        假实现恒回 200，测试会绿，而真实现回 404。
+    #
+    #   ⇒ 判两件事，都回 404（不是 400：对本出口而言它们就是**不存在的资源**，
+    #     与 /v1/objects/{object_type} 对未登记类型回 404 是同一条道理）：
+    #        ① 是域对象 → 指路到对象出口；② 完全没登记 → 指路到 /v1/support。
+    if table not in CROSS_TABLES:
+        owner = domain_of(table)
+        if owner is not None:
+            raise HTTPException(
+                404, f"跨域支撑表出口没有 {table}（该表是 {owner} 域对象，不走本出口）；"
+                     f"请改用 /v1/objects/{table}")
+        raise HTTPException(
+            404, f"未登记的跨域支撑表：{table}；本出口的表见 /v1/support")
+    # ★ M3 那一层**仍然保留**同一判据（纵深防御）：app 层判的是「路由该不该接」，
+    #   M3 层判的是「这个仓储能不能读」。两处都不许放宽 —— 少任何一处，
+    #   另一个入口（脚本、未来的第二个调用方）就绕过去了。
+    unknown = sorted(set(request.query_params) - set(_SUPPORT_PARAMS))
+    if unknown:
+        raise HTTPException(
+            422,
+            f"不认识的查询参数：{unknown}；本接口只支持 {list(_SUPPORT_PARAMS)}"
+            f"（不接受未声明的键 —— 静默忽略会被读成「筛选已生效」）")
+    try:
+        rows = dao.cross().list_rows(table, limit=limit + 1, offset=offset)
+        kind = CROSS_KIND[table]
+    except DaoError as exc:
+        raise _http(exc) from exc
+    except KeyError as exc:  # 表在 CROSS_TABLES 里却没有类别 —— 不该发生
+        raise HTTPException(
+            500, f"跨域支撑表 {table} 未登记类别（catalog.CROSS_KIND 缺项）") from exc
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"table": table, "kind": kind,
             "count": len(rows), "truncated": truncated, "items": rows}
 
 
