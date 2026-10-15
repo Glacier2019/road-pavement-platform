@@ -414,6 +414,11 @@ def main() -> int:
         # ★ 反向：域对象**不能**出现在支撑表出口，支撑表也**不能**从对象出口拿到。
         #   两条一起才说明「门是两扇、边界是清楚的」，不是白名单被放宽了。
         ("GET",    "/v1/objects/dict_axle_type",                    404),
+        # ★ D-028：三条**必填/越界**校验的探针。写 5l 时量出这三个码
+        #   「契约声明了、却从没被真打到过」——能一条探针解决的，就不该进欠账单。
+        ("GET",    "/v1/objects/road_line?limit=0",                 422),
+        ("GET",    "/v1/geometry/sections/6/elements",              422),  # 缺 from_km
+        ("GET",    "/v1/geometry/sections/6/samples",               422),  # 缺 segment
         ("POST",   "/v1/actions/create_maintenance_ticket", 501),
     ]
     for method, url, want in cases:
@@ -1231,7 +1236,12 @@ def main() -> int:
     #   ★ 这条判据这次**真的响了**（新文件一放进去就红）—— 它存在的意义就是
     #     让「多了一份契约」这件事**必须有人确认过**，而不是自动通过。
     #     这正是它该有的样子：新契约落在哪一位，是**判断**，不是排序的副产品。
-    _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.support.v0.1.yaml",
+    # ★★ D-028：`responses.v0.1` 与 `geo.v0.1`、`support.v0.1` **同为 (0,1)**，
+    #   于是按文件名排 —— 它插在 geo.v0.1 与 support.v0.1 **之间**，**不在末尾**。
+    #   ⇒ 这条判据**又响了一次**（D-027 加 support 时是第一次）。
+    #     它存在的意义正是这个：让「多了一份契约」必须有人确认过，而不是自动通过。
+    _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.responses.v0.1.yaml",
+                 "m6-gateway.support.v0.1.yaml",
                  "m6-gateway.geo.v0.2.yaml",
                  "m6-gateway.geo.v0.3.yaml", "m6-gateway.v0.3.yaml",
                  "m6-gateway.geo.v0.4.yaml", "m6-gateway.v0.4.yaml"]
@@ -1327,6 +1337,164 @@ def main() -> int:
     print(f"  元测试：全部登记为有意不出口后不再报警 → {_mt2} {'✓' if _mt2_k else '✗'}")
     if not _mt2_k:
         fails.append("出口覆盖率判据反向不干净：全登记后仍报警")
+
+    # ======================================================================
+    # 5l 响应码覆盖率：**契约声明的每个码，都要有人验过**
+    # ======================================================================
+    # ★★★ 这条判据为什么必须有（D-028）：
+    #
+    # 5i / 5j 比的是「契约声明的**参数** ↔ 实现真收的参数」，三个方向全零。
+    # 5k 比的是「**表**有没有出口」。两者都不看**响应码**。
+    #
+    # ⇒ 于是有一整类声明**从来没被核对过**：契约写着「本接口会回 404」，
+    #   而实现回 400 —— 上一轮就是这么漏掉一个真缺陷的（D-027 §四.其一）。
+    #   探针表是**人手写的期望码**，与契约从不对读；
+    #   28 项测试全绿，而没有一项在问「契约说的码，实现真会回吗」。
+    #
+    # 判据两个方向：
+    #   方向 A（契约有、探针无）：声明的每个码必须**被探针真打到过**，
+    #                            或在 `_UNVERIFIED_RESPONSES` 里登记「要验它缺什么」。
+    #   方向 B（探针有、契约无）：探针期望的每个码必须**在契约里声明过**，
+    #                            或在 `_KNOWN_RESPONSE_DEFECTS` 里登记为已知缺陷。
+    #
+    # ★ 两张登记表都**不是豁免单，是欠账单** —— 每条都必须写清缺什么/为什么，
+    #   让「没验」成为一个**要签字**的状态，而不是默认。
+    #   ★ 这个形状与 5k 的 `_INTENTIONALLY_UNEXPOSED` 是同一条：判据不该禁止
+    #     「没验」，该禁止「**没验却没人做过这个决定**」。
+    #
+    #: (方法, 路径模板, 码) → 为什么没验 / 要验它缺什么。
+    _UNVERIFIED_RESPONSES: dict[tuple[str, str, str], str] = {
+        ("GET", "/v1/catalog", "200"):
+            "本测试的假 DAO 只替掉了 domain/cross 门面，catalog 分支走的是真实目录模块",
+        ("GET", "/v1/catalog/gaps", "200"):
+            "same：gaps 的回答依赖真实仓储的行数统计，假 DAO 给不出",
+        ("GET", "/v1/catalog/tables", "200"):
+            "same：tables 要真实 pg_class 计数",
+        ("GET", "/v1/catalog/gaps", "503"):
+            "要触发存储不可用，需要专门造一个会抛 StorageUnavailable 的假仓储",
+        ("GET", "/v1/catalog/tables", "503"):
+            "same：503 是「存储不可用」分支，假仓储恒可用",
+        ("GET", "/v1/geometry/sections/{section_id}/elements", "200"):
+            "需要 from_km/to_km 成对参数，且假 GE 要有 elements() 分支",
+        ("GET", "/v1/geometry/sections/{section_id}/samples", "200"):
+            "需要 segment 参数，且假 GE 要有 samples() 分支",
+        ("GET", "/v1/geometry/sections/{section_id}/geo", "200"):
+            "需要假 GE 支持 geo 要素计算（比 alignment 重得多）",
+        ("GET", "/v1/geometry/sections/{section_id}/geo", "400"):
+            "CRS 未绑定时 ContractViolation → 400；要造一个「两级都没配基准」的假路段",
+        ("GET", "/v1/geometry/sections/{section_id}/geo", "404"):
+            "路段不存在分支",
+        ("GET", "/v1/geometry/sections/{section_id}/geo", "503"):
+            "存储不可用分支",
+        ("GET", "/v1/geometry/sections/{section_id}/geo/reverse", "200"):
+            "反算：需要假 GE 支持反算入口",
+        ("GET", "/v1/geometry/sections/{section_id}/geo/reverse", "404"):
+            "路段不存在分支",
+        ("GET", "/v1/geometry/sections/{section_id}/geo/route", "200"):
+            "需要假 GE 支持线形导出",
+        ("GET", "/v1/geometry/sections/{section_id}/geo/route", "404"):
+            "路段不存在分支",
+        ("GET", "/v1/geometry/sections/{section_id}/monitor-sections", "200"):
+            "需要假 GE 支持监测断面查询",
+        ("GET", "/v1/geometry/sections/{section_id}/monitor-sections", "404"):
+            "路段不存在分支",
+        ("GET", "/v1/geometry/sections/{section_id}/monitor-sections", "503"):
+            "存储不可用分支",
+        ("GET", "/v1/metrics/wim_hourly", "200"):
+            "假 DAO 未提供 metrics 门面",
+    }
+
+    #: (方法, 路径模板) → (探针期望但契约没声明的码, 为什么)。
+    _KNOWN_RESPONSE_DEFECTS: dict[tuple[str, str], tuple[str, str]] = {
+        ("GET", "/v1/geometry/sections/{section_id}/widths"):
+            ("404", "★★ 假 DAO 比真实现严格：假的对不存在的路段抛 NotFound（404），"
+                    "**真实现对同一个请求回 200 空**（现场实测 /sections/99999/widths → "
+                    "200 {\"count\":0}）。同一棵树里 /summary 回 404、/widths 与 "
+                    "/superelevation 与 /stations 与 /alignment 回 200 空 —— "
+                    "「路段不存在」在五个兄弟端点上有两种互斥的说法。待裁决。"),
+    }
+
+    # ── 逐份契约取并集（声明面是多份文件的并集）──
+    _declared: dict[tuple[str, str], set] = {}
+    for _f in sorted(contract_files()):
+        _doc = yaml.safe_load(_f.read_text(encoding="utf-8")) or {}
+        for _p, _item in (_doc.get("paths") or {}).items():
+            for _meth, _op in _item.items():
+                if not isinstance(_op, dict):
+                    continue
+                if _meth not in ("get", "post", "put", "patch", "delete"):
+                    continue
+                _declared.setdefault((_meth.upper(), _p), set()).update(
+                    str(_c) for _c in (_op.get("responses") or {}))
+
+    # ── 逐条探针记下「它真打到过哪个模板的哪个码」──
+    _covered: dict[tuple[str, str], set] = {}
+    for _meth, _url, _want in cases:
+        _hit = first_match(_url.split("?")[0], method=_meth)
+        _tmpl = _hit.path if _hit else _url.split("?")[0]
+        _covered.setdefault((_meth, _tmpl), set()).add(str(_want))
+
+    _miss_a, _bad_reg_a = [], []
+    for (_meth, _p), _codes in sorted(_declared.items()):
+        for _c in sorted(_codes - _covered.get((_meth, _p), set())):
+            if (_meth, _p, _c) not in _UNVERIFIED_RESPONSES:
+                _miss_a.append(f"{_meth} {_p} {_c}")
+    for _k in _UNVERIFIED_RESPONSES:          # 登记了却已经验过 → 登记表过期
+        _m, _p, _c = _k
+        if _c in _covered.get((_m, _p), set()):
+            _bad_reg_a.append(f"{_m} {_p} {_c}")
+
+    _miss_b, _bad_reg_b = [], []
+    for (_meth, _p), _codes in sorted(_covered.items()):
+        for _c in sorted(_codes - _declared.get((_meth, _p), set())):
+            if (_meth, _p) not in _KNOWN_RESPONSE_DEFECTS:
+                _miss_b.append(f"{_meth} {_p} {_c}")
+    for _k in _KNOWN_RESPONSE_DEFECTS:        # 缺陷已修却还挂着 → 登记表过期
+        _m, _p = _k
+        _c = _KNOWN_RESPONSE_DEFECTS[_k][0]
+        # ★ 两条都算「这条缺陷已经不存在了」：探针不再期望它，
+        #   或契约已经把它声明进去了（D-028 的 stations 走的就是第二条）。
+        if _c not in _covered.get((_m, _p), set()) or _c in _declared.get((_m, _p), set()):
+            _bad_reg_b.append(f"{_m} {_p} {_c}（已不再是缺陷）")
+
+    _n_decl = sum(len(v) for v in _declared.values())
+    _n_cov = sum(len(v) for v in _covered.values())
+    _ok_a = not _miss_a and not _bad_reg_a
+    _ok_b = not _miss_b and not _bad_reg_b
+    print(f"\n  响应码覆盖率：契约声明 {_n_decl} 个（{len(_declared)} 条方法+路径）｜ "
+          f"探针打到 {_n_cov} 个 ｜ 登记未验 {len(_UNVERIFIED_RESPONSES)} 个 ｜ "
+          f"已知缺陷 {len(_KNOWN_RESPONSE_DEFECTS)} 条")
+    print(f"    方向 A（声明了没人验）未登记 → "
+          f"{len(_miss_a)} {_miss_a if _miss_a else '✓'}"
+          f" ｜ 登记表过期 {len(_bad_reg_a)} {_bad_reg_a if _bad_reg_a else '✓'}")
+    print(f"    方向 B（验了没声明）未登记 → "
+          f"{len(_miss_b)} {_miss_b if _miss_b else '✓'}"
+          f" ｜ 登记表过期 {len(_bad_reg_b)} {_bad_reg_b if _bad_reg_b else '✓'}")
+    if not _ok_a:
+        fails.append(f"响应码：契约声明了却没验、又没登记的码 {_miss_a}；"
+                     f"或登记表过期 {_bad_reg_a}。"
+                     "要么加探针真打到它，要么写进 _UNVERIFIED_RESPONSES 并说明缺什么。")
+    if not _ok_b:
+        fails.append(f"响应码：探针期望了契约没声明的码 {_miss_b}；"
+                     f"或缺陷登记表过期 {_bad_reg_b}。"
+                     "契约漏了就补契约（新增量文件），实现错了就改实现 —— 不许沉默。")
+
+    # ★★ 元测试：两个方向都必须**真的会响**（宪法 V）。
+    _mt_a = [f"{m} {p} {c}" for (m, p), cs in _declared.items()
+             for c in cs - _covered.get((m, p), set())]
+    _mt_a_ok = len(_mt_a) > 0
+    print(f"  元测试：把登记表清空后，方向 A 能列出声明的码 → {len(_mt_a)} 个 "
+          f"{'✓' if _mt_a_ok else '✗'}")
+    if not _mt_a_ok:
+        fails.append("响应码判据失效：清空登记表后方向 A 一个都没列出来")
+
+    _mt_b = [f"{m} {p} {c}" for (m, p), cs in _covered.items()
+             for c in cs - _declared.get((m, p), set())]
+    _mt_b_ok = len(_mt_b) > 0
+    print(f"  元测试：把缺陷表清空后，方向 B 能列出多出来的码 → {len(_mt_b)} 个 "
+          f"{'✓' if _mt_b_ok else '✗'}")
+    if not _mt_b_ok:
+        fails.append("响应码判据失效：清空缺陷表后方向 B 一个都没列出来")
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0
