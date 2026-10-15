@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from decimal import Decimal as D
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]        # → scaffold/
 sys.path.insert(0, str(ROOT / "simulator" / "crg"))
@@ -211,6 +212,82 @@ def sec3():
     check(abs(min(bumps)) < 1e-15, f"§3d 抬升量最小值应为 0，得 {min(bumps)}")
 
 
+# ---------------------------------------------------------------- §5 网格欠估（不是 bug，是网格的性质）
+def sec5():
+    """★ 折点不在 v 网格上 ⇒ 采样必然欠估。钉住机制，不钉住数字。
+
+    CRG 的 v 网格是 `−vmax + j·Δv`，`vmax = 4.25`，`Δv = 0.1`。
+    三个设计折点都**不在**网格上（j 分别是 42.5 / 7.5 / 77.5）：
+
+        v = 0.00   路拱顶点 / 超高反号点
+        v = ±3.50  车道 ↔ 硬路肩折点
+
+    折点是尖角，用相邻两列线性插值必从尖角削掉一块。
+    **欠估量有闭式解**（令 h = Δv/2 = 半格）：
+
+        顶点： z(−h) = h·t_L，z(+h) = h·t_R  ⇒  欠估 = h·|t_L + t_R| / 2
+        折点： 两侧斜率 t₁、t₂                ⇒  欠估 = h·|t₂ − t₁| / 2
+
+    ★ 本组不写死「现在是 1.000 mm」，而写**这两个公式**并断言实测符合。
+      若把 `vmax` 改成 4.30（0 → j=43，±3.5 → j=8/78 皆为整数），
+      h 形式上仍在，但折点落在列上 ⇒ 插值不再跨尖角 ⇒ 欠估为 0，
+      公式给出 0，本组**照样通过**。
+      ⇒ 钉住机制，不钉住现状；否则修好了反而变红，等于在奖励缺陷。
+    """
+
+    VMAX, DV = 4.25, 0.1
+    H = DV / 2.0                       # 半格
+
+    def interp_across(v, cf):
+        """把 v 邻域两列做线性插值 —— 复现 CRG 网格的采样方式。"""
+        j = (v + VMAX) / DV
+        j0 = int(j) if j == int(j) else int(j)      # 向下取整
+        v0 = -VMAX + j0 * DV
+        v1 = v0 + DV
+        z0 = XS.z_offset(v0, cf, W10)
+        z1 = XS.z_offset(v1, cf, W10)
+        t = (v - v0) / DV
+        return z0 + t * (z1 - z0)
+
+    # (a) 路拱顶点：左右车道横坡同号，欠估 = h·|t_L + t_R| / 2
+    cf = pct(CF_CROWN)                       # 左右车道均 −2%
+    pred = H * abs(cf[2] + cf[3]) / 2 * 1000
+    got = abs(interp_across(0.0, cf) - XS.z_offset(0.0, cf, W10)) * 1000
+    check(abs(got - pred) < 1e-6,
+          f"§5a 路拱顶点欠估应 {pred:.3f} mm，得 {got:.3f} mm")
+
+    # (b) 全超高顶点：t_L = −6%、t_R = +6% ⇒ 反号相消，欠估应为 0
+    cf = pct(CF_SUPER)
+    pred = H * abs(cf[2] + cf[3]) / 2 * 1000
+    got = abs(interp_across(0.0, cf) - XS.z_offset(0.0, cf, W10)) * 1000
+    check(pred < 1e-12, f"§5b 全超高顶点两侧反号，预测欠估应为 0，得 {pred:.6f} mm")
+    check(got < 1e-6, f"§5b 全超高顶点实测欠估应为 0，得 {got:.6f} mm")
+
+    # (c) 车道 ↔ 硬路肩折点：欠估 = h·|t₂ − t₁| / 2
+    for v, t1, t2 in ((3.50, cf[3], cf[4]), (-3.50, cf[2], cf[1])):
+        pred = H * abs(t2 - t1) / 2 * 1000
+        got = abs(interp_across(v, cf) - XS.z_offset(v, cf, W10)) * 1000
+        check(abs(got - pred) < 1e-6,
+              f"§5c v={v:+.2f} 折点欠估应 {pred:.3f} mm，得 {got:.3f} mm")
+
+    # (d) ★ 关键：把网格挪正，折点落回列上 ⇒ 欠估必须真的归零
+    #     直接验「列上」这个事实（不重跑生成器）
+    for vmax2, bps in ((4.30, (0.0, 3.50, -3.50)), (4.20, (0.0,))):
+        for bp in bps:
+            # ★ 必须用 Decimal：二进制浮点下 (0.0+4.30)/0.1 = 42.99999999999999，
+            #   会让「恰在列上」这个判断假红。网格的算术是十进制的。
+            j = (D(str(bp)) + D(str(vmax2))) / D(str(DV))
+            check(j == j.to_integral_value(),
+                  f"§5d vmax={vmax2} 时 v={bp:+.2f} 应恰在网格列上，得 j={j}")
+
+    # (e) 定性：路拱顶点欠估必须**大于**折点欠估（2% vs 0.5%），
+    #     否则说明上面几条测的不是同一件事
+    pred_apex = H * abs(pct(CF_CROWN)[2] + pct(CF_CROWN)[3]) / 2 * 1000
+    pred_kink = H * abs(pct(CF_SUPER)[4] - pct(CF_SUPER)[3]) / 2 * 1000
+    check(pred_apex > pred_kink,
+          f"§5e 顶点欠估应大于折点欠估，得 {pred_apex:.3f} vs {pred_kink:.3f} mm")
+
+
 # ---------------------------------------------------------------- §4 元测试
 def sec4():
     """★ 把当年的 bug 注回去，必须被认出来。没有这一组，前三组绿也是白绿。"""
@@ -275,7 +352,7 @@ def sec0():
 
 
 def main() -> int:
-    for fn in (sec0, sec1, sec2, sec3, sec4):
+    for fn in (sec0, sec1, sec2, sec3, sec4, sec5):
         before = len(FAILED)
         fn()
         mark = "✓" if len(FAILED) == before else "✗"
@@ -287,7 +364,7 @@ def main() -> int:
             print(f"      - {m}")
         return 1
     print("  ✓ 横断面契约：全部通过")
-    print("     §0 靶子存在 · §1 横坡进 z · §2 分段存在 · §3 elev_diff 互证 · §4 元测试")
+    print("     §0 靶子存在 · §1 横坡进 z · §2 分段存在 · §3 elev_diff 互证 · §4 元测试 · §5 网格欠估")
     return 0
 
 
