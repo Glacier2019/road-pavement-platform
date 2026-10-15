@@ -372,9 +372,48 @@ def design_elevation_at(points: list[dict[str, Any]],
     return None
 
 
+def grade_at(points: list[dict[str, Any]], station_m: float) -> float | None:
+    """某桩号的**设计纵坡**（%，上坡为正）—— 即 ``design_elevation_at`` 的导数。
+
+    竖曲线内对抛物线求导：``y = y_BVC + i入·x + (ω/(2L))·x²``
+    ⇒ ``dy/dx = i入 + ω·x/L``，代回百分数即 ``i入 + (i出−i入)·x/L``；
+    其余按切线，取前一个变坡点的 ``grade_out_pct``。
+
+    桩号落在已知范围之外时返回 ``None``，**不外推**（同 ``design_elevation_at``）。
+
+    ★ 为什么非要有这个函数
+    ------------------------------------------------------------------
+    ``geometry_point.grade_pct`` 的 DDL 注释写着「★纵坡 G %（.ZDM 推导）」，
+    实测 **332/332 行全空**，而**全仓没有第二个地方算过纵坡**。
+    这一列空着不是"忘了填"，是**这个函数根本不存在**。
+
+    ★ 与 ``design_elevation_at`` 同源
+    ------------------------------------------------------------------
+    一个是值、一个是斜率，**必须出自同一套竖曲线模型**。两处各写各的话，
+    高程对而纵坡错会**完全不报错** —— 那正是本仓反复栽的那类假绿。
+    故本函数的曲线分支与 ``design_elevation_at`` 的抛物线分支逐项对应，
+    并由 ``tests/contract/test_profile_consistency.py`` 用积分把两者钉在一起。
+    """
+    if not points:
+        return None
+    if station_m < points[0]["station_m"] or station_m > points[-1]["station_m"]:
+        return None
+    for p in points:                       # ① 落在某条竖曲线内
+        c = vertical_curve_of(p)
+        if c and c["bvc_station_m"] <= station_m <= c["evc_station_m"]:
+            x = station_m - c["bvc_station_m"]
+            return p["grade_in_pct"] + (p["grade_out_pct"] - p["grade_in_pct"]) * (
+                x / c["len_m"])
+    for a, b in zip(points, points[1:]):   # ② 否则按切线
+        if a["station_m"] <= station_m <= b["station_m"]:
+            return a["grade_out_pct"]
+    return None
+
+
 PAYLOAD_KEY = "points"
 
 __all__ = ["detect", "parse", "derive_grades", "check_against_stations",
-           "vertical_curve_of", "check_vertical_curves", "design_elevation_at", "MAGIC_RE",
+           "vertical_curve_of", "check_vertical_curves", "design_elevation_at",
+           "grade_at", "MAGIC_RE",
            "SEGMENT", "FILE_KIND", "PAYLOAD_KEY", "FIELD_COUNT",
            "ELEV_MIN_M", "ELEV_MAX_M", "RADIUS_MAX_M"]
