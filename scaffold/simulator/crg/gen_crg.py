@@ -4,8 +4,17 @@
   alignment_element      33 行  平面线形 κ(s)
   profile_grade_point    12 行  纵断面竖曲线（抛物线）
   roadbed_design_point  332 行  设计高程 + 车道/路肩宽度（20 m 间隔）
+  superelev_transition   76 行  横断面横坡 6 通道（左右 x 车道/硬路肩/土路肩）
+
+三维曲面按论文 (2.16) 构造：Σ: r(l,w) = r(l) + w·N_l^rot
+  r(l)      准线 —— 平面线形积分得到，高程取设计高程（论文 (2.15)）
+  N_l^rot   横断面方向 —— 主法向绕切向量 T 旋转 θ*（论文 (2.14)）
+  θ*        该点的横坡，逐段取值（行车道 / 硬路肩各一段）
 """
-import math, subprocess, sys
+import math, os, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import xsection as XS          # ★ 横断面数学的唯一实现处（契约测试直接测它）
 
 DSN = ["docker", "exec", "rp-pg", "psql", "-U", "rp", "-d", "road_pavement", "-t", "-A", "-F", "|", "-c"]
 
@@ -69,25 +78,77 @@ def elevation(s):
         return a["z"] + g1 * (s - a["s"])
     return V[-1]["z"]
 
-# ---------- 3. 横断面宽度（20 m 间隔线性插值，仅用于路幅宽度）----------
+# ---------- 3. 横断面宽度（20 m 间隔线性插值）----------
+# ★ 全 10 个宽度列都读 —— 横断面设计线有 11 个点，只读 4 个宽度就还原不全。
+#   列序取自 xsection.POINT_WIDTH_COLUMNS（该顺序被 elev_diff 实测值独立证实）。
+WCOL = list(XS.POINT_WIDTH_COLUMNS)
 W = []
-for p in q("SELECT station_km, left_lane_width_m, right_lane_width_m, left_hard_shoulder_width_m, "
-           "right_hard_shoulder_width_m FROM roadbed_design_point ORDER BY station_km;"):
-    W.append((f(p[0])*1000, f(p[1]), f(p[2]), f(p[3]), f(p[4])))
+for p in q("SELECT station_km, " + ", ".join(WCOL) +
+           " FROM roadbed_design_point ORDER BY station_km;"):
+    W.append((f(p[0])*1000, [f(x) for x in p[1:11]]))
 
-def half_width(s):
-    """左/右半幅（含路肩）"""
+def widths_all(s):
+    """该桩号的 10 个宽度（顺序同 xsection.POINT_WIDTH_COLUMNS），线性插值。"""
     if s <= W[0][0]:
-        return W[0][3] + W[0][1], W[0][4] + W[0][2]
+        return list(W[0][1])
     if s >= W[-1][0]:
-        return W[-1][3] + W[-1][1], W[-1][4] + W[-1][2]
+        return list(W[-1][1])
     for i in range(len(W) - 1):
         if W[i][0] <= s <= W[i+1][0]:
-            t = (s - W[i][0]) / (W[i+1][0] - W[i][0])
-            lw = W[i][3] + t*(W[i+1][3]-W[i][3]) + W[i][1] + t*(W[i+1][1]-W[i][1])
-            rw = W[i][2] + t*(W[i+1][2]-W[i][2]) + W[i][4] + t*(W[i+1][4]-W[i][4])
-            return lw, rw
-    return W[-1][3] + W[-1][1], W[-1][4] + W[-1][2]
+            span = W[i+1][0] - W[i][0]
+            t = 0.0 if span == 0 else (s - W[i][0]) / span
+            return [a + t*(b - a) for a, b in zip(W[i][1], W[i+1][1])]
+    return list(W[-1][1])
+
+def half_width(s):
+    """左/右半幅（车道 + 硬路肩）—— 用于确定 CRG 的 v 覆盖范围。"""
+    w = widths_all(s)
+    return w[3] + w[1], w[6] + w[8]
+
+# ---------- 3b. 横断面横坡（超高过渡表，6 个通道）----------
+# 论文 (2.16)：Σ: r(l,w) = r(l) + w·N_l^rot
+#   N_l^rot = ( −cosθ*·cosα_l , sinθ*·cosα_l , sinθ* )     —— 论文 (2.14)
+# 即「横断面设计线」= 绕准线切向量 T 旋转 θ* 后的主法向量。
+# 本项目路面横向分两段：行车道 + 硬路肩，各有自己的 θ*。
+# ★ 用水平偏移 v 时 Δz = v·tanθ*；这与论文「沿母线量 w」的 Δz = w·sinθ*
+#   完全等价（w = v/cosθ*），见 TURN-168 的核对：两者差 5.55e-11 µm。
+XF = []
+for p in q("SELECT station_km, earth_shoulder_left_pct, hard_shoulder_left_pct, "
+           "lane_left_pct, lane_right_pct, hard_shoulder_right_pct, "
+           "earth_shoulder_right_pct FROM superelev_transition ORDER BY station_km;"):
+    XF.append((f(p[0])*1000, [f(x) for x in p[1:7]]))
+
+# ★ 逐通道建断点表：超高过渡表里某些桩号只填了部分通道（其余为 NULL），
+#   不能整行丢弃 —— 那会在桩号上留洞。逐通道各自插值。
+XF_SER = [[] for _ in range(6)]          # [ [ (s, pct), ... ] × 6 ]
+for s_m, vals in XF:
+    for c in range(6):
+        if vals[c] is not None:
+            XF_SER[c].append((s_m, vals[c]))
+
+def crossfall(s):
+    """返回该桩号的 6 个横坡（小数，非百分数）：左土/左硬/左车道/右车道/右硬/右土。
+
+    逐通道在自己有值的桩号间线性插值；超出首末则取端点值（常值外延）。
+    某通道整列为空时返回 0.0（平坡）—— 这是显式的、可被测试抓到的兜底。
+    """
+    out6 = []
+    for ser in XF_SER:
+        if not ser:
+            out6.append(0.0); continue
+        if s <= ser[0][0]:
+            out6.append(ser[0][1] / 100.0); continue
+        if s >= ser[-1][0]:
+            out6.append(ser[-1][1] / 100.0); continue
+        v = None
+        for i in range(len(ser) - 1):
+            if ser[i][0] <= s <= ser[i+1][0]:
+                span = ser[i+1][0] - ser[i][0]
+                t = 0.0 if span == 0 else (s - ser[i][0]) / span
+                v = (ser[i][1] + t*(ser[i+1][1] - ser[i][1])) / 100.0
+                break
+        out6.append(0.0 if v is None else v)
+    return out6
 
 # ---------- 4. 逐 0.1 m 积分 ----------
 STEP = 0.1
@@ -140,8 +201,15 @@ ncols = int(round(2*vmax / VINC))
 v_list = [round(-vmax + j*(2*vmax/ncols), 6) for j in range(ncols + 1)]
 
 def road_z(s, v):
-    """路面高程：设计高程 + 按横坡（暂取平坡，骨架期无横坡数据）"""
-    return elevation(s)
+    """路面高程 —— 论文 (2.16) 的直纹面 Σ: r(l,w) = r(l) + w·N_l^rot。
+
+    ★ 横断面的数学**不在这里** —— 在 simulator/crg/xsection.py。
+      这样契约测试能直接测那段代码，而不是靠读 CRG 产物间接猜。
+      （2026-10-15：正因数学曾写在本文件里且没人测，v 被整个忽略，
+        101 MB 的 CRG 横向 100% 平坦，见 D-032。）
+    """
+    w_all = widths_all(s)
+    return elevation(s) + XS.z_offset(v, crossfall(s), w_all)
 
 out = []
 out.append("$ROAD_CRG")
@@ -149,6 +217,7 @@ out.append("* 2025Y095 road performance platform - generated from DB alignment")
 out.append("* horizontal: alignment_element 33 rows, 0.1 m analytic integration")
 out.append("* vertical:   profile_grade_point 12 rows, parabolic vertical curves")
 out.append("* width:      roadbed_design_point 332 rows, 20 m interval")
+out.append("* crossfall:  superelev_transition 76 rows, 6 channels (paper eq. 2.16)")
 # 保证末点精确落在全长上：最后一段不靠 round(L/STEP)，而是整体对齐
 out.append("REFERENCE_LINE_START_U = %.6f" % 0.0)
 out.append("REFERENCE_LINE_END_U   = %.6f" % S_TOTAL)
@@ -190,7 +259,6 @@ for i, s in enumerate(ss):
         row.append(fld(road_z(s, v)))             # 通道2..N: 各截面高程
     out.append("".join(row))
 
-import os
 OUT = os.environ.get("CRG_OUT", "route_0p1m.crg")
 with open(OUT, "w", encoding="utf-8") as fh:
     fh.write("\n".join(out) + "\n")

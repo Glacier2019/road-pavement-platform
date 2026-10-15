@@ -1,6 +1,6 @@
 {
   "version": "artifact_manifest.v0.1",
-  "generated_at": "2026-10-11T09:19:21.410399+08:00",
+  "generated_at": "2026-10-15T16:32:49.594822+08:00",
   "producer": {
     "module": "simulator/crg",
     "note": "export_viewer_mesh.py 从 route_0p1m.crg 抽稀出两档 LOD"
