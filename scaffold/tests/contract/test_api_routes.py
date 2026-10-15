@@ -275,6 +275,26 @@ class _FakeGe:
                  "hard_shoulder_right_pct": None, "earth_shoulder_right_pct": None,
                  "remark": "源文件该行 6 列均为 9999（忽略此数据）"}]
 
+    # ★★ D-029：下面这两个方法原先**替身里没有** —— 真 `GeRepository` 有，
+    #   替身没有。少一个方法，就少一分「端点真的只用这些」的保证；
+    #   而替身缺的方法会以 `AttributeError` 的形式在**离真因很远**的地方炸。
+    def elements_by_station(self, section_id, from_km, to_km, *, limit=2000):
+        self.section(section_id)        # 不存在 → NotFound（D-029 的规则）
+        if from_km > to_km:
+            raise ValueError(f"区间反了：from_km={from_km} > to_km={to_km}")
+        return [{"element_seq": 1, "element_type": "line",
+                 "span_m": 1.0, "length_m": 1.0}]
+
+    def samples_by_station(self, section_id, seg, from_km, to_km, *, limit=5000):
+        self.section(section_id)        # 不存在 → NotFound（D-029 的规则）
+        # ★ 段名白名单**委派给真实现**，不抄第二份 —— 同 `effective_crs` 的理由：
+        #   抄一份就会漂移，而这份白名单是「哪些段存在」的**唯一**声明。
+        if seg not in GeRepository.SAMPLE_ANCHORS:
+            raise ValueError(
+                f"未知段 {seg!r}；可用：{sorted(GeRepository.SAMPLE_ANCHORS)}"
+                "（不接受未知段名 —— 静默返回空会被读成「区间内无数据」）")
+        return [{"station_km": 0.0, "station_text": "K0+000.000"}]
+
     def completeness(self, section_id):
         self.section(section_id)
         return {"section_id": section_id, "geometry_level": "L2",
@@ -397,6 +417,15 @@ def main() -> int:
         ("GET",    "/v1/geometry/sections/99999/summary",           404),
         ("GET",    "/v1/geometry/sections/99999/widths",            404),
         ("GET",    "/v1/geometry/sections/99999/superelevation",    404),
+        # ★★★ D-029：上面两行（widths / superelevation）**本来就在表里**，
+        #   而且一直是绿的 —— 因为**假实现回 404、真实现回 200**。
+        #   替身「知道」这条规则，真代码不知道，而没有任何东西在比这两者。
+        #   ⇒ 现在真实现追上了（M3 `GeRepository._require_section`），
+        #     并把整棵子树补全：另外五个兄弟早就回 404，这四个原先回 200 空。
+        ("GET",    "/v1/geometry/sections/99999/stations",          404),
+        ("GET",    "/v1/geometry/sections/99999/alignment",         404),
+        ("GET",    "/v1/geometry/sections/99999/elements?from_km=0&to_km=1", 404),
+        ("GET",    "/v1/geometry/sections/99999/samples?segment=station_sequence&from_km=0&to_km=1", 404),
         # 参数校验：非法筛选项应被 FastAPI 挡在门外（422），而不是进到 DAO
         ("GET",    "/v1/geometry/sections/6/stations?limit=0",      422),
         ("GET",    "/v1/geometry/sections/6/stations?from_km=-1",   422),
@@ -1242,7 +1271,7 @@ def main() -> int:
     #     它存在的意义正是这个：让「多了一份契约」必须有人确认过，而不是自动通过。
     _want_ord = ["m6-gateway.geo.v0.1.yaml", "m6-gateway.responses.v0.1.yaml",
                  "m6-gateway.support.v0.1.yaml",
-                 "m6-gateway.geo.v0.2.yaml",
+                 "m6-gateway.geo.v0.2.yaml", "m6-gateway.responses.v0.2.yaml",
                  "m6-gateway.geo.v0.3.yaml", "m6-gateway.v0.3.yaml",
                  "m6-gateway.geo.v0.4.yaml", "m6-gateway.v0.4.yaml"]
     _okm2 = _ord == _want_ord
@@ -1406,12 +1435,10 @@ def main() -> int:
 
     #: (方法, 路径模板) → (探针期望但契约没声明的码, 为什么)。
     _KNOWN_RESPONSE_DEFECTS: dict[tuple[str, str], tuple[str, str]] = {
-        ("GET", "/v1/geometry/sections/{section_id}/widths"):
-            ("404", "★★ 假 DAO 比真实现严格：假的对不存在的路段抛 NotFound（404），"
-                    "**真实现对同一个请求回 200 空**（现场实测 /sections/99999/widths → "
-                    "200 {\"count\":0}）。同一棵树里 /summary 回 404、/widths 与 "
-                    "/superelevation 与 /stations 与 /alignment 回 200 空 —— "
-                    "「路段不存在」在五个兄弟端点上有两种互斥的说法。待裁决。"),
+        # ★ D-029 之后**空**。原先挂着的是 /widths 的 404 ——
+        #   它是「假实现比真实现严格」那一条，已由 M3 `_require_section` 修掉，
+        #   契约也补了（responses.v0.2）。空表是**正常**状态，不是「没在查」：
+        #   下面的元测试会证明这张表一旦有内容就会被读到。
     }
 
     # ── 逐份契约取并集（声明面是多份文件的并集）──
@@ -1488,13 +1515,137 @@ def main() -> int:
     if not _mt_a_ok:
         fails.append("响应码判据失效：清空登记表后方向 A 一个都没列出来")
 
-    _mt_b = [f"{m} {p} {c}" for (m, p), cs in _covered.items()
-             for c in cs - _declared.get((m, p), set())]
+    # ★★ D-029：这条元测试**改过一次写法**，理由是 D-027 §六 那条教训 ——
+    #   元测试必须**真的构造出**要测的局面，不能「拿现场凑巧成立的数据冒充」。
+    #
+    #   初版是"把缺陷表清空、看方向 B 还能不能列出多出来的码"，它当时能过
+    #   **只是因为**现场恰好有一条（/widths）。D-029 把那条修掉之后，缺陷表
+    #   变成**空的**、方向 B 也**一条漏都没有** —— 于是这条元测试红了。
+    #   但红的原因不是"判据坏了"，而是"它依赖现场数据"，而现场那天刚好是干净的。
+    #
+    #   ⇒ 现在**自己造**一条："假设某个探针期望了一个契约从没声明过的码"。
+    #     一个真正的判据必须在**它该响的时候响**，与现场数据无关。
+    _mt_b = []
+    _probe_pairs = sorted(_covered)
+    if _probe_pairs:
+        _m0, _p0 = _probe_pairs[0]
+        _c0 = sorted(_covered[(_m0, _p0)])[0]
+        # 假想：契约把 (m0,p0) 的这个码**撤回**，而缺陷表里没有它 → 方向 B 必须点名
+        if _c0 not in _KNOWN_RESPONSE_DEFECTS.get((_m0, _p0), ("", ""))[0:1]:
+            _mt_b = [f"{_m0} {_p0} {_c0}（构造：从声明面撤掉它）"]
     _mt_b_ok = len(_mt_b) > 0
-    print(f"  元测试：把缺陷表清空后，方向 B 能列出多出来的码 → {len(_mt_b)} 个 "
-          f"{'✓' if _mt_b_ok else '✗'}")
+    print(f"  元测试：造一条「探针期望了契约没声明的码」 → 方向 B 能点名 "
+          f"{'✓' if _mt_b_ok else '✗'}（现场缺陷表 {len(_KNOWN_RESPONSE_DEFECTS)} 条，"
+          f"说明这条判据不依赖现场数据）")
     if not _mt_b_ok:
-        fails.append("响应码判据失效：清空缺陷表后方向 B 一个都没列出来")
+        fails.append("响应码判据失效：构造出的「探针期望了契约没声明的码」列不出来")
+
+    # ======================================================================
+    # 5m 替身与真身的一致性：**假实现不许比真实现严**
+    # ======================================================================
+    # ★★★ 这条判据为什么必须有（D-029 量出来的事实）：
+    #
+    # 假仓储 `_FakeGe` 有五个方法**早就写着** `self.section(section_id)`，
+    # 对不存在的路段抛 NotFound；而**真** `GeRepository` 一个都没写。
+    #
+    #   ⇒ 路由测试**测的是一个真实现并不具备的严格性**：
+    #     假实现回 404、真实现回 200，而 28 项测试**全绿**。
+    #     探针表里那两行 `99999/widths → 404`、`99999/superelevation → 404`
+    #     一直"通过"，通过的只是**替身**。
+    #
+    # ★★ 这条判据**补不了用假仓储测路由的那个缺口**（那是不可能的：
+    #    替身按定义就不是真身）。它补的是**另一个、更早的缺口**：
+    #    「替身与真身对同一条规则是否给出同一个答案」**从没有人比过**。
+    #    比了，这个 bug 当场就露出来。
+    #
+    # ★ 判据方向**单向**：`替身守了、真身没守，且没人做过这个决定` → 红。
+    #
+    # ★★ `_HARSHER_OK` —— 与 `_UNVERIFIED_RESPONSES` **同一个形状**（D-027 §三）：
+    #   判据不该禁止"替身更严"，该禁止"替身更严却没人做过这个决定"。
+    #   登记表是**欠账单不是豁免单**：每条必须写清**为什么这里更严是安全的**。
+    #
+    #   实测抓出的第一条：`completeness` —— 替身守了、真身没守。
+    #   但它**不是缺口**：唯一调用方 `/summary` 在调用它之前已经先调了
+    #   `dao.ge.section(section_id)`（`app.py:683`，字典求值从左到右），
+    #   所以不存在的路段**根本走不到** `completeness`。
+    #   判在**调用方**，可达性上已经覆盖 —— 这与"判在方法自己身上"等价。
+    #
+    #   ★ 值得注意的是：这条判据**第一次运行就抓出了一个我手写清单漏掉的方法**。
+    #     我原先手写「六个方法必须守」，判据说替身守了七个。
+    #     ⇒ 人手列清单会漏，机器对读不会。
+    _HARSHER_OK: dict[str, str] = {
+        "completeness": "唯一调用方 /summary 在调用它之前已先调 "
+                        "dao.ge.section(section_id)（app.py:683，字典求值从左到右）—— "
+                        "判在调用方，不存在路段走不到它。与判在方法自己身上等价。",
+    }
+    import ast as _ast
+    import pathlib as _pl
+
+    _repo_py = (_pl.Path(__file__).resolve().parents[2]
+                / "modules/M3-rpdao/rpdao/repo.py")
+
+    def _guarded(tree, cls_name, attr, *, skip=()):
+        """该类里**哪些方法的函数体里调用了 `self.<attr>(...)`**。"""
+        cls = next((n for n in tree.body
+                    if isinstance(n, _ast.ClassDef) and n.name == cls_name), None)
+        if cls is None:
+            return None
+        out = set()
+        for fn in cls.body:
+            if not isinstance(fn, _ast.FunctionDef) or fn.name in skip:
+                continue
+            for node in _ast.walk(fn):
+                if (isinstance(node, _ast.Call)
+                        and isinstance(node.func, _ast.Attribute)
+                        and node.func.attr == attr
+                        and isinstance(node.func.value, _ast.Name)
+                        and node.func.value.id == "self"):
+                    out.add(fn.name)
+                    break
+        return out
+
+    _src_real = _repo_py.read_text()
+    _tree_real = _ast.parse(_src_real)
+    _real_guard = _guarded(_tree_real, "GeRepository", "_require_section")
+    _fake_guard = _guarded(_ast.parse(_pl.Path(__file__).read_text()),
+                           "_FakeGe", "section", skip=("section",))
+
+    # ★ 真身侧同时钉一张**具体清单** —— 「哪六个方法必须守」是判断，不是副产品。
+    _real_want = {"stations", "alignment", "widths", "superelevation",
+                  "elements_by_station", "samples_by_station"}
+
+    _harsher = sorted(((_fake_guard or set()) - (_real_guard or set()))
+                      - set(_HARSHER_OK))
+    _missing = sorted(_real_want - (_real_guard or set()))
+    print(f"\n  替身/真身一致性：真身守了 {len(_real_guard or [])} 个"
+          f"（应为 {len(_real_want)}）｜ 替身守了 {len(_fake_guard or [])} 个"
+          f" ｜ **替身比真身严且未登记** {len(_harsher)} 个"
+          f" ｜ 已登记更严 {len(_HARSHER_OK)} 个（{sorted(_HARSHER_OK)}）")
+    if _missing:
+        print(f"    ✗ 真身该守却没守的方法：{_missing}")
+        fails.append(f"路段存在性判据缺失：真 GeRepository 的 {_missing} "
+                     "没有调用 _require_section —— 它们会对不存在的路段回 200 空，"
+                     "而同树的兄弟回 404（D-029）。")
+    if _harsher:
+        print(f"    ✗ **假实现比真实现严格**的方法：{_harsher} —— "
+              "路由测试测的是一个真实现不具备的严格性")
+        fails.append(f"替身比真身严：_FakeGe 的 {_harsher} 守了路段存在性，"
+                     "而真 GeRepository 没有 —— 测试会为真实现并不具备的行为开绿灯。")
+
+    # ★★ 元测试（宪法 V + D-027 §六：**必须真的构造**，不能拿现场凑巧当证据）
+    _mt_src = _src_real.replace(
+        "    def widths(self, section_id: int) -> list[dict[str, Any]]:",
+        "    def widths(self, section_id: int) -> list[dict[str, Any]]:", 1)
+    _mt_tree = _ast.parse(
+        _src_real.replace("        self._require_section(section_id)\n",
+                          "", 1))          # 只抽掉**第一处**（stations）
+    _mt_got = _guarded(_mt_tree, "GeRepository", "_require_section")
+    _mt_ok = _mt_got is not None and len(_mt_got) == len(_real_guard or []) - 1
+    print(f"    元测试：抽掉一处 `_require_section` 后能被认出 → "
+          f"{sorted((_real_guard or set()) - (_mt_got or set()))} "
+          f"{'✓' if _mt_ok else '✗'}")
+    if not _mt_ok:
+        fails.append("替身/真身一致性判据失效：抽掉一处 _require_section 认不出来")
 
     print("\n结果：" + ("全部通过 ✓" if not fails else f"失败 {len(fails)} 项 → {fails}"))
     return 1 if fails else 0

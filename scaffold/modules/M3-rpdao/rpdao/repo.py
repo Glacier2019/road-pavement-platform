@@ -592,6 +592,43 @@ class GeRepository(DomainRepository):
             raise NotFound(f"路段不存在：section_id={section_id}")
         return row
 
+    def _require_section(self, section_id: int) -> None:
+        """先证明**路段存在**，再回答"它有没有数据"。
+
+        ★★★ 为什么每个按路段取数的方法都必须先过这一道（D-029）
+        ------------------------------------------------------------
+        本域有六个"按路段取一组行"的方法：`stations` / `alignment` /
+        `widths` / `superelevation` / `elements_by_station` /
+        `samples_by_station`。它们原先**都不判断路段存不存在**，
+        于是 `section_id=99999` 一路走到底，返回 **200 + 空列表**。
+
+        而 `section()`（本类）和 `/summary`、`/geo`、`/geo/reverse`、
+        `/geo/route`、`/monitor-sections` 早就判了，回 **404**。
+
+        ⇒ 同一个 `section_id`、同一棵 `/v1/geometry/sections/{id}/` 子树，
+          **五个兄弟回 404、六个兄弟回 200 空**。调用方看到 200 空，
+          无法区分"这个路段没有宽度数据"和"根本没有这个路段"。
+
+        ★★ 这条判据在本文件里**早就写着**，只是漏了兄弟：
+          `samples_by_station` 对 `seg` 写着 ——
+            「空列表会被读成『这段在区间内没有数据』，而实际是『段名写错了』」
+          对 `seg` 用了，对 `section_id` **没有用**。同一个判断、同一段话、漏了一半。
+
+        ★★ `M6-api/app.py` 的 `/monitor-sections` 也写着同一条，并已照做：
+            「不先证明，写错一个 section_id 得到的是『没有数据』，
+              而不是『没有这个路段』—— 这正是本 feature 一路在挡的那类静默错。」
+          现在把这句从**一个端点**提升为**整棵子树的规则**。
+
+        ★ 为什么放在 M3 而不是 M6：M6 那层自己写着「本层只做两件事：
+          转发筛选参数、把 M3 的语义化异常翻成 HTTP。SQL 一律在 M3」。
+          判在 M3，**所有调用方**（网关、控制台、以后的 SDK）都拿到同一条保证；
+          判在 M6，每个新入口都要各自记得再判一次。
+
+        ★ 代价：每次取数多一次主键查询。**故意的** —— 它换来的是
+          "这个 section_id 到底存不存在"这个问题**只有一个答案**。
+        """
+        self.section(section_id)
+
     # ------------------------------------------------------- 域外只读参照表
     #: 本域**只读**引用的域外表（v0.6，契约变更工单 005）。
     #: 它们不在 `domain.tables` 里，所以走不了 `list_objects`/`count` —— 那是**故意**的。
@@ -749,6 +786,7 @@ class GeRepository(DomainRepository):
         ★★ 2026-10-14 加 `offset`，理由同 `passages`：原先只能取前 n 条，
           而 5000 的上限**不是**「能取多少」的旋钮 —— 第 5001 条永远取不到。
         """
+        self._require_section(section_id)
         return self._dao.query(self.STATIONS_SQL, {
             "sid": section_id, "from_km": from_km, "to_km": to_km,
             "integer_only": integer_only, "limit": limit, "offset": offset,
@@ -823,6 +861,7 @@ class GeRepository(DomainRepository):
 
     def alignment(self, section_id: int) -> dict[str, Any]:
         """某路段的平面线形：交点链 + 线形单元链（一次取回，前端不必拼两次）。"""
+        self._require_section(section_id)
         return {
             "section_id": section_id,
             "pis": self._dao.query(self.PIS_SQL, {"sid": section_id}),
@@ -851,6 +890,7 @@ class GeRepository(DomainRepository):
            变化点桩号（`.WID`/`.CTR`/`.SUP`/`.HDM`）不保证是 `station_sequence`
            的子集，挂 FK 会拒掉合法数据。
         """
+        self._require_section(section_id)
         return self._dao.query(self.WIDTHS_SQL, {"sid": section_id})
 
     def superelevation(self, section_id: int) -> list[dict[str, Any]]:
@@ -873,6 +913,7 @@ class GeRepository(DomainRepository):
 
         列序按教程 §13.5：土路肩 / 硬路肩 / 行车道 / 桩号 / 行车道 / 硬路肩 / 土路肩。
         """
+        self._require_section(section_id)
         return self._dao.query(self.SUPERELEV_SQL, {"sid": section_id})
 
     def completeness(self, section_id: int) -> dict[str, Any]:
@@ -1087,6 +1128,7 @@ class GeRepository(DomainRepository):
 
         越界不报错、返回空列表：**查询**不是**校验**。校验在导入侧（FR-006）。
         """
+        self._require_section(section_id)
         if from_km > to_km:
             raise ValueError(f"区间反了：from_km={from_km} > to_km={to_km}")
         return self._dao.query(self.ELEMENTS_BY_STATION_SQL, {
@@ -1101,6 +1143,7 @@ class GeRepository(DomainRepository):
         空列表会被读成「这段在区间内没有数据」，而实际是「段名写错了」。
         两者在下游是两回事：前者是数据缺口，后者是调用错误。
         """
+        self._require_section(section_id)
         if seg not in self.SAMPLE_ANCHORS:
             raise ValueError(
                 f"未知段 {seg!r}；可用：{sorted(self.SAMPLE_ANCHORS)}"
