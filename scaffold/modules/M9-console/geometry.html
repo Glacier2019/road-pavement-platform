@@ -48,6 +48,12 @@
   .badge.warn{background:#fff4e0;color:var(--warn)}
   .badge.bad{background:#fde8e6;color:var(--bad)}
   .muted{color:var(--muted)}
+  /* ★ 跨页深链用的那一列，以及被指着进来的那一行。 */
+  .xlink{color:var(--accent);text-decoration:none;font-weight:600}
+  .xlink:hover{text-decoration:underline}
+  tr.hit>td{background:#fff6d8;box-shadow:inset 0 0 0 2px #f0c000}
+  tr.hit>td:first-child{border-radius:6px 0 0 6px}
+  tr.hit>td:last-child{border-radius:0 6px 6px 0}
   .mono{font-family:var(--mono)}
   .empty{padding:22px 8px;color:var(--muted);text-align:center}
   #err{display:none;background:#fde8e6;border:1px solid #f5c2bd;color:var(--bad);
@@ -76,6 +82,8 @@
   <a href="/">首页</a>
   <a href="/tables">数据表盘点</a>
   <a href="/geometry" class="here">GE 道路几何</a>
+  <a href="/geo">区域帧</a>
+  <a href="/sim">三维起伏</a>
   <a href="/import">设计数据导入</a>
   <a href="/docs">接口文档</a>
 </nav>
@@ -199,12 +207,29 @@ async function api(path) {
   return r.json();
 }
 
-function table(el, cols, rows) {
+// rowId 可选：给每行一个 id，好让外页可以指着某一行进来（见 focusHashRow）。
+function table(el, cols, rows, rowId) {
   const t = document.getElementById(el);
   const head = "<tr>" + cols.map(c => "<th" + (c.num ? " class='num'" : "") + ">" + esc(c.t) + "</th>").join("") + "</tr>";
-  const body = rows.map(r => "<tr>" + cols.map(c =>
-    "<td" + (c.num ? " class='num'" : "") + ">" + (c.f ? c.f(r) : esc(r[c.k])) + "</td>").join("") + "</tr>").join("");
+  const body = rows.map(r => {
+    const rid = rowId ? rowId(r) : "";
+    return "<tr" + (rid ? " id='" + esc(rid) + "'" : "") + ">" + cols.map(c =>
+      "<td" + (c.num ? " class='num'" : "") + ">" + (c.f ? c.f(r) : esc(r[c.k])) + "</td>").join("") + "</tr>";
+  }).join("");
   t.innerHTML = head + body;
+}
+
+// ★ 深链的另一半：「区域帧」点选一段之后给的是 /geometry?s=…&#el-<seq>。
+//   表渲染完才找得到那一行，所以调用点放在 loadAlignment 末尾。
+//   找不到就**什么都不做** —— 链接可能来自旧数据，指错了不该让页面报错。
+function focusHashRow() {
+  const m = /^#el-(\d+)$/.exec(location.hash || "");
+  if (!m) return;
+  const tr = document.getElementById("el-" + m[1]);
+  if (!tr) return;
+  tr.scrollIntoView({ block: "center", behavior: "smooth" });
+  tr.classList.add("hit");
+  setTimeout(() => tr.classList.remove("hit"), 2600);
 }
 
 const LEVEL_CLASS = { L0: "bad", L1: "warn", L2: "ok", L3: "ok", L4: "ok" };
@@ -227,9 +252,15 @@ async function loadSections() {
     "<option value='" + s.id + "'>" + esc(s.section_name) + "　·　线 " + esc(s.line_code) +
     "　·　" + esc(s.start_station_text) + "–" + esc(s.end_station_text) +
     "　·　桩号 " + s.station_count + "</option>").join("");
-  const firstWithData = SECTIONS.find(s => s.station_count || s.pi_count || s.element_count) || SECTIONS[0];
-  sel.value = firstWithData.id;
-  await loadSection(firstWithData.id);
+  // ★ 深链：「GE 道路几何」可以被「区域帧」指着进来（?s=<section_id>）。
+  //   指的那一条不存在就退回默认 —— 而且**不报错**：
+  //   链接是别人给的，指错了不该让整页打不开。
+  const want = new URLSearchParams(location.search).get("s");
+  const target = (want && SECTIONS.find(s => String(s.id) === String(want)))
+    || SECTIONS.find(s => s.station_count || s.pi_count || s.element_count)
+    || SECTIONS[0];
+  sel.value = target.id;
+  await loadSection(target.id);
 }
 
 async function loadSection(id) {
@@ -435,13 +466,20 @@ async function loadAlignment(id) {
       { t: "起点 X / Y", num: true, f: r => num(r.start_x, 3) + " / " + num(r.start_y, 3) },
       { t: "终点 X / Y", num: true, f: r => num(r.end_x, 3) + " / " + num(r.end_y, 3) },
       { t: "起点方位角°", num: true, f: r => num(r.start_azimuth_deg, 6) },
-      { t: "终点方位角°", num: true, f: r => num(r.end_azimuth_deg, 6) }
-    ], els);
+      { t: "终点方位角°", num: true, f: r => num(r.end_azimuth_deg, 6) },
+      // ★ 深链的出发端：指到「区域帧」，并把那边的里程窗对准这一段的起点。
+      { t: "在区域帧里看", f: r =>
+          "<a class='xlink' href='/geo?u=" +
+          (Number(r.start_station_km) * 1000).toFixed(3) +
+          "'>对准这一段 →</a>" }
+    ], els, r => "el-" + r.element_seq);
     // 直线段不属于任何交点，这不是漏挂 —— 说清楚，免得看的人自己去怀疑数据
     document.getElementById("elnote").textContent = unattached
       ? "其中 " + unattached + " 条直线段未挂交点（直线不属于任何交点，正常）"
       : "全部线元都挂在某个交点上";
   }
+  // ★ 表刚渲染完才找得到 #el-<seq> 那一行，所以放在这里。
+  focusHashRow();
 }
 
 function wire() {

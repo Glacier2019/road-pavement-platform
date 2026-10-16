@@ -75,6 +75,8 @@
   <a href="/">首页</a>
   <a href="/tables" class="here">数据表盘点</a>
   <a href="/geometry">GE 道路几何</a>
+  <a href="/geo">区域帧</a>
+  <a href="/sim">三维起伏</a>
   <a href="/import">设计数据导入</a>
   <a href="/docs">接口文档</a>
 </nav>
@@ -268,6 +270,7 @@ function render(d) {
   //  而复核者拿 priority_keys 复算时对不上 —— 排序就不可证伪了。
   const ordered = (d.gaps_items || empty);
   $("emptyTbl").innerHTML = table(ordered, EMPTY_COLS);
+}
 
 async function loadDomains() {
   // 域代号→中文名从 /v1/catalog 取，**不在页面里再抄一份**：

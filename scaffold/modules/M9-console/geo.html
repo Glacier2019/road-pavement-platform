@@ -13,13 +13,27 @@
     --c-pick:#ff4d6d;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);
-       font:14px/1.6 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-  header{padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);
+       font:14px/1.6 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       display:flex;flex-direction:column}
+  header{padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel);
+         flex:0 0 auto}
   h1{margin:0 0 6px;font-size:17px;font-weight:600}
   .note{color:var(--dim);font-size:12.5px}
   .note b{color:var(--accent);font-weight:600}
-  main{display:flex;gap:0;height:calc(100vh - 132px);min-height:420px}
+  /* ★ 页导航。与 index.html 那条同序 —— 六页一套，谁也别漏。
+     ★ 顺带把 main 的高度改了：原先是 height:calc(100vh - 132px)。
+     那个 132 是照旧 header 量出来的；加一条导航就会把它顶破
+     —— 画布下半截被推到屏幕外，而且**不报错**。
+     改成 body 竖向 flex、main 撑满，这个魔数就没有了。 */
+  nav{display:flex;gap:2px;padding:0 22px;background:var(--panel);
+      border-bottom:1px solid var(--line);flex:0 0 auto}
+  nav a{display:block;padding:7px 11px;color:var(--dim);text-decoration:none;
+        font-size:12.5px;border-bottom:2px solid transparent}
+  nav a:hover{color:var(--fg)}
+  nav a.here{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+  main{display:flex;gap:0;flex:1 1 auto;min-height:420px}
   #left{flex:1 1 auto;position:relative;min-width:0;display:flex;flex-direction:column}
   canvas{display:block;width:100%;height:100%;cursor:crosshair}
   /* ★ 两张画布：上=平面线形（占满剩下的高），下=论文 (2.16) 直纹面（固定高）。
@@ -66,6 +80,11 @@
   #pop dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 10px}
   #pop dt{color:var(--dim)}
   #pop dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+  /* ★ 弹窗里那个跨页链接。弹窗整体是 pointer-events:none —— 不这样的话
+     它会挡住画布上的点选。所以链接得自己把指针接回来。 */
+  #pop a{pointer-events:auto;display:inline-block;margin-top:9px;
+         color:var(--accent);text-decoration:none;font-weight:600;font-size:12px}
+  #pop a:hover{text-decoration:underline}
   #err{display:none;padding:10px 12px;margin:10px 0;border-radius:5px;
        background:#3a1d22;border:1px solid #7a2f3a;color:#ffc9d1;font-size:12.5px}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12.5px}
@@ -103,6 +122,15 @@
     桩号与坐标的换算由 M6 提供，本页只取数与显示。
   </div>
 </header>
+<nav>
+  <a href="/">首页</a>
+  <a href="/tables">数据表盘点</a>
+  <a href="/geometry">GE 道路几何</a>
+  <a href="/geo" class="here">区域帧</a>
+  <a href="/sim">三维起伏</a>
+  <a href="/import">设计数据导入</a>
+  <a href="/docs">接口文档</a>
+</nav>
 
 <main>
   <div id="left">
@@ -755,6 +783,39 @@ function aimAt(u) {
   drawSurface();
 }
 
+// ★ 深链：/geo?u=<桩号米>。从「GE 道路几何」的线元表点过来时带这个参数。
+//   对准那一段，并把它的详情弹出来 —— 只挪窗口不弹详情的话，
+//   人还得自己在图上把是哪一段找出来，等于把活留回给看的人。
+function focusFromQuery() {
+  try {
+    const q = new URLSearchParams(location.search).get("u");
+    if (q === null || q === "") return;
+    const u = Number(q);
+    if (!isFinite(u) || !ROUTE || !ROUTE.elements.length) return;
+    // ★ 找不到就**什么都不做**。这里曾经退回第一段 —— 那是错的：
+    //   屏幕会把「第 1 段」的详情摆出来，而人是照着链接来的，
+    //   会以为看到的就是链接指的那一段。指错了宁可不动，也不许张冠李戴。
+    //   规矩与 focusHashRow 那边一致：找不到就当没这条链接。
+    // ★ 区间取**半开** [start, end)。线元表「在区域帧里看」那一列写的是本段**起点**桩号，
+    //   而起点桩号同时也正好等于上一段的终点。用闭区间的话，在那个边界上 find
+    //   会先撞见**上一段** —— 从第 25 段那行点进来，弹出来的却是第 24 段。
+    //   半开也是线形积分那道门的既定裁定：段边界归后段。
+    const el = ROUTE.elements.find(e => u >= e.start_station_m && u < e.end_station_m);
+    if (!el) return;
+    // ★ 窗心对准 u 本身，**不是**对准这一段的中间。段长 512 m 而窗只有 200 m 时，
+    //   对着段中点会把链接指的那个桩号整个推出窗外 ——
+    //   人照着链接来，屏幕上却根本看不见它指的位置。
+    aimAt(u);
+    const g = GEOM && GEOM.elements.find(g => g.el === el);
+    if (g) {
+      const p = g.pts[Math.floor(g.pts.length / 2)];
+      showPop(p[0], p[1], el);
+    }
+  } catch (e) {
+    // ★ 静默。这是一条便利，不是一条数据通路 —— 它出问题不该有任何可见后果。
+  }
+}
+
 /* ---------------------------------------------------------- 侧栏 */
 function fillMeta() {
   const b = ROUTE.bbox;
@@ -805,6 +866,9 @@ function segDist(px0, py0, px1, py1, x, y) {
   return Math.hypot(x - (px0 + t * dx), y - (py0 + t * dy));
 }
 
+// 当前选中的路段 id —— 跨页深链回「GE 道路几何」时要用它。
+function sid() { return SEC.value || ""; }
+
 function showPop(x, y, el) {
   const r = el.points[0];
   const len = el.end_station_m - el.start_station_m;
@@ -817,8 +881,16 @@ function showPop(x, y, el) {
     `<dt>半径</dt><dd>${el.radius_start_m ?? "∞（直线）"}</dd>` +
     `<dt>起点纬度</dt><dd>${r.lat_deg.toFixed(6)}</dd>` +
     `<dt>起点经度</dt><dd>${r.lon_deg.toFixed(6)}</dd>` +
-    `</dl>`;
+    `</dl>` +
+    // ★ 深链：这一段的原始数据在「GE 道路几何」里。带 ?s= 与 #el-，
+    //   那边会预选路段、滚到那一行并高亮。指错了也不报错，只是不高亮。
+    `<a href="/geometry?s=${encodeURIComponent(sid())}` +
+      `#el-${encodeURIComponent(el.element_seq)}">看这一段的数据 →</a>`;
   POP.style.display = "block";
+  // ★ 指针从画布挪到这个链接上时，画布的 mouseleave 会先开火 ——
+  //   不拦就会把弹窗收掉，链接在指尖底下消失。收弹窗改由链接自己做。
+  const a = POP.querySelector("a");
+  if (a) a.addEventListener("mouseleave", () => { POP.style.display = "none"; });
   const w = POP.offsetWidth, h = POP.offsetHeight;
   POP.style.left = Math.min(x + 14, CV.clientWidth - w - 6) + "px";
   POP.style.top = Math.max(6, Math.min(y - h / 2, CV.clientHeight - h - 6)) + "px";
@@ -841,7 +913,12 @@ CV.addEventListener("click", ev => {
     aimAt((best.g.el.start_station_m + best.g.el.end_station_m) / 2);
   } else POP.style.display = "none";
 });
-CV.addEventListener("mouseleave", () => { POP.style.display = "none"; });
+CV.addEventListener("mouseleave", ev => {
+  // ★ relatedTarget 落在弹窗里，说明指针是**挪进弹窗**，不是离开图。
+  //   这一条和 showPop 里挂的那个 mouseleave 是一对，缺一个链接就点不着。
+  if (ev.relatedTarget && POP.contains(ev.relatedTarget)) return;
+  POP.style.display = "none";
+});
 
 /* ---------------------------------------------------------- 启动 */
 SEC.addEventListener("change", () => loadSection().catch(e => fail(e.message)));
@@ -917,6 +994,10 @@ document.getElementById("w0").addEventListener("input", ev => {
     //   而那等于把**没去取**说成了**取不到**。
     await loadSurface();
   }
+  // ★ 深链刻意放在 try **外面**。它是一条尽力而为的便利：参数不认识、指错了、
+  //   或者这一小段自己哪天坏了，都不该让整页挂上「取数失败」——数据其实全取到了。
+  //   把便利的故障说成取数的故障，是另一种撒谎（和上面那条注释是同一个道理）。
+  focusFromQuery();
 })();
 </script>
 </body>

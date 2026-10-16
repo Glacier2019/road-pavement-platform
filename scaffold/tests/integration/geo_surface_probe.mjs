@@ -8,6 +8,8 @@
 // 不重写任何几何 —— 只为 document / canvas 提供桩，让原码原样执行。
 import fs from "node:fs";
 import vm from "node:vm";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BASE = "http://127.0.0.1:8024";
 const realFetch = globalThis.fetch;
@@ -64,9 +66,23 @@ globalThis.document = {
   createElement: (t) => el("new-" + t),
 };
 globalThis.window = { devicePixelRatio: 1, addEventListener() {} };
+// ★ 页面会读 location.search（跨页深链 /geo?u=…）。Node 的全局里**没有** location ——
+//   不补桩，页面里读它的那一段就会抛 ReferenceError。
+//   （URLSearchParams 是 Node 自带的，不用补。）
+globalThis.location = { search: "", hash: "" };
 globalThis.fetch = (u, o) => realFetch(u.startsWith("http") ? u : BASE + u, o);
 
-const src = fs.readFileSync("/data/cy/shujuku/.scratch/geo.js", "utf8");
+// ★ 页面源码从这里现抽 —— 早先这一行读的是 /data/cy/shujuku/.scratch/geo.js，
+//   那是个**没人管的临时文件**。后果有两个，都很难看：
+//   ① 探针会安安静静地测一个**旧版本**的页面，全绿也说明不了出货的那份是好的；
+//   ② 换台机器就根本跑不起来（那文件在本仓是未跟踪的）。
+//   改成从出货的 geo.html 里抽内联脚本 —— **测的就是出货的那段代码**。
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const HTML = path.resolve(HERE, "../../modules/M9-console/geo.html");
+const PAGE = fs.readFileSync(HTML, "utf8");
+const blocks = [...PAGE.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+if (!blocks.length) { console.error("✗ geo.html 里找不到内联 <script>"); process.exit(2); }
+const src = blocks.reduce((a, b) => (b.length > a.length ? b : a));
 vm.runInThisContext(src + `
 ;globalThis.__T = {
   loadSurface, drawSurface, rangeBox, surfBasis, SVIEW, WIN, syncWin, aimAt,

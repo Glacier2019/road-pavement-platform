@@ -104,6 +104,16 @@ function makeEnv(state) {
   const sandbox = {
     document,
     window: { devicePixelRatio: 1, addEventListener() {} },
+    // ★ 页面会读 location.search（跨页深链 /geo?u=…）。vm 的上下文里**既没有**
+    //   location 也没有 URLSearchParams —— 不补桩，页面读它的那一段就会抛
+    //   ReferenceError，而探针会把「桩没给」读成「页面坏了」。
+    //   （这不是假设：加了深链之后，探针正是这样偶发变红的。）
+    //   state.search / state.hash 让判据能把一条真深链喂进去。
+    location: {
+      get search() { return state.search || ""; },
+      get hash() { return state.hash || ""; },
+    },
+    URLSearchParams,
     fetch: fetchStub,
     setTimeout: (...a) => setTimeout(...a),
     clearTimeout: (...a) => clearTimeout(...a),
@@ -144,8 +154,8 @@ const meshUrl = (us) => us.filter((u) => /\/artifacts\/.*\.bin/.test(u));
 const routeUrl = (us) => us.filter((u) => /\/geo\/route\?step_m=/.test(u));
 
 /* ------------------------------------------------------------ 跑一次页面 */
-async function scenario(src, { failManifestAtReload = false } = {}) {
-  const state = { failManifest: false };
+async function scenario(src, { failManifestAtReload = false, search = "" } = {}) {
+  const state = { failManifest: false, search };
   const env = makeEnv(state);
   vm.runInContext(src + TEXPORT, env.ctx, { filename: "geo.html<inline>" });
   const T = env.sandbox.__T;
