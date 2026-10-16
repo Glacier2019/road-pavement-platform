@@ -82,6 +82,20 @@ gcc -O2 -I$OPENCRG/include -o crg_read_test crg_read_test.c \
 且只依赖 Python 标准库（`export_mesh.py` 亦然），可在任意目录直接运行。
 `chrono_to_wim.py` 是例外：它吃的是轮荷 CSV，且校验报文 schema 需要 `jsonschema`。
 
+**数学出了模块，只此一份。** `xsection.py`（横断面设计线）与 `alignment.py`
+（平面线形积分，论文 (2.15)）都**不做任何 I/O** —— `gen_crg.py` 调它们，
+契约测试也直接测它们。**测的就是出货的那段代码。**
+
+`alignment.py` 那条另有一层：`alignment_element` 里**存着**六个坐标列
+（`start_x/start_y/end_x/end_y/center_x/center_y`），而本目录**一列都没读**
+（积分从 `(0,0)` 起算，得到一条局部坐标的线）。于是同一条路有**两个独立来源** ——
+契约门就拿库坐标当见证：刚体配准后残差必须 < 1 mm（实测 0.471 mm）。
+见 `tests/contract/test_alignment_closure.py`。
+
+> ⚠ `alignment_element.csv`（本目录，gitignore）的**半径列用 `-1` 当 NULL 哨兵**。
+> 直接喂给 `curvature()` 会被当成真半径，把缓和曲线算成半径 1 m 的圆。
+> 读它时必须先把 `-1` 映射回 `None`；门里的 5a 第一项就是钉这件事。
+
 ### 给前端的抽稀网格（`export_viewer_mesh.py` → 交付目录）
 
 ```bash

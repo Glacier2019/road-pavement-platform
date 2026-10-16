@@ -15,6 +15,7 @@ import math, os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xsection as XS          # ★ 横断面数学的唯一实现处（契约测试直接测它）
+import alignment as AL         # ★ 平面线形积分的唯一实现处（论文 (2.15)，同上）
 
 DSN = ["docker", "exec", "rp-pg", "psql", "-U", "rp", "-d", "road_pavement", "-t", "-A", "-F", "|", "-c"]
 
@@ -31,19 +32,6 @@ for p in q("SELECT element_seq, element_type, start_station_km, end_station_km, 
            "end_azimuth_deg, radius_start_m, radius_end_m FROM alignment_element ORDER BY element_seq;"):
     E.append(dict(seq=int(p[0]), t=p[1], s0=f(p[2])*1000, s1=f(p[3])*1000,
                   az0=f(p[4]), az1=f(p[5]), r0=f(p[6]), r1=f(p[7])))
-
-def curvature(e):
-    """返回段内 κ(s)=k0+(k1-k0)s/L 的 (k0,k1,L)。方向由 Δazimuth 给出（半径列无符号）。"""
-    L = e["s1"] - e["s0"]
-    if e["t"] == "line":
-        return 0.0, 0.0, L
-    R = e["r0"] if e["r0"] is not None else e["r1"]
-    sign = 1.0 if e["az1"] > e["az0"] else -1.0
-    if e["t"] == "circular":
-        return sign/R, sign/R, L
-    if e["r0"] is None:      # 入口缓和 ∞ -> R
-        return 0.0, sign/R, L
-    return sign/R, 0.0, L    # 出口缓和 R -> ∞
 
 # ---------- 2. 纵断面（竖曲线为抛物线）----------
 V = []
@@ -156,36 +144,13 @@ S_TOTAL = E[-1]["s1"]
 N = int(round(S_TOTAL / STEP))          # 段数
 print("全长 %.6f m，0.1 m 步长 → %d 段，%d 点（含两端）" % (S_TOTAL, N, N+1), file=sys.stderr)
 
-# ★ 关键：以【全路线连续里程】为采样轴，段边界自然落在采样点上。
-#   若逐段 round(L/STEP)，零头被截掉，会少 1 点（58054 而非 58055）。
-NSEG = int(round(S_TOTAL / STEP))      # 58054 段
-U = [i * STEP for i in range(NSEG + 1)]  # 0.0 ... 5805.4
-U[-1] = S_TOTAL                          # 末点精确对齐全长
-
-def az_at(u):
-    """按里程查段，返回方位角 az(u)。"""
-    for e in E:
-        if e["s0"] <= u <= e["s1"]:
-            k0, k1, LL = curvature(e)
-            s = u - e["s0"]
-            return math.radians(e["az0"]) + k0*s + (k1-k0)*s*s/(2*LL)
-    return math.radians(E[-1]["az1"])
-
-# 用梯形积分沿连续里程推进坐标
-pts = []
-x = y = 0.0
-for i in range(NSEG + 1):
-    u = U[i]
-    if i == 0:
-        pts.append((u, 0.0, 0.0, az_at(0.0)))
-        continue
-    u0, u1 = U[i-1], U[i]
-    h = u1 - u0
-    a0, a1 = az_at(u0), az_at(u1)
-    am = az_at((u0+u1)/2.0)
-    # Simpson 更准，但 0.1 m 下梯形已足够；用中点法保证结构对称
-    x += h*math.cos(am); y += h*math.sin(am)
-    pts.append((u, x, y, a1))
+# ★ 平面坐标的积分在 `alignment.py`（论文 (2.15) 前两个积分）。
+#   2026-10-16 之前它写在本文件里，而**没有任何测试 import 它** ——
+#   同一天手工对账证明积分是对的（对库坐标残差 0.471 mm），但手工对账不留痕。
+#   门在 tests/contract/test_alignment_closure.py。
+#   采样轴是【全路线连续里程】，不是逐段：逐段 round(L/STEP) 会截掉零头，
+#   少 1 点（58054 而非 58055）。
+pts = AL.integrate(E, STEP)
 
 # 起点作为 (0,0)，把坐标整体平移
 xs = [p[1] for p in pts]; ys = [p[2] for p in pts]
