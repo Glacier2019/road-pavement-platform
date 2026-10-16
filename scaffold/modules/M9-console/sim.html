@@ -87,6 +87,8 @@
 <header>
   <h1>三维起伏 · 路面局部帧</h1>
   <a href="/">← 回管理台</a>
+  <span id="fx" style="color:#8b949e;font-size:12px">曲面 = 论文 (2.16) 直纹面
+    <code>Σ: r(l,w) = r(l) + w·N_l^rot</code></span>
   <span id="status">正在载入…</span>
 </header>
 
@@ -129,6 +131,18 @@
     <div class="note">
       车辆实长 4.6 m，鸟瞰下不到 1 px。符号倍数**常驻显示**，
       它放大的是符号，不是路，也不是纵坡。
+    </div>
+  </div>
+
+  <div class="panel" id="xsbox">
+    <div class="row"><b>横断面设计线 N<sub>l</sub><sup>rot</sup></b>
+      <span class="note" id="xs-u" style="margin-left:auto">—</span></div>
+    <canvas id="xs" style="width:100%;height:132px;display:block"></canvas>
+    <div class="note" id="xs-note">—</div>
+    <div class="note">
+      ★ 3D 视图里这条路只有约 2 px 宽，断面形状看不出来，所以单画一张。
+      数据不新增：网格的 9 个横向采样点里已含全部折点（0 / ±3.50 / ±4.25），
+      所以这条折线是<b>精确</b>的，不是近似。
     </div>
   </div>
 
@@ -607,6 +621,73 @@ function bindInteraction() {
 
 function hideProbe() { document.getElementById("probe").style.display = "none"; }
 
+// ---------------------------------------------------------------- 横断面设计线
+// ★ 这条折线就是论文 (2.16) 的直母线 N_l^rot —— 本页的 3D 面由它沿准线 Γ 扫出。
+// ★ 数据**不新增**：网格的 nv 个横向采样点已含全部三个折点
+//   （v=0 / ±3.50 / ±4.25），断面在这三点之间是直线段，
+//   所以采样点连成的折线与真值**逐点相同**，不是近似。
+const XS_VSPAN = 0.60;      // 竖向半幅（m）。全超高实测落差约 0.495 m，留余量。
+function drawCrossSection(iU) {
+  const cv = document.getElementById("xs");
+  if (!cv) return;
+  const m = S.meta, vs = m && m.vSamples;
+  if (!m || !m.pos || !vs) return;
+  const nv = m.nv;
+  const i = Math.max(0, Math.min(m.nu - 1, iU | 0));
+  const zs = [];
+  for (let j = 0; j < nv; j++) zs.push(m.pos[(i * nv + j) * 3 + 2]);
+  const zc = zs[4];                       // 列 4 = 中线 v = 0
+  const dz = zs.map(z => z - zc);
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = cv.clientWidth || 300, H = cv.clientHeight || 132;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  const padL = 34, padR = 10, padT = 10, padB = 16;
+  const x0 = padL, x1 = W - padR, y0 = padT, y1 = H - padB;
+  const vmin = vs[0], vmax = vs[nv - 1];
+  const px = v => x0 + (v - vmin) / (vmax - vmin) * (x1 - x0);
+  const py = d => (y0 + y1) / 2 - d / XS_VSPAN * (y1 - y0) / 2;
+
+  g.strokeStyle = "#30363d"; g.lineWidth = 1;
+  for (const d of [-0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6]) {
+    const y = py(d);
+    g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+  }
+  g.strokeStyle = "#484f58"; g.setLineDash([2, 3]);
+  for (const v of [vmin, -3.5, 0, 3.5, vmax]) {
+    g.beginPath(); g.moveTo(px(v), y0); g.lineTo(px(v), y1); g.stroke();
+  }
+  g.setLineDash([]);
+
+  g.strokeStyle = "#58a6ff"; g.lineWidth = 2; g.beginPath();
+  for (let j = 0; j < nv; j++) {
+    const X = px(vs[j]), Y = py(dz[j]);
+    if (j) g.lineTo(X, Y); else g.moveTo(X, Y);
+  }
+  g.stroke();
+  g.fillStyle = "#58a6ff";
+  for (let j = 0; j < nv; j++) { g.beginPath(); g.arc(px(vs[j]), py(dz[j]), 2.4, 0, 7); g.fill(); }
+
+  g.fillStyle = "#8b949e"; g.font = "10px system-ui,sans-serif";
+  g.fillText("+0.6 m", 2, y0 + 8);
+  g.fillText("−0.6 m", 2, y1);
+  g.fillText(vmin.toFixed(2), x0 - 6, H - 4);
+  g.fillText("0", px(0) - 2, H - 4);
+  g.fillText("+" + vmax.toFixed(2), x1 - 26, H - 4);
+
+  const kz = ((x1 - x0) / (vmax - vmin)) / ((y1 - y0) / (2 * XS_VSPAN));
+  const drop = Math.max.apply(null, dz) - Math.min.apply(null, dz);
+  const eu = document.getElementById("xs-u");
+  if (eu) eu.textContent = "桩号 " + (i * m.uStep).toFixed(1) + " m";
+  const en = document.getElementById("xs-note");
+  if (en) en.textContent = "竖向放大 " + kz.toFixed(1) + "×（只作用于本图，不是纵坡）"
+    + "　横向极差 " + (drop * 1000).toFixed(0) + " mm";
+}
+
 // 沿程查询：把中线顶点投到屏幕，取离光标最近的那个。
 // ★ 这条路在鸟瞰下只有约 2 px 宽，中线就是它在屏幕上的全部 ——
 //   所以屏幕空间最近中线点等价于"点到哪一段路"，而且不需要空间索引。
@@ -648,6 +729,7 @@ function probeAt(e) {
       : "轮荷 " + load.toFixed(3) + " kN") + "<br>" +
     "曲率 " + (curv * 1000).toFixed(3) + " ‰/m";
   el.style.display = "block";
+  drawCrossSection(best);
   el.style.left = Math.min(e.clientX - rect.left + 14, rect.width - 220) + "px";
   el.style.top = Math.max(4, e.clientY - rect.top - 10) + "px";
 }
@@ -754,6 +836,9 @@ async function boot() {
     uStep: pick.mesh.u_step_m,
     vSamples: pick.mesh.v_samples_m || [-4.25, -3.5, -2.625, -1.75, 0, 1.75, 2.625, 3.5, 4.25],
   };
+  // ★ 默认断面选在**全超高**段（实测 1464.0 m 处横坡达 ±6%）。
+  //   路拱段横坡只有 2%，断面几乎是一条平线，看不出形状。
+  drawCrossSection(Math.round(1463.2 / S.meta.uStep));
 
   // —— 网格范围与真尺度比值（只算一次，读数与提示语共用）
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
