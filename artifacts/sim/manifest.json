@@ -1,6 +1,6 @@
 {
   "version": "artifact_manifest.v0.1",
-  "generated_at": "2026-10-15T16:32:49.594822+08:00",
+  "generated_at": "2026-10-16T12:39:55.514389+08:00",
   "producer": {
     "module": "simulator/crg",
     "note": "export_viewer_mesh.py 从 route_0p1m.crg 抽稀出两档 LOD"
@@ -9,6 +9,22 @@
     "kind": "local",
     "crs_ready": true,
     "crs_assumed": false
+  },
+  "crg": {
+    "file": "route_0p1m.crg",
+    "bytes": 101077078,
+    "md5": "3a44a646e2a8a9a318548ba106e80701",
+    "u_start_m": 0.0,
+    "u_end_m": 5805.421,
+    "u_increment_m": 0.1,
+    "v_right_m": -4.25,
+    "v_left_m": 4.25,
+    "v_increment_m": 0.1,
+    "v_channels": 86,
+    "z_min_m": 53.9791,
+    "z_max_m": 83.8131,
+    "z_scope": "全分辨率曲面：58055 站 × 86 通道 = 4992730 个高程取极值",
+    "unit_note": "u 沿路里程、v 横向（中线为原点，向右为正），单位均为米"
   },
   "artifacts": [
     {

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import math
 import pathlib
@@ -227,6 +228,46 @@ def build_lod(
     return positions, indices, nu, nv, stride * du
 
 
+def _crg_facts(crg: pathlib.Path, v_channels: int, zrows: list[list[float]]) -> dict:
+    """把 CRG 头部事实抄成**已跟踪**的清单字段。
+
+    ★ 为什么必须抄：CRG 是 .gitignore 的（101 MB，可重生成）。
+      `specs/003/spec.md` 那四条声明（u 范围 / v 范围 / 网格步长 / v 通道数）
+      在别人克隆仓库之后**没有任何东西可以核** —— 那是一个永远找不到靶子的门，
+      而「找不到靶子」和「找到了、没问题」在退出码上看不出区别。
+      抄进清单之后，那四条有了锚，且锚随生成器一起更新。
+
+    md5 的用处：**只改了 CRG、忘了重跑本脚本**时，清单里的 md5 会和实物对不上。
+    这正是「页面没变」那类问题的一种。bytes 不够，因为改动可以等长。
+    """
+    head = parse_header(crg)
+    h = hashlib.md5()
+    with crg.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 22), b""):
+            h.update(chunk)
+    # ★ 全分辨率的曲面高程范围。抽稀网格**给不出这个** ——
+    #   两档 LOD 的 u 步长是 4.0 / 1.0 m，最低点不一定落在采样桩号上。
+    #   （2026-10-16 实测：4 m 网格给 53.9985，真值见下。）
+    #   所以范围这条声明的锚是**这里**，不是那两个 .bin。
+    z_all = [z for row in zrows for z in row]
+    return {
+        "file": crg.name,
+        "bytes": crg.stat().st_size,
+        "md5": h.hexdigest(),
+        "u_start_m": float(head["REFERENCE_LINE_START_U"]),
+        "u_end_m": float(head["REFERENCE_LINE_END_U"]),
+        "u_increment_m": float(head["REFERENCE_LINE_INCREMENT"]),
+        "v_right_m": float(head["LONG_SECTION_V_RIGHT"]),
+        "v_left_m": float(head["LONG_SECTION_V_LEFT"]),
+        "v_increment_m": float(head["LONG_SECTION_V_INCREMENT"]),
+        "v_channels": int(v_channels),
+        "z_min_m": min(z_all),
+        "z_max_m": max(z_all),
+        "z_scope": f"全分辨率曲面：{len(zrows)} 站 × {v_channels} 通道 = {len(z_all)} 个高程取极值",
+        "unit_note": "u 沿路里程、v 横向（中线为原点，向右为正），单位均为米",
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="CRG → 抽稀三维网格")
     ap.add_argument("crg", type=pathlib.Path)
@@ -363,6 +404,12 @@ def main() -> int:
             "crs_ready": crs_ready,
             "crs_assumed": crs_assumed,
         },
+        # ★ CRG 本身是 .gitignore 的（101 MB，可重生成），所以 specs/ 里
+        #   「CRG u 范围 / v 范围 / 网格步长 / v 通道数」这四条声明
+        #   在别人克隆仓库之后**根本没有东西可以核**。
+        #   把头部事实抄进**已跟踪**的清单，那四条才有锚。
+        #   （2026-10-16：此前这四条声明从未与任何实物比对过。）
+        "crg": _crg_facts(args.crg, nv_chan, zrows),
         "artifacts": entries,
     }
     mpath = args.out / "manifest.json"
