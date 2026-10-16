@@ -38,6 +38,9 @@
   #surfctl input[type=range]{width:132px;padding:0;vertical-align:middle}
   #surfctl select{width:auto;padding:2px 6px;font-size:11.5px}
   #surfctl #winlb{color:#8b97a6}
+  #surfhd #surfnote{margin-left:auto}
+  #surfgen{color:#8fd3ff;font-variant-numeric:tabular-nums}
+  #rlnote{margin-left:8px;font-size:11.5px;color:#8b97a6}
   #cv3{height:auto;flex:1 1 auto;min-height:0;cursor:grab}
   #side{flex:0 0 336px;border-left:1px solid var(--line);background:var(--panel);
         overflow:auto;padding:14px 16px}
@@ -109,6 +112,7 @@
     <div id="surf">
       <div id="surfhd">
         <b>论文 (2.16) 直纹面</b>
+        <span id="surfgen"></span>
         <code>Σ: r(l,w) = r(l) + w·N<sub>l</sub><sup>rot</sup></code>
         <span id="surfnote">正在取曲面…</span>
       </div>
@@ -145,6 +149,7 @@
     </div>
     <div class="ctl">
       <button id="reload">重新取数</button>
+      <span id="rlnote"></span>
     </div>
     <div id="err"></div>
 
@@ -195,7 +200,20 @@ const DASH  = { line: [], circular: [], transition: [7, 5] };
 const WIDTH = { line: 2.0, circular: 3.0, transition: 2.4 };
 
 let ROUTE = null;      // 最近一次取回的路线
+let ROUTE_AT = null;   // 上一次取回路线的时刻（面板要照实说数据是几点取的）
 let GEOM = null;       // 屏幕几何（供点击命中用）
+
+// ISO 串或 Date → 本地 "YYYY-MM-DD HH:MM:SS"。
+// ★ 先把小数位截到 3 位：ISO 8601 的 Date Time String Format 只认 3 位。
+//   V8 容忍 6 位（manifest 的 generated_at 就带 6 位），别的引擎可能直接 NaN。
+function localStamp(t) {
+  const d = (t instanceof Date) ? t
+          : new Date(String(t).replace(/(\.\d{3})\d+/, "$1"));
+  if (isNaN(d)) return String(t);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 
 function fail(msg) {
   ERR.style.display = "block";
@@ -242,6 +260,7 @@ async function loadSections() {
 /* ---------------------------------------------------------- 取路线 */
 async function loadRoute() {
   clearFail();
+  ROUTE_AT = new Date();
   const sid = SEC.value;
   const step = Math.max(1, Math.min(1000, Number(STEP.value) || 20));
   document.getElementById("disclaim").style.display = "block";
@@ -324,9 +343,15 @@ async function loadXsecs() {
   }
 }
 
-async function loadSection() {
+async function loadSection(fresh) {
   await loadRoute();
   await loadXsecs();
+  // ★ 曲面也属「这一页显示的东西」——「重新取数」必须带上它。
+  //   2026-10-16 之前它不在这里：按了按钮曲面纹丝不动，而按钮**没有任何反馈**，
+  //   于是「没重新取」和「取了没变」长得一模一样。
+  //   它自带 try/catch（取不到只写 surfnote、不往外抛），
+  //   所以放最后不会拖累平面图和断面。
+  await loadSurface(fresh);
 }
 
 /* ---------------------------------------------------------- 画 */
@@ -625,15 +650,30 @@ function drawSurface() {
   SCTX.restore();
 }
 
-async function loadSurface() {
+async function loadSurface(fresh) {
   const note = document.getElementById("surfnote");
+  const gen = document.getElementById("surfgen");
+  // ★ 先清空。取失败时**宁可空着**，也不能留着上一次的时刻 ——
+  //   那就是"旧值假装新值"，正是这一轮要修的那类毛病。
+  gen.textContent = "";
+  // ★ 手动重取时挂一个查询串。清单与网格的响应里**没有** Cache-Control、
+  //   没有 ETag、没有 Last-Modified（实测过），浏览器于是按启发式缓存。
+  //   不挂这一下，按钮会"按了没反映"——而真因是**根本没有重新取**。
+  const bust = fresh ? `?t=${Date.now()}` : "";
   try {
-    const d = await getJSON(SURF_ENTRY);
-    const arts = ((d.manifest || d).artifacts) || [];
+    const d = await getJSON(SURF_ENTRY + bust);
+    const M = d.manifest || d;
+    const arts = M.artifacts || [];
+    // ★ 把产物的**生成时间**摆在标题旁。2026-10-16 之前页面上没有任何时刻，
+    //   于是"曲面是几点的数据"只能靠猜 —— 而它和上方平面图（实时读库）
+    //   本来就不是同一代，并排放着却不说明，正是最容易被误读的地方。
+    gen.textContent = M.generated_at
+      ? `产物生成于 ${localStamp(M.generated_at)}`
+      : "清单未给生成时间";
     const meshes = arts.filter(a => a.kind === "terrain_mesh" && a.present !== false);
     const a = meshes.find(x => /overview/.test(x.name)) || meshes[0];
     if (!a) throw new Error("清单里没有 terrain_mesh");
-    const r = await fetch(`/artifacts/${a.name}`);
+    const r = await fetch(`/artifacts/${a.name}${bust}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const dec = decodeMesh(await r.arrayBuffer(), a.mesh);
     const uStep = a.mesh.u_step_m || 4;
@@ -642,7 +682,7 @@ async function loadSurface() {
     // ★ 路长取清单里那条 crg.u_end_m（它已被 test_spec_limits_truth 核过），
     //   不取网格最后一行 —— 网格是 4 m 一格铺出去的，比路多出 2.6 m，
     //   拿网格当路长，里程窗会滑到没有路面的地方去。
-    SURF.uEnd = Number(((d.manifest || d).crg || {}).u_end_m) || 0;
+    SURF.uEnd = Number((M.crg || {}).u_end_m) || 0;
     SVIEW.zoom = 1;
 
     // ★ 默认视向不能随便取。正对着路的走向看，5.8 km 缩成一条细带；
@@ -731,7 +771,8 @@ function fillMeta() {
     <dt>东西跨距</dt><dd>${de.toFixed(3)} km</dd>
     <dt>纬度范围</dt><dd>${b.lat_min.toFixed(5)} .. ${b.lat_max.toFixed(5)}</dd>
     <dt>经度范围</dt><dd>${b.lon_min.toFixed(5)} .. ${b.lon_max.toFixed(5)}</dd>
-    <dt>来源</dt><dd>${ROUTE.source}</dd>`;
+    <dt>来源</dt><dd>${ROUTE.source}</dd>
+    <dt>取出时刻</dt><dd>${ROUTE_AT ? localStamp(ROUTE_AT) : "—"}</dd>`;
 }
 
 function fillTable() {
@@ -804,8 +845,27 @@ CV.addEventListener("mouseleave", () => { POP.style.display = "none"; });
 
 /* ---------------------------------------------------------- 启动 */
 SEC.addEventListener("change", () => loadSection().catch(e => fail(e.message)));
-document.getElementById("reload").addEventListener("click",
-  () => loadSection().catch(e => fail(e.message)));
+
+// ★ 按钮必须**回话**。原先按下去界面上什么动静都没有 ——
+//   曲面本来就没参与，平面图没变也不说一声，
+//   于是「成功了」和「点了没反应」在屏幕上是同一幅画面。
+//   回话只说**这一次动作发生在几点**；三个面板各自的状态由它们自己报
+//   （曲面面板现在会写自己的产物生成时间，取不到也会写明）。
+const RL = document.getElementById("reload");
+const RLNOTE = document.getElementById("rlnote");
+RL.addEventListener("click", async () => {
+  RL.disabled = true;
+  RLNOTE.textContent = "取数中…";
+  try {
+    await loadSection(true);   // true = 绕过浏览器缓存，真的重新取
+    RLNOTE.textContent = `已重新取数 ${localStamp(new Date())}`;
+  } catch (e) {
+    RLNOTE.textContent = "";
+    fail(e.message);
+  } finally {
+    RL.disabled = false;
+  }
+});
 window.addEventListener("resize", () => { draw(); drawSurface(); });
 
 // ---- 曲面：拖动转、滚轮缩、滑块放大竖向
@@ -848,13 +908,15 @@ document.getElementById("w0").addEventListener("input", ev => {
 (async () => {
   try {
     await loadSections();
-    await loadSection();
+    await loadSection();          // 含曲面
   } catch (e) {
     fail(`取数失败：${e.message}`);
+    // ★ 上面半路抛了，曲面就还没取到。曲面与"选中哪个路段"无关 ——
+    //   它只覆盖有 CRG 的那一条路线，所以这里仍然要补一次。
+    //   不补的话它会永远停在「正在取曲面…」，
+    //   而那等于把**没去取**说成了**取不到**。
+    await loadSurface();
   }
-  // ★ 曲面与"选中哪个路段"无关 —— 它只覆盖有 CRG 的那一条路线。
-  //   所以单独取、单独失败：平面图不该被它拖下水。
-  loadSurface();
 })();
 </script>
 </body>
