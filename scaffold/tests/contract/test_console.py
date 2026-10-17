@@ -1,10 +1,25 @@
 """M9 平台管理台（集成面）契约测试 —— 五件套第 5 件。
 
-运行（离线可跑，不连数据库、不连容器、不连外网）：
+运行（离线可跑，不连数据库、不连容器、不连外网；需要 `node`，见第 0 组）：
   cd /data/cy/shujuku/scaffold
+  export PYTHONPATH="$PWD/modules/_shared${PYTHONPATH:+:$PYTHONPATH}"
   uv run --with fastapi --with httpx --with pyyaml python tests/contract/test_console.py
 
-本测试钉住四件事：
+  ★ 那行 PYTHONPATH 不能省。`jsonnum.py` 住在 `modules/_shared/`，
+    容器里由 Dockerfile 单独 COPY 进去，宿主机上只能靠 PYTHONPATH。
+    少了它会直接 `ModuleNotFoundError: No module named 'jsonnum'` ——
+    报的是「模块不存在」，看着像仓库里缺文件，其实只是路径没设。
+    `run_contract_tests.sh` 第 35 行设的就是它，所以走运行器遇不到。
+
+本测试钉住五件事：
+
+  0) **六个页面的内联脚本必须解析得过。** 这一条排在最前，因为它问的是
+     其它一切判断的**前提**：这页跑得起来吗。
+
+     ★ 2026-09-26 到 2026-10-17，`tables.html` 的 `render(d)` 少一个收尾大括号，
+     整段脚本解析不过，页面只吐一个空壳 —— 而本文件当时已有的**八十多条**
+     关于页面的断言**条条全绿**。因为它们全是对源码做**字符串 grep**，
+     而源码里那些字符串确实都在。**读文本读不出"这页不跑"。**
 
   1) **M9 不得直连数据库。** 这是三条数据硬线里的"读只经 M3 rpdao"。
      M9 的 compose 里刻意不给它 PG_DSN —— 但没有 DSN 不等于**做不到**：
@@ -30,7 +45,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -108,6 +126,91 @@ def main() -> int:
         else:
             print(f"  ✗ {label}" + (f"　{detail}" if detail else ""))
             fails.append(label)
+
+    # ================================================= 0) 页面得先跑得起来
+    # ★ 这一组排在最前，因为它问的是其它一切判断的**前提**：这页跑得起来吗。
+    #
+    #   此前没有一条判据问过这件事。本文件其余八十多条关于页面的断言，全是
+    #   对源码做**字符串 grep**（`'const GW = "/gw"' in 源码`、`"esc(" in 源码` …）。
+    #   源码里那些字符串确实都在 —— 哪怕整段脚本根本解析不过。
+    #
+    #   ⇒ 2026-09-26 到 2026-10-17，`tables.html` 的 `render(d)` 少一个收尾大括号，
+    #     页面只吐一个空壳，而**关于这一页的每一条断言都是绿的**。
+    #     读文本读不出「这页不跑」。
+    print("\n=== 0) 六个页面的内联脚本必须解析得过（其它一切判断的前提）===")
+
+    def _inline_scripts(html_text: str) -> list[tuple[bool, str]]:
+        """抽出页面里所有**内联** <script> 的正文，返回 (是否 module, 正文)。
+
+        ★ 跳过带 `src=` 的：那是外链脚本。本仓一张页面都不外链脚本。
+        """
+        _out: list[tuple[bool, str]] = []
+        for _attrs, _body in re.findall(r"<script([^>]*)>(.*?)</script>", html_text, re.S):
+            if "src=" in _attrs:
+                continue
+            _out.append(("module" in _attrs, _body))
+        return _out
+
+    _pages = sorted(M9_DIR.glob("*.html"))
+    ok("找得到控制台页面（找不到就等于什么都没验）", len(_pages) >= 6,
+       f"共 {len(_pages)} 张：{[p.name for p in _pages]}")
+
+    _node = shutil.which("node")
+    # ★ 没有 node 就**判红**，不跳过。这道门的全部价值就在于它真的去解析了；
+    #   装不了 node 而悄悄放行，就是本仓反复栽的那类**假绿**。
+    ok("环境里有 node（本组用它做真语法检查，不是假装检查）", _node is not None,
+       "PATH 里找不到 node")
+
+    if _node is not None:
+        with tempfile.TemporaryDirectory(prefix="m9-page-parse-") as _td:
+            _parsed = 0
+            for _p in _pages:
+                _scripts = _inline_scripts(_p.read_text(encoding="utf-8"))
+                if not _scripts:
+                    # ★ 抽不到不能当"没有脚本所以没事"。第 3 组已断言各页自包含
+                    #   含内联脚本；这里再挡一道：抽不到就什么都没验。
+                    ok(f"{_p.name} 的内联脚本解析得过", False,
+                       "一个内联脚本都没抽到 —— 抽不到就什么都没验")
+                    continue
+                for _i, (_ismod, _body) in enumerate(_scripts, 1):
+                    _f = pathlib.Path(_td) / f"{_p.stem}-{_i}.{'mjs' if _ismod else 'js'}"
+                    _f.write_text(_body, encoding="utf-8")
+                    _r = subprocess.run([_node, "--check", str(_f)],
+                                        capture_output=True, text=True, timeout=60)
+                    _err = (_r.stderr.strip().splitlines() or [""])[0]
+                    # ★ 报上字符数，不只是"通过"。抽到的脚本哪天变成 3 个字符，
+                    #   "通过"仍然是一句真话，却什么也没守住。
+                    ok(f"{_p.name} 第 {_i} 段内联脚本解析得过（{len(_body)} 字符）",
+                       _r.returncode == 0, _err[:200])
+                    _parsed += 1
+            ok("本组确实逐段解析过（不是空转）", _parsed >= len(_pages),
+               f"解析了 {_parsed} 段，页面 {len(_pages)} 张")
+
+            # —— 元测试 ①：抽取器本身得管用
+            _ok_sample = _inline_scripts('<html><script>function f(){ return 1; }</script></html>')
+            ok("元测试：抽取器抽得到内联脚本（不是摆设）",
+               len(_ok_sample) == 1 and "function f()" in _ok_sample[0][1],
+               f"抽到 {len(_ok_sample)} 段")
+            _ok_skip = _inline_scripts('<html><script src="x.js"></script></html>')
+            ok("元测试：带 src 的外链脚本不被当内联（不会误判）",
+               len(_ok_skip) == 0, f"抽到 {len(_ok_skip)} 段")
+
+            # —— 元测试 ②：★ 把真页面的收尾大括号拿掉，本组必须判红
+            #    这正是 tables.html 从 2026-09-26 死到 2026-10-17 的那个形状。
+            #    没有这一条，绿色只说明脚本跑完了，不说明它定得出靶子。
+            _tbl_js = _inline_scripts(
+                (M9_DIR / "tables.html").read_text(encoding="utf-8"))[0][1]
+            _cut = _tbl_js.rstrip()
+            _mi = _cut.rfind("}")
+            _mut = _cut[:_mi] + _cut[_mi + 1:]
+            _mf = pathlib.Path(_td) / "tables-mutant.js"
+            _mf.write_text(_mut, encoding="utf-8")
+            _mr = subprocess.run([_node, "--check", str(_mf)],
+                                 capture_output=True, text=True, timeout=60)
+            ok("元测试：把 tables.html 收尾的大括号拿掉，必须判红（重现死页那个形状）",
+               _mr.returncode != 0 and len(_mut) == len(_cut) - 1,
+               f"returncode={_mr.returncode}；"
+               f"变异后 {len(_mut)} 字符（原 {len(_cut)}）")
 
     # ------------------------------------------------- 1) 不直连数据库
     print("=== 1) M9 不得直连数据库（三条硬线之「读只经 M3 rpdao」）===")
@@ -580,7 +683,10 @@ def main() -> int:
     #   · 只读挂载：容器必须**在结构上无法写**交付目录。写成 `:rw` 一切照常跑，
     #     没有任何东西会红，直到某天产物被容器改掉而没人知道是谁改的。
     print("\n=== 3f) 三维起伏页：白名单取数 + 交付目录只读 ===")
-    import tempfile
+    # ★ 这里原先有一句函数内的 `import tempfile`。它已挪到文件顶层（第 0 组要用）
+    #   —— 留在原处会出事：**函数里的一次赋值，让这个名字在整个函数内都算局部名**，
+    #   于是排在它前面的第 0 组引用 `tempfile` 就变成「先用后定义」，
+    #   报 UnboundLocalError。挪上去时必须把它删掉，不能只加不减。
 
     r = client.get("/sim")
     ok("/sim → 200 且是 HTML", r.status_code == 200 and "<title>" in r.text, f"{r.status_code}")

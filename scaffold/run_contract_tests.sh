@@ -93,7 +93,7 @@ TESTS=(
   #   两个数 MUST NOT 相等 —— 相等就说明又把「采样」当成了「桩号」。
   "采样|契约② FR-014：采样 ≠ 桩号（等间隔采样 vs 设计给的桩号集；线元终点读表那一列）|M3|DAO|tests/contract/test_sample_uniform.py"
   "design-导入|契约⑤：设计导入 IR + 纬地适配器 + 落库器（应通过/应拒绝两侧）|M2|PYDAO|tests/contract/test_design_import.py"
-  "m9-集成面|M9 集成面：页面只经 /gw 取数、不直连库、转发的边界（应通过/应拒绝两侧）|M9|CONSOLE|tests/contract/test_console.py"
+  "m9-集成面|M9 集成面：六个页面的内联脚本解析得过（第 0 组）+ 页面只经 /gw 取数、不直连库、转发的边界（应通过/应拒绝两侧）|M9|CONSOLE|tests/contract/test_console.py"
   "m1-装库一致|契约②补漏：全新装 DDL 与 DDL+migration 升级必须得到同一套 schema|M1/M3|DAO|tests/contract/test_ddl_migration_parity.py"
   "缺口归因|契约④：空表缺口归因（判定短路顺序 / 排序确定性 / 硬线）|M6|PY|tests/contract/test_gap_attribution.py"
   "交付物口径|契约⑤：图件/文档宣称的表数必须等于真源（含元测试）|全组|PY|tests/contract/test_deliverable_truth.py"
@@ -145,6 +145,13 @@ TESTS=(
   #   那一组检查"页面有没有越权、产物在不在"，这一组检查"页面的算术对不对"。
   #   `node --check` 只证明能被解析；页面里的解网格、算曲率、按里程取轮荷、
   #   投影求符号位置，是可以拿真实数据独立跑一遍的。
+  #
+  # ★ 上面这句话是对的，但它**不构成不做「解析」那一层的理由**。恰恰相反：
+  #   test_console.py 的第 0 组做的正是 `node --check`，因为解析是这一层**之下**的
+  #   前提。tables.html 从 2026-09-26 死到 2026-10-17（render 少一个收尾大括号），
+  #   那三周里**本文件所有 33 个门、以及 test_console.py 里八十多条页面断言，
+  #   条条全绿** —— 因为它们读的是源码文本，而文本里那些字符串确实都在。
+  #   ⇒ 两层不互相取代：第 0 组问「跑得起来吗」，这一组问「算得对吗」。
   "仿真页算术|003 页面内联脚本：网格解码/曲率/按里程取轮荷/投影符号位（真产物，无浏览器）|M9|NODE|tests/integration/sim_inline_script.mjs"
   # ★ v0.7 新增（宪法 1.1.1）。**这是本仓库唯一一条读 `.specify/` 的检查。**
   #   它钉的不是平台代码，是**流程自己**：宪法加了原则，模板与 plan 里必须产生新行。
