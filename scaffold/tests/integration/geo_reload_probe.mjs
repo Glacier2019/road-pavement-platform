@@ -28,8 +28,23 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HTML = path.resolve(HERE, "../../modules/M9-console/geo.html");
-const BASE = "http://127.0.0.1:8024";
+// ★ 上游地址只有一个来源：CHECK_BASE_URL（见 scaffold/run_checks.sh）。
+//   原先这里写死 127.0.0.1:8024 —— 换台机器就得改源码，那不叫能跑。
+const BASE = process.env.CHECK_BASE_URL || "http://127.0.0.1:8024";
 const realFetch = globalThis.fetch;
+
+/* ------------------------------------------------------------ 前置：活栈 */
+// ★★ 三态退出码的第 2 位：**没跑成**。
+//    栈没起时本检查什么都验不了。它必须说「我没跑」，而不是
+//    「我过了」（假绿）或「我挂了」（把环境问题报成代码问题）。
+//    run_checks.sh 把 2 认成 SKIP，且默认**算不通过**。
+try {
+  const r = await realFetch(`${BASE}/geo`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+} catch (e) {
+  console.error(`○ 没跑成：console 不可达（${BASE}）${e.message}`);
+  process.exit(2);
+}
 
 /* ------------------------------------------------------------ 取内联脚本 */
 function inlineScript() {

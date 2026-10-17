@@ -11,8 +11,23 @@ import vm from "node:vm";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const BASE = "http://127.0.0.1:8024";
+// ★ 上游地址只有一个来源：CHECK_BASE_URL（见 scaffold/run_checks.sh）。
+//   原先写死 —— 换台机器就得改源码，那不叫能跑。
+const BASE = process.env.CHECK_BASE_URL || "http://127.0.0.1:8024";
 const realFetch = globalThis.fetch;
+
+/* ------------------------------------------------------------ 前置：活栈 */
+// ★★ 三态退出码的第 2 位：**没跑成**。
+//    本检查把页面的内联脚本跑起来，而那段脚本会自己去 /gw 取数。
+//    栈没起时它取不到 —— 那**不是页面算错了**，是这里没跑成。
+//    混进 1（没过）会把环境问题报成代码问题；混进 0 就是假绿。
+try {
+  const r = await realFetch(`${BASE}/geo`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+} catch (e) {
+  console.error(`○ 没跑成：console 不可达（${BASE}）${e.message}`);
+  process.exit(2);
+}
 
 // ★ 每张画布各自记账。共用一份就等于把平面图和曲面图混在一起量。
 //   ★ 账本与代理必须一起存：只存账本而把代理交出去，探针拿到的就是账本，

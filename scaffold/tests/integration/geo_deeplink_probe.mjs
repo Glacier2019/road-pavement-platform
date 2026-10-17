@@ -20,7 +20,11 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIR = path.resolve(HERE, "../../modules/M9-console");
-const BASE = process.env.GEO_BASE || "http://127.0.0.1:8024";
+// ★ 上游地址**只有一个来源**：CHECK_BASE_URL。
+//   运行器 scaffold/run_checks.sh 负责它，用 --base-url 覆盖。
+//   默认值只是为了让「不走运行器、直接 node 这个文件」也能在我这台机器上跑；
+//   换台机器（或交给客户）时，**不许改源码**，给环境变量即可。
+const BASE = process.env.CHECK_BASE_URL || "http://127.0.0.1:8024";
 
 /* ------------------------------------------------------------ 页面源码 */
 function inlineScript(file) {
@@ -152,8 +156,10 @@ async function runGeometry(src, { search = "", hash = "", pre = [], waitRows = t
 const line = () => {};   // 分节标题。判据名自带 ①/② 前缀，留着只为读源码时顺眼。
 
 const t0 = Date.now();
+// ★ 措辞与退出码必须对上：这是**没跑成**（2），不是失败。
+//   原先这里打的是 ✗，读起来像「跑了没过」—— 而这两件事要分清是本轮的题目。
 try { await fetch(BASE + "/geo"); }
-catch (e) { console.error(`✗ console 没起（${BASE}）—— 本探针要它转发 /gw：${e.message}`); process.exit(2); }
+catch (e) { console.error(`○ 没跑成：console 不可达（${BASE}）${e.message}`); process.exit(2); }
 
 const geoHtml = inlineScript("geo.html");
 const geomHtml = inlineScript("geometry.html");

@@ -7,8 +7,14 @@
 // 目的：本模型看不了网页截图，但可以把「页面会画成什么样」用数据算出来。
 import fs from "node:fs";
 import vm from "node:vm";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = "/data/cy/shujuku";
+// ★ 从脚本自身位置推仓库根（原先是写死的 "/data/cy/shujuku"）。
+//   本文件在 scaffold/tests/integration/ ⇒ 上溯三级 = 仓库根。
+//   写死本机路径和写死 127.0.0.1 是同一类毛病：在别人机器上就不成立。
+//   sim_inline_script.mjs 早就这么改了，这里照抄。
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const html = fs.readFileSync(`${ROOT}/scaffold/modules/M9-console/geo.html`, "utf8");
 
 // 从源码里整段抠出一个函数，括号配对为止。
@@ -192,9 +198,21 @@ const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="${y + 
 ${parts.join("\n")}
 </svg>`;
 
-fs.writeFileSync(`${ROOT}/.amhome/pages/fig-geo-surf.svg`, svg);
+// ★ 产物路径可覆盖，且**自己建目录**。
+//   原先写死 `${ROOT}/.amhome/pages/fig-geo-surf.svg` —— 而 `.amhome` **不在 git 里**。
+//   换台机器（或交给客户）时那个目录不存在，这行直接 ENOENT 崩，
+//   而崩的原因跟被测的东西毫无关系。那不是「图算错了」，是「路径没建」。
+//   现在：CHECK_FIG_OUT 给路径，默认仍是原处；缺目录就建。
+const OUT = process.env.CHECK_FIG_OUT || `${ROOT}/.amhome/pages/fig-geo-surf.svg`;
+fs.mkdirSync(path.dirname(OUT), { recursive: true });
+fs.writeFileSync(OUT, svg);
 for (const s of stats) {
   console.log(`  ${s.tag.padEnd(34)} 路面 ${s.ribbon.toFixed(2).padStart(6)} px　` +
               `窗 ${F.kmTxt(s.uA)} – ${F.kmTxt(s.uB)}`);
 }
-console.log(`  svg ${svg.length} 字节`);
+// ★ 两个数都要说、都要带量的名字。
+//   原先写 `svg ${svg.length} 字节` —— 那是**误标**：svg.length 是字符数，
+//   落盘后是另一回事（中文一个字符 3 字节）。这正是本仓那条
+//   「两个不同的量不许长得像同一个量的两个数」。
+console.log(`  svg ${svg.length} 字符　${fs.statSync(OUT).size} 字节`);
+console.log(`  写到 ${OUT}`);
