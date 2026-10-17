@@ -249,8 +249,62 @@ def sec3():
     check(EXCUSED, "豁免表不该为空（为空说明有人把口子藏起来了）")
 
 
+# ------------------------------------------------------------------ §4 曲面模型
+# 003 spec 的「曲面模型」一节是**定义**，不是实测。它允许出现的小数只有
+# 论文式号；任何常数都必须留在唯一来源（横断面测试）里。
+_SURF_HEAD = "### 曲面模型：被观测的那个对象是什么"
+_ALLOWED_DECIMALS = {"2.15", "2.16"}
+
+
+def _surface_section(text: str) -> str | None:
+    """截出「曲面模型」那一节：到下一个同级或更高级标题为止。"""
+    lines = text.splitlines()
+    depth = len(_SURF_HEAD) - len(_SURF_HEAD.lstrip("#"))
+    for i, ln in enumerate(lines):
+        if ln.strip() == _SURF_HEAD:
+            out = []
+            for nxt in lines[i + 1:]:
+                s = nxt.lstrip()
+                if s.startswith("#") and (len(s) - len(s.lstrip("#"))) <= depth:
+                    break
+                out.append(nxt)
+            return "\n".join(out)
+    return None
+
+
+def _stray_decimal(sec: str) -> list[str]:
+    return sorted(set(re.findall(r"\d+\.\d+", sec)) - _ALLOWED_DECIMALS)
+
+
+def sec4():
+    """曲面模型一节：定义可以写，常数不许复述。"""
+    spec = (SPECS / "003-local-terrain-viewer" / "spec.md").read_text(encoding="utf-8")
+    sec = _surface_section(spec)
+    if not check(sec is not None, "003 spec 里应有「曲面模型」一节"):
+        return
+
+    # (a) 公式必须在。定义节里没有定义，那就只是一段散文。
+    check("r(l, w) = r(l) + w" in sec, "曲面模型一节应写出直纹面公式 Σ")
+
+    # (b) 不许放 limits 围栏 —— 定义不是实测，塞进围栏就得配核对者。
+    check("```limits" not in sec, "曲面模型一节不许放 limits 围栏（定义不是实测）")
+
+    # (c) ★ 核心：不许复述常数。复述一次就多一个会烂的副本，
+    #     而副本烂掉时不会报错 —— 这正是 D-034 那一类。
+    stray = _stray_decimal(sec)
+    check(not stray, "曲面模型一节不许复述常数（唯一来源是横断面测试）",
+          f"多出的小数：{stray}")
+
+    # (d) 元测试：往那一节塞一个常数，(c) 必须立刻红。
+    #     没有这一条，(c) 只是「我数过一遍」，不是门。
+    mutated = spec.replace(_SURF_HEAD, _SURF_HEAD + "\n\n顺手记个 0.0621。", 1)
+    check(mutated != spec, "元测试失效：找不到可注入的位置")
+    stray2 = _stray_decimal(_surface_section(mutated) or "")
+    check(bool(stray2), "元测试失效：塞进常数后竟然没被认出来")
+
+
 def main() -> int:
-    for fn in (sec0, sec1, sec2, sec3):
+    for fn in (sec0, sec1, sec2, sec3, sec4):
         before = len(FAILED)
         fn()
         mark = "✓" if len(FAILED) == before else "✗"
@@ -272,7 +326,7 @@ def main() -> int:
             print(f"      - {m}")
         return 1
     print("  ✓ 声明与实物：全部相符")
-    print("     §0 靶子存在 · §1 逐条比对 · §2 元测试 · §3 豁免具名")
+    print("     §0 靶子存在 · §1 逐条比对 · §2 元测试 · §3 豁免具名 · §4 定义不复述常数")
     return 0
 
 
